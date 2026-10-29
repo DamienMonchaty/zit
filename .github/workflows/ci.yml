@@ -20,9 +20,19 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+      - name: Install Zig
+        env:
+          ZIG: "0.16.0"
+          SHA: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        run: |
+          curl -sSfL "https://ziglang.org/download/$ZIG/zig-x86_64-linux-$ZIG.tar.xz" -o zig.tar.xz
+          echo "$SHA  zig.tar.xz" | sha256sum -c -
+          tar xf zig.tar.xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-$ZIG" >> "$GITHUB_PATH"
+      - uses: actions/cache@v6
         with:
-          version: 0.16.0
+          path: ~/.cache/zig
+          key: zig-linux-${{ hashFiles('build.zig.zon') }}
       # The tests make commits in throwaway repositories.
       - run: |
           git config --global user.name "Zit CI"
@@ -39,8 +49,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+      - name: Install Zig
+        env:
+          ZIG: "0.16.0"
+          SHA: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
+        run: |
+          Invoke-WebRequest "https://ziglang.org/download/$env:ZIG/zig-x86_64-windows-$env:ZIG.zip" -OutFile zig.zip
+          if ((Get-FileHash zig.zip -Algorithm SHA256).Hash -ne $env:SHA) { throw "Zig's checksum does not match" }
+          Expand-Archive zig.zip -DestinationPath $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP\zig-x86_64-windows-$env:ZIG" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - uses: actions/cache@v6
         with:
-          version: 0.16.0
+          path: ~\AppData\Local\zig
+          key: zig-windows-${{ hashFiles('build.zig.zon') }}
       # The test suite drives `sh`, so on Windows the check is that Zit builds.
       - run: zig build
