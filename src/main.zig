@@ -8273,6 +8273,14 @@ fn tabList() void {
         r.w -= used;
         setWindowDrag(r);
     }
+    // The active tab's foot only where the strip shows the tab: scrolled
+    // part out of sight, the rest of it is under the buttons after the tabs.
+    defer if (active_tab_foot) |*foot| {
+        const view = scroll.data().contentRectScale().r;
+        const left = @max(foot.x, view.x);
+        foot.w = @max(0, @min(foot.x + foot.w, view.x + view.w) - left);
+        foot.x = left;
+    };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false });
     defer row.deinit();
     const width = TAB_W;
