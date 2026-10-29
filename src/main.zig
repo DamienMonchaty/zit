@@ -10795,7 +10795,9 @@ fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
     bw.init(@src(), .{ .draw_focus = false }, .{
         // Local branches by name, so a test can find the row to drag.
         .tag = if (ref.kind == .local) ref.name else null,
-        .expand = .horizontal,
+        // The whole line, so the name is centred on it like the eye and the ⋯
+        // beside it, not on a button as high as its text sitting at the top.
+        .expand = .both,
         .background = false,
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(0),
