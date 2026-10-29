@@ -42,16 +42,14 @@ const fonts: []const dvui.Font.Source = &.{
 
 /// Type scale. Kept tight: this is a dense tool, not a document reader.
 pub const size = struct {
-    // Inter sets larger than Fira at the same size — a taller x-height — so
-    // the scale sits half a point under where Fira's did.
+    // Inter has a tall x-height, so the scale sits half a point small.
     pub const tiny: f32 = 9.5;
     pub const small: f32 = 10.5;
     pub const body: f32 = 12;
     pub const section: f32 = 10;
     pub const title: f32 = 12.5;
     pub const mono: f32 = 11;
-    /// Tab names keep the size the rest of the UI came down from: they are
-    /// read from across the window, not scanned in a list.
+    /// Tab names: read from across the window, not scanned in a list.
     pub const tab: f32 = 11;
     /// The commit list: six things a row, thousands of rows. Its own size so
     /// it can be dense without shrinking every other panel with it.
@@ -107,8 +105,7 @@ pub fn tiny() dvui.Font {
     return .find(.{ .family = UI_FAMILY, .size = size.tiny, .line_height_factor = 1.1 });
 }
 
-/// Panel headers ("Collections", "Environments"). Small and bold beats large
-/// and light for a sidebar.
+/// Panel headers. Small and bold beats large and light for a sidebar.
 pub fn section() dvui.Font {
     return .find(.{ .family = UI_FAMILY, .size = size.section, .weight = .bold });
 }
@@ -136,8 +133,6 @@ pub const space = struct {
 };
 
 pub const radius = struct {
-    /// One radius, everywhere something is a control or a card — 6px, as in
-    /// the mockup. Retune here, not at call sites.
     /// Text inputs, small buttons.
     pub const input = dvui.CornerRect.all(6);
     /// List rows, tag headers, menu items.
@@ -224,7 +219,7 @@ pub const ThemeFile = struct {
 };
 
 /// Resolved palette, kept around because `dvui.Theme` has nowhere to store the
-/// app's own roles (secondary text, method hues, ...).
+/// app's own roles (secondary text, the git hues, ...).
 pub const Palette = struct {
     dark: bool = true,
 
@@ -291,12 +286,12 @@ pub fn background() dvui.Color {
     return palette.background;
 }
 
-/// Raised container: side panel, editor card, response card.
+/// Raised container: side panel, cards.
 pub fn surface() dvui.Color {
     return palette.surface;
 }
 
-/// Recessed container: text inputs, the body editor and the response body.
+/// Recessed container: text inputs.
 /// Not `surface_input`, which is also what a raised card is: a field on a
 /// card would vanish into it. The app's ground either way: white on light,
 /// the darker step on dark.
@@ -455,8 +450,6 @@ pub fn apply(file: ThemeFile, theme_name: []const u8, dark: bool) void {
     const foreground_c = toColor(file.foreground.value);
     const text_c = toColor(file.text.value);
 
-    // Every optional key now has a home; previously six of them were parsed and
-    // dropped on the floor while the UI faked them with inline `.lighten()`.
     palette = .{
         .dark = dark,
         .background = background_c,

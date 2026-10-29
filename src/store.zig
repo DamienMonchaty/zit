@@ -29,9 +29,7 @@ pub const File = struct {
     groups: []const Group = &.{},
     active_group: usize = 0,
     active_repo: usize = 0,
-    /// Which of the two compiled-in themes to start in. Here rather than in a
-    /// settings file of its own: there is one preference, and this file is
-    /// already the answer to "what did they have last time".
+    /// Which of the two compiled-in themes to start in.
     dark: bool = true,
     /// Repositories that were open once and whose tab has since been closed,
     /// newest first. Closing a tab is not forgetting the repository.
@@ -159,10 +157,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) Loaded {
 
 /// Write the workspace into `dir`, creating the directory if it is not there.
 ///
-/// Best effort and silent: this runs on every tab change, and a config
-/// directory that cannot be written is not worth interrupting someone's work
-/// over — they came here to use git.
-/// Write `file` out. False when it could not be: the caller tries again.
+/// Silent: this runs on every tab change, and a config directory that cannot
+/// be written is not worth interrupting someone's work over. False when it
+/// could not be written: the caller tries again.
 pub fn save(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, file: File) bool {
     // Indented rather than minified. It is a config file, and the first thing
     // anyone does with one of those is open it.

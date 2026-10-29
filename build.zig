@@ -79,7 +79,6 @@ pub fn build(b: *std.Build) !void {
     // the machine is needed. Windows needs nothing beyond what Windows 10
     // ships.
     const dist_step = b.step("dist", "Build release executables for Linux and Windows");
-    //
     // A Linux executable carries no icon — the desktop finds one through a
     // `.desktop` entry and the icon theme — so Linux ships as a folder and a
     // .tar.gz of it: the binary, its icons, its menu entry and an

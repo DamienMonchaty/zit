@@ -309,8 +309,8 @@ test "output past the limit is cut, not lost, and does not hang the call" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
-    // Megabytes on both streams: before, the first one past its limit was
-    // thrown away whole, and the other was never read, so this never returned.
+    // Megabytes on both streams: both must be read to their end past the
+    // limits, or this never returns.
     const loud = "yes | head -c 3000000 >&2; yes | head -c 3000000; exit 1";
     var outcome = try exec(gpa, io, ".", &.{ "sh", "-c", loud }, null);
     defer outcome.deinit(gpa);
@@ -373,7 +373,7 @@ pub const Job = struct {
 
     /// True when there was no concurrency to be had and the command ran on the
     /// calling thread after all. The work still happens; the window just stops
-    /// for its duration, the way it did before any of this existed.
+    /// for its duration.
     inline_run: bool,
 
     pub const Options = struct {
@@ -457,9 +457,6 @@ pub const Job = struct {
     }
 };
 
-/// A program run to its end on another thread for what it prints: a read
-/// whose answer may land frames later — a search, a call to GitHub. Every
-/// argument is copied, as for a `Job`.
 /// Called by a worker thread when it has finished — a `Job`, a `Capture`, any
 /// of the others that answer a frame later — so the window draws the answer
 /// now, rather than at the next thing that wakes it. Null until the app sets
@@ -470,6 +467,9 @@ pub fn wakeUp() void {
     if (wake) |w| w();
 }
 
+/// A program run to its end on another thread for what it prints: a read
+/// whose answer may land frames later — a search, a call to GitHub. Every
+/// argument is copied, as for a `Job`.
 pub const Capture = struct {
     gpa: std.mem.Allocator,
     /// Owns `argv` and `cwd`.

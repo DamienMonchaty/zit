@@ -9,12 +9,11 @@
 //! 3. Gravatar, by the md5 of the lower-cased address.
 //!
 //! Fetched by `curl` rather than `std.http`: it already knows the user's
-//! proxy and CA settings — asking GitHub as Zit's own sign-in, `github.zig` —
-//! and one picture at a time off
-//! the UI thread is all this needs. A miss everywhere is remembered as an
-//! empty `<hash>.miss` beside the pictures, so it costs one lookup ever. A
-//! failure that is not a miss — offline, a timeout — stops the lookups until
-//! the app closes.
+//! proxy and CA settings, and one picture at a time off the UI thread is all
+//! this needs. GitHub is asked as Zit's own sign-in (`github.zig`). A miss
+//! everywhere is remembered as an empty `<hash>.miss` beside the pictures, so
+//! it costs one lookup ever. A failure that is not a miss — offline, a
+//! timeout — stops the lookups until the app closes.
 //!
 //! Every lookup tells GitHub or Gravatar which author is being looked at.
 //! With the GitHub switch off (`use_github`), only Gravatar is asked.

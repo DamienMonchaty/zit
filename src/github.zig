@@ -1,6 +1,6 @@
-//! GitHub, spoken to directly — the way GitKraken does — rather than through
-//! `gh`: Zit's own sign-in (OAuth's device flow: a code to type on github.com,
-//! nothing to install) and its own token, then the REST and GraphQL APIs.
+//! GitHub, spoken to directly: Zit's own sign-in (OAuth's device flow: a code
+//! to type on github.com, nothing to install) and its own token, then the REST
+//! and GraphQL APIs.
 //!
 //! Every request is `curl`, already what fetches the pictures, so there is no
 //! TLS here. The token never reaches a command line: it lives in a file of
@@ -339,8 +339,6 @@ test "the device flow's answers" {
     try std.testing.expectEqual(Poll.denied, parsePoll(a.allocator(), "{\"error\":\"access_denied\"}"));
 }
 
-// Naming the account once GitHub has said whose the token is must leave the
-// token alone: it once wrote an empty one over it.
 test "the token outlives naming its account" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
