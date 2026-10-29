@@ -6,6 +6,8 @@ Every release of Zit, newest first. Downloads are on the
 ## Unreleased
 
 ### Fixed
+- The first tab starts at the window's edge, and the active tab is joined to the
+  bar below it, with no line between.
 - In the sidebar, a branch's name is centred on its row, level with the eye and
   the ⋯.
 - On Windows, console windows no longer flash open each time Zit runs `git` or
