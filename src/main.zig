@@ -100,8 +100,9 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null,
 };
 
-/// From `build.zig.zon`, through `build.zig`.
-const APP_VERSION = @import("build_options").version;
+/// From `build.zig.zon`, through `build.zig`; printed so that it is
+/// zero-terminated, as SDL takes it and as a literal would be.
+const APP_VERSION = std.fmt.comptimePrint("{s}", .{@import("build_options").version});
 
 /// How often the working tree is re-read, so a file you changed in your editor
 /// shows up without you asking.
