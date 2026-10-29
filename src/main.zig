@@ -4239,8 +4239,15 @@ fn requestList() void {
             .padding = .{ .x = style.space.sm, .y = style.space.sm, .w = style.space.sm, .h = style.space.xs },
         });
         defer head.deinit();
-        // The way back, said where the eye is, not only on the tab.
-        if (chipButton(@src(), dvui.entypo.chevron_left, "Back to the history — Esc", false)) closePulls();
+        // The way back, said where the eye is, not only on the tab. On a row of
+        // its own: a chip centres itself, and in this column it would sit
+        // under the filters.
+        {
+            var top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
+            defer top.deinit();
+            if (chipButton(@src(), dvui.entypo.chevron_left, "History — Esc", false)) closePulls();
+            dvui.label(@src(), "Pull requests", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
+        }
         // The filters, each with how many it holds.
         {
             var tabs = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
