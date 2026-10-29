@@ -78,7 +78,7 @@
 - Pull requests in full: files, commits, checks, reviews, threads
 - Create, check out, review, comment, approve, merge, auto-merge
 - Re-run failed checks; browse issues
-- Sign in with a code on github.com, or a personal token
+- Sign in with a code on github.com
 
 **Conflicts**
 - Both sides side by side, region by region: ours, theirs, or both
@@ -130,13 +130,10 @@ the author pictures and the GitHub integration.
 
 ## GitHub
 
-Open **Settings › GitHub** and choose **Connect GitHub**:
+Open **Settings › GitHub** and choose **Connect GitHub**: Zit shows a code,
+opens github.com, and you approve it there. Nothing else to install.
 
-- **Sign in with a code** — Zit shows a code, opens github.com, you approve.
-- **Use a token** — paste a personal access token (classic: `repo` and
-  `read:org` scopes). Useful when an organisation has not approved Zit yet.
-
-The token is stored in Zit's config folder, readable by you alone, and is only
+The token GitHub gives back is stored in Zit's config folder, readable by you alone, and is only
 ever sent to `api.github.com`. Turning **Use GitHub** off removes pull
 requests, issues and checks everywhere, and Zit sends nothing to GitHub.
 
