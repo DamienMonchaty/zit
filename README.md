@@ -163,6 +163,12 @@ The UI is [dvui](https://github.com/david-vanderson/dvui) on SDL3.
 SDL_VIDEODRIVER=dummy zig build test   # the whole suite, no display needed
 ```
 
+## Contributing
+
+Bug reports, ideas and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+What changed in each version is in the [changelog](CHANGELOG.md), and security
+problems are reported privately as described in [SECURITY.md](SECURITY.md).
+
 ## Privacy
 
 Zit has no server and collects nothing: see the [privacy policy](PRIVACY.md).
