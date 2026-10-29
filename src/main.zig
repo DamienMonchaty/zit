@@ -16021,13 +16021,16 @@ fn statusBar() void {
         statusStat(@src(), dvui.entypo.archive, h.stashes.len, "stash", "stashes");
     }
 
-    // What is running, or what failed: the one line about the last command,
-    // on a pill of its colour.
+    // What is running, and what failed: the one line about the last command,
+    // on a pill of its colour. Both at once: a job clears the line as it
+    // starts, so a failure beside it came after — a click refused because
+    // it is running, say — and would otherwise sit unseen behind it.
     if (job != null) {
         statusPill(@src(), style.accent(), dvui.entypo.cycle, job_label, "…");
     } else if (api_job != null) {
         statusPill(@src(), style.accent(), dvui.entypo.cycle, api_label, "…");
-    } else if (command_error) |message| {
+    }
+    if (command_error) |message| {
         statusPill(@src(), style.danger(), dvui.entypo.warning, firstLine(message), "");
         if (iconButton(@src(), "dismiss_error", "Dismiss", dvui.entypo.cross, style.textMuted())) {
             clearCommandError();
