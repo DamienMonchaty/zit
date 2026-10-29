@@ -163,6 +163,13 @@ fn addZit(
 
     exe.root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
 
+    // The version the app shows is the one in build.zig.zon, read here: the
+    // release workflow already checks that against the tag, so the two cannot
+    // drift apart.
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    exe.root_module.addOptions("build_options", version_options);
+
     // Zig 0.16's translate-c chokes on MinGW's fortified string functions —
     // the `wcscat_s` wrappers `_FORTIFY_SOURCE` switches on in optimised
     // builds come out as Zig that does not compile. They are never called

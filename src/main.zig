@@ -100,7 +100,9 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null,
 };
 
-const APP_VERSION = "0.1.1";
+/// From `build.zig.zon`, through `build.zig`; printed so that it is
+/// zero-terminated, as SDL takes it and as a literal would be.
+const APP_VERSION = std.fmt.comptimePrint("{s}", .{@import("build_options").version});
 
 /// How often the working tree is re-read, so a file you changed in your editor
 /// shows up without you asking.
@@ -9462,6 +9464,13 @@ fn textField(src: std.builtin.SourceLocation, init_opts: dvui.TextEntryWidget.In
     S.ringless.focus = .transparent;
     var with = opts;
     with.theme = &S.ringless;
+    // dvui sizes a single line from its own default font, whatever `.font`
+    // says: a smaller one sits at the top of a field too tall for it. The
+    // width is kept as dvui makes it; the height is the font's own line.
+    if (!init_opts.multiline and opts.min_size_content == null) {
+        const dvui_min = dvui.TextEntryWidget.defaults.min_sizeM(dvui.TextEntryWidget.defaultMWidth, 1).min_size_contentGet();
+        with.min_size_content = .{ .w = dvui_min.w, .h = opts.fontGet().sizeM(1, 1).h };
+    }
     w.theme.focus = style.accent();
     defer w.theme.focus = .transparent;
     return dvui.textEntry(src, init_opts, with);
