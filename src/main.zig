@@ -8173,16 +8173,26 @@ fn tabStrip() void {
         .min_size_content = .{ .h = style.tab_height },
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
-        .padding = .{ .x = style.space.sm, .w = style.space.sm },
+        // Nothing on the left: the first tab starts at the window's edge.
+        .padding = .{ .w = style.space.sm },
         .margin = dvui.Rect.all(0),
     });
     defer strip.deinit();
 
+    active_tab_foot = null;
     tabList();
     pullsButton();
     userMenu();
     windowControls();
+
+    // The strip's hairline runs under every tab; the active one is joined to
+    // the bar below, so it is rubbed out there. After the tabs, which the
+    // scroll area clips to the strip's inside, and so cannot reach it.
+    if (active_tab_foot) |foot| foot.fill(.{}, .{ .color = .{ .color = style.surface() }, .fade = 0 });
 }
+
+/// The strip's bottom hairline under the active tab, as last drawn.
+var active_tab_foot: ?dvui.Rect.Physical = null;
 
 // === The window's own frame ===
 //
@@ -8292,6 +8302,14 @@ fn tabList() void {
         r.w -= used;
         setWindowDrag(r);
     }
+    // The active tab's foot only where the strip shows the tab: scrolled
+    // part out of sight, the rest of it is under the buttons after the tabs.
+    defer if (active_tab_foot) |*foot| {
+        const view = scroll.data().contentRectScale().r;
+        const left = @max(foot.x, view.x);
+        foot.w = @max(0, @min(foot.x + foot.w, view.x + view.w) - left);
+        foot.x = left;
+    };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false });
     defer row.deinit();
     const width = TAB_W;
@@ -8836,7 +8854,10 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
         .padding = .{ .w = style.space.xs },
     });
     defer face.deinit();
-    rect_out.* = face.data().borderRectScale().r;
+    const face_rs = face.data().borderRectScale();
+    rect_out.* = face_rs.r;
+    // The hairline below it, less the 1 px edge on its right.
+    if (active) active_tab_foot = .{ .x = face_rs.r.x, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - face_rs.s, .h = face_rs.s };
 
     var bw: dvui.ButtonWidget = undefined;
     var id_buf: [16]u8 = undefined;
