@@ -29,7 +29,7 @@
 ## Why Zit
 
 - **Native and light.** One executable, drawn on the GPU. It redraws only when
-  something changes, and stays around 56 MB of memory with a 3,000-commit
+  something changes, and stays around 60 MB of memory with a 4,000-commit
   repository open.
 - **Everything a day of Git needs.** History, staging line by line, branches,
   rebases, conflicts, stashes, worktrees — without a terminal.
@@ -162,6 +162,10 @@ The UI is [dvui](https://github.com/david-vanderson/dvui) on SDL3.
 ```sh
 SDL_VIDEODRIVER=dummy zig build test   # the whole suite, no display needed
 ```
+
+## Privacy
+
+Zit has no server and collects nothing: see the [privacy policy](PRIVACY.md).
 
 ## License
 

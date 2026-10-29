@@ -17,6 +17,7 @@
 //! the app closes.
 //!
 //! Every lookup tells GitHub or Gravatar which author is being looked at.
+//! With the GitHub switch off (`use_github`), only Gravatar is asked.
 
 const std = @import("std");
 const run = @import("run.zig");
@@ -116,25 +117,28 @@ const Fetch = struct {
         defer self.done.store(true, .release);
         var url_buf: [512]u8 = undefined;
 
-        if (self.job.self) {
+        const ask_github = use_github.load(.acquire);
+        if (self.job.self and ask_github) {
             if (selfUrl(&url_buf)) |url| {
                 self.code = download(&self.hex, url);
                 if (self.code != 22) return;
             }
         }
-        if (noreplyUrl(&url_buf, self.job.key)) |url| {
-            self.code = download(&self.hex, url);
-            if (self.code != 22) return;
+        if (ask_github) {
+            if (noreplyUrl(&url_buf, self.job.key)) |url| {
+                self.code = download(&self.hex, url);
+                if (self.code != 22) return;
+            }
         }
         // No commit of theirs to ask about — a co-author, named only in a
         // trailer: GitHub's commit search finds the account by the address.
-        if (self.job.sha[0] == 0) {
+        if (ask_github and self.job.sha[0] == 0) {
             if (searchUrl(&url_buf, self.job.key)) |url| {
                 self.code = download(&self.hex, url);
                 if (self.code != 22) return;
             }
         }
-        if (github.items.len > 0 and self.job.sha[0] != 0) {
+        if (ask_github and github.items.len > 0 and self.job.sha[0] != 0) {
             switch (githubUrl(&url_buf, &self.job.sha)) {
                 .url => |url| {
                     self.code = download(&self.hex, url);
@@ -274,6 +278,10 @@ pub fn githubSlug(url: []const u8) ?[]const u8 {
     if (slash == 0 or slash + 1 >= rest.len or std.mem.indexOfScalar(u8, rest[slash + 1 ..], '/') != null) return null;
     return rest;
 }
+
+/// Whether GitHub may be asked at all — the integrations switch. Off, only
+/// Gravatar is: no `noreply` picture, no search, no commit lookup.
+pub var use_github: std.atomic.Value(bool) = .init(true);
 
 /// The repository commits are asked about. Applied between fetches, never
 /// under one.
