@@ -1708,6 +1708,7 @@ fn appDeinit(win: *dvui.Window) void {
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     signing_key.deinit(gpa);
+    if (signing_job) |j| j.deinit(app_io);
     clearRecent();
     recent.deinit(gpa);
     clearForget();
@@ -3432,7 +3433,9 @@ fn checkout(ref: git.Ref) void {
     // if there is not.
     const name = if (ref.kind == .remote) splitRemoteRef(ref.name).branch else ref.name;
 
-    request(&.{ "switch", name });
+    // A job, with its pill in the status bar: rewriting the working tree takes
+    // long enough on Windows to freeze the window if it is waited for here.
+    requestNetwork("Switching branch", &.{ "switch", name });
 }
 
 fn setCommandError(message: []const u8) void {
@@ -7258,22 +7261,23 @@ fn settingsDialog() void {
 
             // Whether anything can sign at all, before the switches that ask it to.
             {
+                const loading = !signing_loaded;
                 const ready = signing_key.items.len > 0;
                 var note = dvui.box(@src(), .{ .dir = .horizontal }, .{
                     .expand = .horizontal,
                     .background = true,
-                    .color_fill = .{ .color = if (ready) style.success().lerp(style.background(), 0.88) else style.get().orange.lerp(style.background(), 0.86) },
+                    .color_fill = .{ .color = if (loading) style.surfaceRaised() else if (ready) style.success().lerp(style.background(), 0.88) else style.get().orange.lerp(style.background(), 0.86) },
                     .corners = style.radius.input,
                     .padding = dvui.Rect.all(style.space.md),
                     .margin = .{ .h = style.space.md },
                 });
                 defer note.deinit();
-                dvui.icon(@src(), "sign_state", if (ready) dvui.entypo.check else dvui.entypo.warning, .{ .fill_color = .{ .color = if (ready) style.success() else style.get().orange } }, .{
+                dvui.icon(@src(), "sign_state", if (loading) dvui.entypo.cycle else if (ready) dvui.entypo.check else dvui.entypo.warning, .{ .fill_color = .{ .color = if (loading) style.textMuted() else if (ready) style.success() else style.get().orange } }, .{
                     .min_size_content = .{ .w = 14, .h = 14 },
                     .gravity_y = 0.5,
                     .margin = .{ .w = style.space.md },
                 });
-                dvui.label(@src(), "{s}", .{if (ready) "A signing key is set: commits and tags can be signed." else "No signing key set yet: git cannot sign until one is."}, .{
+                dvui.label(@src(), "{s}", .{if (loading) "Reading git's configuration…" else if (ready) "A signing key is set: commits and tags can be signed." else "No signing key set yet: git cannot sign until one is."}, .{
                     .font = style.small(),
                     .color_text = .{ .color = style.text() },
                     .gravity_y = 0.5,
@@ -7570,19 +7574,42 @@ var signing_loaded = false;
 var signing_format: []const u8 = "openpgp";
 var signing_key: std.ArrayList(u8) = .empty;
 
+/// The signing settings come from one `git` process on another thread: on
+/// Windows, starting git takes long enough that waiting for it here froze the
+/// window. Until it answers `signing_loaded` is false, and the page says so.
+var signing_job: ?*run.Capture = null;
+
 fn loadSigning() void {
     if (signing_loaded) return;
+    const job_now = signing_job orelse blk: {
+        const started = run.Capture.start(gpa, app_io, ".", &.{ "git", "config", "--global", "--get-regexp", "^(user\\.signingkey|gpg\\.format)$" }) catch {
+            // Nothing to show, and no use asking again every frame.
+            signing_loaded = true;
+            return;
+        };
+        signing_job = started;
+        break :blk started;
+    };
+    if (!job_now.finished()) return;
+    signing_job = null;
+    defer job_now.deinit(app_io);
+
     signing_loaded = true;
     signing_key.clearRetainingCapacity();
-    if (run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get", "user.signingkey" })) |answer| {
-        defer gpa.free(answer.out);
-        if (answer.ok) signing_key.appendSlice(gpa, answer.out) catch {};
-    } else |_| {}
     signing_format = "openpgp";
-    if (run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get", "gpg.format" })) |answer| {
-        defer gpa.free(answer.out);
-        if (answer.ok and std.mem.eql(u8, answer.out, "ssh")) signing_format = "ssh";
-    } else |_| {}
+    if (!job_now.ok) return;
+    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const value = std.mem.trim(u8, line[space + 1 ..], " ");
+        if (std.mem.eql(u8, line[0..space], "user.signingkey")) {
+            signing_key.clearRetainingCapacity();
+            signing_key.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, line[0..space], "gpg.format")) {
+            signing_format = if (std.mem.eql(u8, value, "ssh")) "ssh" else "openpgp";
+        }
+    }
 }
 
 /// `git config --global key value` — the empty value unsets it — then read
@@ -16742,6 +16769,7 @@ test "stage, commit and switch branches through the real git commands" {
     const branch = findRef("hello.txt") orelse return error.BranchNotListed;
     checkout(branch);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqualStrings("hello.txt", history.?.head.?);
     // The file is still there: this switched branch, it did not restore a path.
@@ -16751,6 +16779,7 @@ test "stage, commit and switch branches through the real git commands" {
     const main_branch = findRef("main") orelse return error.BranchNotListed;
     checkout(main_branch);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqualStrings("main", history.?.head.?);
 }
 
@@ -16823,6 +16852,8 @@ fn resetUiGlobals() void {
     signing_key.deinit(gpa);
     signing_key = .empty;
     signing_loaded = false;
+    if (signing_job) |j| j.deinit(app_io);
+    signing_job = null;
     sidebar_filter = .empty;
 
     clearRecent();
@@ -21172,6 +21203,7 @@ test "audit: the main controls do what they say when clicked" {
 
     // Double-click a branch to check it out.
     try doubleClickAt(try tagCenter("feature"));
+    try pumpJob();
     try std.testing.expectEqualStrings("feature", history.?.head.?);
 
     // The palette: Ctrl+P, a few letters, Enter.
