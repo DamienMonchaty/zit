@@ -45,6 +45,23 @@ If your change touches memory or speed, measure it as described in
 Keep a pull request to one change, describe what it does and how you tested
 it, and match the style of the code around it.
 
+## Releasing
+
+1. On `develop`, set the new version in `build.zig.zon` and `APP_VERSION` in
+   `src/main.zig`, and add its section to `CHANGELOG.md`.
+2. Merge `develop` into `main` through a pull request.
+3. Tag the merge and push the tag:
+   ```sh
+   git switch main && git pull
+   git tag v0.1.2 && git push origin v0.1.2
+   ```
+   The **Release** workflow builds Windows and Linux, writes `SHA256SUMS`
+   and publishes the release with that version's changelog.
+
+Every push and pull request runs the **CI** workflow: the Linux build and
+the whole test suite, and the Windows build. `main` only accepts a pull
+request once both pass.
+
 ## License
 
 By contributing, you agree that your contribution is licensed under the

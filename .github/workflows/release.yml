@@ -1,0 +1,60 @@
+name: Release
+
+# Push a tag such as v0.1.2 and this builds Zit for Windows and Linux,
+# checksums the files and publishes the release, its notes taken from
+# CHANGELOG.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: The tag matches the version in build.zig.zon
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -q "\.version = \"$version\"" build.zig.zon || {
+            echo "::error::build.zig.zon does not say version $version"
+            exit 1
+          }
+
+      - name: Build
+        run: zig build dist
+
+      - name: Checksums
+        working-directory: zig-out/dist
+        run: sha256sum zit-windows-x86_64.exe zit-linux-x86_64.tar.gz > SHA256SUMS
+
+      - name: Notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "Zit $version" > notes.md
+          printf '\n---\nVerify a download with `sha256sum -c SHA256SUMS --ignore-missing`.\n' >> notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Zit ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md \
+            --verify-tag --latest \
+            zig-out/dist/zit-windows-x86_64.exe \
+            zig-out/dist/zit-linux-x86_64.tar.gz \
+            zig-out/dist/SHA256SUMS

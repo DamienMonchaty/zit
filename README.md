@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/DamienMonchaty/zit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/DamienMonchaty/zit/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Linux" src="https://img.shields.io/badge/Linux-x86__64-8b5cf6">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-10%2B-8b5cf6">
   <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16-f7a41d">
