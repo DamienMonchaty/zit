@@ -1,0 +1,22 @@
+.{
+    .paths = .{
+        "src",
+        "build.zig",
+        "build.zig.zon",
+        "assets",
+    },
+    .fingerprint = 0x4570515f7301b337,
+    .name = .zit,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui#37d1f9421f382837bd744674e832cbd94b85038e",
+            .hash = "dvui-0.5.0-dev-AQFJmeBcAwHxF7Ya7a8fZQYHg7g4bAMA8HOpIU9N7LMp",
+        },
+        .libgit2 = .{
+            .url = "git+https://github.com/allyourcodebase/libgit2#ee14d04543ce7a1c152e071e29cdafb8fc4125f1",
+            .hash = "libgit2-1.9.0-uizqTX3cAAB_rhZNbFWFd0M4vTjD-NBtssjdi6Vt_00R",
+        },
+    },
+}

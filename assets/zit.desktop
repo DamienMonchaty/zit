@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Zit
+GenericName=Git Client
+Comment=Browse and commit to git repositories
+Exec=zit %f
+Icon=zit
+Terminal=false
+Categories=Development;RevisionControl;
+StartupWMClass=zit
