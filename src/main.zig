@@ -100,7 +100,9 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null,
 };
 
-const APP_VERSION = "0.1.1";
+/// From `build.zig.zon`, through `build.zig`; printed so that it is
+/// zero-terminated, as SDL takes it and as a literal would be.
+const APP_VERSION = std.fmt.comptimePrint("{s}", .{@import("build_options").version});
 
 /// How often the working tree is re-read, so a file you changed in your editor
 /// shows up without you asking.
@@ -1708,6 +1710,7 @@ fn appDeinit(win: *dvui.Window) void {
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     signing_key.deinit(gpa);
+    if (signing_job) |j| j.deinit(app_io);
     clearRecent();
     recent.deinit(gpa);
     clearForget();
@@ -3432,7 +3435,9 @@ fn checkout(ref: git.Ref) void {
     // if there is not.
     const name = if (ref.kind == .remote) splitRemoteRef(ref.name).branch else ref.name;
 
-    request(&.{ "switch", name });
+    // A job, with its pill in the status bar: rewriting the working tree takes
+    // long enough on Windows to freeze the window if it is waited for here.
+    requestNetwork("Switching branch", &.{ "switch", name });
 }
 
 fn setCommandError(message: []const u8) void {
@@ -7258,22 +7263,23 @@ fn settingsDialog() void {
 
             // Whether anything can sign at all, before the switches that ask it to.
             {
+                const loading = !signing_loaded;
                 const ready = signing_key.items.len > 0;
                 var note = dvui.box(@src(), .{ .dir = .horizontal }, .{
                     .expand = .horizontal,
                     .background = true,
-                    .color_fill = .{ .color = if (ready) style.success().lerp(style.background(), 0.88) else style.get().orange.lerp(style.background(), 0.86) },
+                    .color_fill = .{ .color = if (loading) style.surfaceRaised() else if (ready) style.success().lerp(style.background(), 0.88) else style.get().orange.lerp(style.background(), 0.86) },
                     .corners = style.radius.input,
                     .padding = dvui.Rect.all(style.space.md),
                     .margin = .{ .h = style.space.md },
                 });
                 defer note.deinit();
-                dvui.icon(@src(), "sign_state", if (ready) dvui.entypo.check else dvui.entypo.warning, .{ .fill_color = .{ .color = if (ready) style.success() else style.get().orange } }, .{
+                dvui.icon(@src(), "sign_state", if (loading) dvui.entypo.cycle else if (ready) dvui.entypo.check else dvui.entypo.warning, .{ .fill_color = .{ .color = if (loading) style.textMuted() else if (ready) style.success() else style.get().orange } }, .{
                     .min_size_content = .{ .w = 14, .h = 14 },
                     .gravity_y = 0.5,
                     .margin = .{ .w = style.space.md },
                 });
-                dvui.label(@src(), "{s}", .{if (ready) "A signing key is set: commits and tags can be signed." else "No signing key set yet: git cannot sign until one is."}, .{
+                dvui.label(@src(), "{s}", .{if (loading) "Reading git's configuration…" else if (ready) "A signing key is set: commits and tags can be signed." else "No signing key set yet: git cannot sign until one is."}, .{
                     .font = style.small(),
                     .color_text = .{ .color = style.text() },
                     .gravity_y = 0.5,
@@ -7570,19 +7576,42 @@ var signing_loaded = false;
 var signing_format: []const u8 = "openpgp";
 var signing_key: std.ArrayList(u8) = .empty;
 
+/// The signing settings come from one `git` process on another thread: on
+/// Windows, starting git takes long enough that waiting for it here froze the
+/// window. Until it answers `signing_loaded` is false, and the page says so.
+var signing_job: ?*run.Capture = null;
+
 fn loadSigning() void {
     if (signing_loaded) return;
+    const job_now = signing_job orelse blk: {
+        const started = run.Capture.start(gpa, app_io, ".", &.{ "git", "config", "--global", "--get-regexp", "^(user\\.signingkey|gpg\\.format)$" }) catch {
+            // Nothing to show, and no use asking again every frame.
+            signing_loaded = true;
+            return;
+        };
+        signing_job = started;
+        break :blk started;
+    };
+    if (!job_now.finished()) return;
+    signing_job = null;
+    defer job_now.deinit(app_io);
+
     signing_loaded = true;
     signing_key.clearRetainingCapacity();
-    if (run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get", "user.signingkey" })) |answer| {
-        defer gpa.free(answer.out);
-        if (answer.ok) signing_key.appendSlice(gpa, answer.out) catch {};
-    } else |_| {}
     signing_format = "openpgp";
-    if (run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get", "gpg.format" })) |answer| {
-        defer gpa.free(answer.out);
-        if (answer.ok and std.mem.eql(u8, answer.out, "ssh")) signing_format = "ssh";
-    } else |_| {}
+    if (!job_now.ok) return;
+    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const value = std.mem.trim(u8, line[space + 1 ..], " ");
+        if (std.mem.eql(u8, line[0..space], "user.signingkey")) {
+            signing_key.clearRetainingCapacity();
+            signing_key.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, line[0..space], "gpg.format")) {
+            signing_format = if (std.mem.eql(u8, value, "ssh")) "ssh" else "openpgp";
+        }
+    }
 }
 
 /// `git config --global key value` — the empty value unsets it — then read
@@ -8144,16 +8173,26 @@ fn tabStrip() void {
         .min_size_content = .{ .h = style.tab_height },
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
-        .padding = .{ .x = style.space.sm, .w = style.space.sm },
+        // Nothing on the left: the first tab starts at the window's edge.
+        .padding = .{ .w = style.space.sm },
         .margin = dvui.Rect.all(0),
     });
     defer strip.deinit();
 
+    active_tab_foot = null;
     tabList();
     pullsButton();
     userMenu();
     windowControls();
+
+    // The strip's hairline runs under every tab; the active one is joined to
+    // the bar below, so it is rubbed out there. After the tabs, which the
+    // scroll area clips to the strip's inside, and so cannot reach it.
+    if (active_tab_foot) |foot| foot.fill(.{}, .{ .color = .{ .color = style.surface() }, .fade = 0 });
 }
+
+/// The strip's bottom hairline under the active tab, as last drawn.
+var active_tab_foot: ?dvui.Rect.Physical = null;
 
 // === The window's own frame ===
 //
@@ -8251,6 +8290,9 @@ fn tabList() void {
         .expand = .horizontal,
         .background = false,
         .min_size_content = .{ .h = style.tab_height },
+        // Only the width the rest of the strip leaves: dvui asks for all of
+        // its content, which pushed the buttons after it out of the window.
+        .max_size_content = .width(0),
     });
     defer scroll.deinit();
     // What the tabs leave of the strip moves the window. Before the scroll
@@ -8263,6 +8305,14 @@ fn tabList() void {
         r.w -= used;
         setWindowDrag(r);
     }
+    // The active tab's foot only where the strip shows the tab: scrolled
+    // part out of sight, the rest of it is under the buttons after the tabs.
+    defer if (active_tab_foot) |*foot| {
+        const view = scroll.data().contentRectScale().r;
+        const left = @max(foot.x, view.x);
+        foot.w = @max(0, @min(foot.x + foot.w, view.x + view.w) - left);
+        foot.x = left;
+    };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false });
     defer row.deinit();
     const width = TAB_W;
@@ -8303,6 +8353,7 @@ fn tabList() void {
                 } else requestTab(.{ .select_in = .{ g, t } }),
                 .close => requestTab(.{ .close_in = .{ g, t } }),
             }
+            if (active) revealTab(flat, rect);
             tabMenu(g, t, flat, rect);
             flat += 1;
         }
@@ -8315,6 +8366,7 @@ fn tabList() void {
             .none, .select => {},
             .close => new_tab_open = false,
         }
+        revealTab(flat, rect);
     }
 
     if (iconButton(@src(), "tab_add", "New tab — Ctrl+T", dvui.entypo.plus, style.textMuted())) {
@@ -8325,6 +8377,18 @@ fn tabList() void {
     if (!std.meta.eql(tab_drop_over, tab_drop_seen)) dvui.refresh(null, @src(), null);
     tab_drop_over = tab_drop_seen;
     tab_drop_seen = null;
+}
+
+/// Where in the strip the active tab was last scrolled into sight.
+var tab_revealed: ?usize = null;
+
+/// Scroll the strip to the active tab when it changes: one switched to out
+/// of sight — Ctrl+Tab, the palette, a repository opened — comes into view.
+/// Only then, so the strip scrolled by hand stays where it was put.
+fn revealTab(at: usize, rect: dvui.Rect.Physical) void {
+    if (tab_revealed == at or rect.w <= 0) return;
+    tab_revealed = at;
+    dvui.scrollTo(.{ .screen_rect = rect });
 }
 
 /// Who commits from this machine, as git's global config says: read once,
@@ -8807,7 +8871,10 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
         .padding = .{ .w = style.space.xs },
     });
     defer face.deinit();
-    rect_out.* = face.data().borderRectScale().r;
+    const face_rs = face.data().borderRectScale();
+    rect_out.* = face_rs.r;
+    // The hairline below it, less the 1 px edge on its right.
+    if (active) active_tab_foot = .{ .x = face_rs.r.x, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - face_rs.s, .h = face_rs.s };
 
     var bw: dvui.ButtonWidget = undefined;
     var id_buf: [16]u8 = undefined;
@@ -9441,6 +9508,13 @@ fn textField(src: std.builtin.SourceLocation, init_opts: dvui.TextEntryWidget.In
     S.ringless.focus = .transparent;
     var with = opts;
     with.theme = &S.ringless;
+    // dvui sizes a single line from its own default font, whatever `.font`
+    // says: a smaller one sits at the top of a field too tall for it. The
+    // width is kept as dvui makes it; the height is the font's own line.
+    if (!init_opts.multiline and opts.min_size_content == null) {
+        const dvui_min = dvui.TextEntryWidget.defaults.min_sizeM(dvui.TextEntryWidget.defaultMWidth, 1).min_size_contentGet();
+        with.min_size_content = .{ .w = dvui_min.w, .h = opts.fontGet().sizeM(1, 1).h };
+    }
     w.theme.focus = style.accent();
     defer w.theme.focus = .transparent;
     return dvui.textEntry(src, init_opts, with);
@@ -10795,7 +10869,9 @@ fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
     bw.init(@src(), .{ .draw_focus = false }, .{
         // Local branches by name, so a test can find the row to drag.
         .tag = if (ref.kind == .local) ref.name else null,
-        .expand = .horizontal,
+        // The whole line, so the name is centred on it like the eye and the ⋯
+        // beside it, not on a button as high as its text sitting at the top.
+        .expand = .both,
         .background = false,
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(0),
@@ -15992,13 +16068,16 @@ fn statusBar() void {
         statusStat(@src(), dvui.entypo.archive, h.stashes.len, "stash", "stashes");
     }
 
-    // What is running, or what failed: the one line about the last command,
-    // on a pill of its colour.
+    // What is running, and what failed: the one line about the last command,
+    // on a pill of its colour. Both at once: a job clears the line as it
+    // starts, so a failure beside it came after — a click refused because
+    // it is running, say — and would otherwise sit unseen behind it.
     if (job != null) {
         statusPill(@src(), style.accent(), dvui.entypo.cycle, job_label, "…");
     } else if (api_job != null) {
         statusPill(@src(), style.accent(), dvui.entypo.cycle, api_label, "…");
-    } else if (command_error) |message| {
+    }
+    if (command_error) |message| {
         statusPill(@src(), style.danger(), dvui.entypo.warning, firstLine(message), "");
         if (iconButton(@src(), "dismiss_error", "Dismiss", dvui.entypo.cross, style.textMuted())) {
             clearCommandError();
@@ -16740,6 +16819,7 @@ test "stage, commit and switch branches through the real git commands" {
     const branch = findRef("hello.txt") orelse return error.BranchNotListed;
     checkout(branch);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqualStrings("hello.txt", history.?.head.?);
     // The file is still there: this switched branch, it did not restore a path.
@@ -16749,6 +16829,7 @@ test "stage, commit and switch branches through the real git commands" {
     const main_branch = findRef("main") orelse return error.BranchNotListed;
     checkout(main_branch);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqualStrings("main", history.?.head.?);
 }
 
@@ -16785,6 +16866,7 @@ fn resetUiGlobals() void {
     forgetTabs();
     groups.deinit(gpa);
     groups = .empty;
+    tab_revealed = null;
     config_dir.deinit(gpa);
     config_dir = .empty;
 
@@ -16821,6 +16903,8 @@ fn resetUiGlobals() void {
     signing_key.deinit(gpa);
     signing_key = .empty;
     signing_loaded = false;
+    if (signing_job) |j| j.deinit(app_io);
+    signing_job = null;
     sidebar_filter = .empty;
 
     clearRecent();
@@ -18953,6 +19037,7 @@ test "the toolbar's branch menu filters and switches branches" {
     try typeText("feat");
     try std.testing.expect(dvui.tagGet("switch:main") == null);
     try clickAt(try tagCenter("switch:feature"));
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqualStrings("feature", history.?.head.?);
 
@@ -18960,6 +19045,7 @@ test "the toolbar's branch menu filters and switches branches" {
     try clickAt(try tagCenter("toolbar:branch"));
     try std.testing.expectEqual(@as(usize, 0), switch_filter.items.len);
     try clickAt(try tagCenter("switch:origin/remote-only"));
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqualStrings("remote-only", history.?.head.?);
     try expectGit(down, &.{ "rev-parse", "--verify", "-q", "remote-only@{upstream}" });
@@ -20689,6 +20775,54 @@ test "dragging a tab onto another moves it there" {
     try std.testing.expectEqualStrings("c", repo_name);
 }
 
+// More tabs than the strip is wide: they scroll in what the strip leaves
+// them, the window's own buttons stay in the window, and a tab switched to
+// out of sight is scrolled to.
+test "more tabs than fit scroll, and leave the window's buttons where they are" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try useTestConfig(root);
+
+    try git.init();
+    defer git.shutdown();
+    defer closeRepo();
+
+    loadWorkspace();
+    const names = [_][]const u8{ "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa" };
+    var bufs: [names.len][std.fs.max_path_bytes]u8 = undefined;
+    for (names, 0..) |name, i| {
+        try expectGit(root, &.{ "init", "-q", "-b", "main", name });
+        openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
+    }
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 700, .h = 600 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    const close = (dvui.tagGet("window:close") orelse return error.TagNotFound).rect;
+    try std.testing.expect(close.x + close.w <= dvui.windowRectPixels().w);
+    const controls = (dvui.tagGet("window:minimise") orelse return error.TagNotFound).rect;
+
+    // The last opened is the active one, and in sight: the strip scrolled to it.
+    const last = (dvui.tagGet("tab:9") orelse return error.TagNotFound).rect;
+    try std.testing.expect(last.x >= 0 and last.x + last.w <= controls.x);
+    const first_before = (dvui.tagGet("tab:0") orelse return error.TagNotFound).rect;
+    try std.testing.expect(first_before.x < 0);
+
+    // Ctrl+Tab goes round to the first, scrolled back into sight.
+    try pressFrame(.tab, .lcontrol);
+    try std.testing.expectEqualStrings("alpha", repo_name);
+    const first = (dvui.tagGet("tab:0") orelse return error.TagNotFound).rect;
+    try std.testing.expect(first.x >= 0 and first.x + first.w <= controls.x);
+}
+
 // The seam is only a 1px line and the cursor, no grab handle; it must still
 // drag.
 test "the sidebar seam still drags" {
@@ -21170,6 +21304,7 @@ test "audit: the main controls do what they say when clicked" {
 
     // Double-click a branch to check it out.
     try doubleClickAt(try tagCenter("feature"));
+    try pumpJob();
     try std.testing.expectEqualStrings("feature", history.?.head.?);
 
     // The palette: Ctrl+P, a few letters, Enter.
