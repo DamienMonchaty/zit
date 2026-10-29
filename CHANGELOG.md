@@ -1,0 +1,27 @@
+# Changelog
+
+Every release of Zit, newest first. Downloads are on the
+[Releases](https://github.com/DamienMonchaty/zit/releases) page.
+
+## [0.1.1] — 2026-10-29
+
+### Changed
+- Connecting to GitHub uses Zit's new OAuth App: choose **Connect GitHub** and
+  type the code shown on github.com. Pasting a personal access token is no
+  longer offered.
+
+### Fixed
+- With **Use GitHub** off, author pictures no longer come from GitHub: only
+  Gravatar is asked, so Zit sends nothing to GitHub at all.
+
+### Added
+- A [privacy policy](PRIVACY.md).
+
+## [0.1.0] — 2026-10-29
+
+First public release: history graph, staging by line, branches, rebase,
+conflicts, stashes, worktrees, and GitHub pull requests, checks and issues.
+Its downloads were withdrawn: its GitHub sign-in no longer works.
+
+[0.1.1]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.1
+[0.1.0]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.0
