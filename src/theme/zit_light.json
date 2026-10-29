@@ -1,0 +1,22 @@
+{
+	"_comment": "Zit light. The dark theme's roles on a paper ground with the same violet cast: the logo's hues, darkened until small text and 2px lanes hold their contrast on white. The graph sits on white and the panels around it on a pale violet grey, as Fork and Tower set theirs apart.",
+
+	"background": { "value": [1.000, 1.000, 1.000, 1.0] },
+	"foreground": { "value": [0.953, 0.949, 0.973, 1.0] },
+	"text": { "value": [0.090, 0.082, 0.137, 1.0] },
+
+	"text_secondary": { "value": [0.388, 0.373, 0.471, 1.0] },
+	"text_background": { "value": [0.914, 0.906, 0.945, 1.0] },
+
+	"highlight_primary": { "value": [0.486, 0.227, 0.929, 1.0] },
+	"hover_primary": { "value": [0.427, 0.157, 0.851, 1.0] },
+	"highlight_secondary": { "value": [0.839, 0.824, 0.886, 1.0] },
+	"hover_secondary": { "value": [0.902, 0.894, 0.937, 1.0] },
+
+	"text_green": { "value": [0.086, 0.545, 0.322, 1.0] },
+	"text_blue": { "value": [0.357, 0.247, 0.878, 1.0] },
+	"text_orange": { "value": [0.780, 0.478, 0.063, 1.0] },
+	"text_yellow": { "value": [0.612, 0.478, 0.078, 1.0] },
+	"text_red": { "value": [0.851, 0.220, 0.282, 1.0] },
+	"text_purple": { "value": [0.608, 0.188, 0.851, 1.0] }
+}

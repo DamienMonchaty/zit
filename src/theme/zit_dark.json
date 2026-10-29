@@ -1,0 +1,22 @@
+{
+	"_comment": "Zit dark, from the logo: its violet as the accent, a ground tinted the same way, and the gradient's orange, coral, magenta and indigo as the lane and status hues — lightened just enough to hold at 2px on a dark ground. The ground is a violet-tinted charcoal rather than near-black, and the panels sit a step above the graph, so each region reads at a glance.",
+
+	"background": { "value": [0.110, 0.106, 0.141, 1.0] },
+	"foreground": { "value": [0.141, 0.137, 0.180, 1.0] },
+	"text": { "value": [0.914, 0.910, 0.945, 1.0] },
+
+	"text_secondary": { "value": [0.561, 0.549, 0.639, 1.0] },
+	"text_background": { "value": [0.180, 0.173, 0.227, 1.0] },
+
+	"highlight_primary": { "value": [0.651, 0.424, 1.000, 1.0] },
+	"hover_primary": { "value": [0.722, 0.533, 1.000, 1.0] },
+	"highlight_secondary": { "value": [0.235, 0.227, 0.290, 1.0] },
+	"hover_secondary": { "value": [0.169, 0.161, 0.216, 1.0] },
+
+	"text_green": { "value": [0.373, 0.800, 0.561, 1.0] },
+	"text_blue": { "value": [0.545, 0.478, 1.000, 1.0] },
+	"text_orange": { "value": [1.000, 0.667, 0.243, 1.0] },
+	"text_yellow": { "value": [0.922, 0.780, 0.329, 1.0] },
+	"text_red": { "value": [1.000, 0.384, 0.412, 1.0] },
+	"text_purple": { "value": [0.765, 0.310, 1.000, 1.0] }
+}
