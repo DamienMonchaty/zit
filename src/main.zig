@@ -9443,6 +9443,13 @@ fn textField(src: std.builtin.SourceLocation, init_opts: dvui.TextEntryWidget.In
     S.ringless.focus = .transparent;
     var with = opts;
     with.theme = &S.ringless;
+    // dvui sizes a single line from its own default font, whatever `.font`
+    // says: a smaller one sits at the top of a field too tall for it. The
+    // width is kept as dvui makes it; the height is the font's own line.
+    if (!init_opts.multiline and opts.min_size_content == null) {
+        const dvui_min = dvui.TextEntryWidget.defaults.min_sizeM(dvui.TextEntryWidget.defaultMWidth, 1).min_size_contentGet();
+        with.min_size_content = .{ .w = dvui_min.w, .h = opts.fontGet().sizeM(1, 1).h };
+    }
     w.theme.focus = style.accent();
     defer w.theme.focus = .transparent;
     return dvui.textEntry(src, init_opts, with);
