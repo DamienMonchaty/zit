@@ -29,7 +29,7 @@
 ## Why Zit
 
 - **Native and light.** One executable, drawn on the GPU. It redraws only when
-  something changes, and stays around 56 MB of memory with a 3,000-commit
+  something changes, and stays around 60 MB of memory with a 4,000-commit
   repository open.
 - **Everything a day of Git needs.** History, staging line by line, branches,
   rebases, conflicts, stashes, worktrees — without a terminal.

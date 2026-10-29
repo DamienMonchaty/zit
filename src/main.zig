@@ -102,7 +102,7 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null,
 };
 
-const APP_VERSION = "0.1.0";
+const APP_VERSION = "0.1.1";
 
 /// How often the working tree is re-read, so a file you changed in your editor
 /// shows up without you asking.
