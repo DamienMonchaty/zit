@@ -40,6 +40,29 @@
   hooks, credential helpers, the SSH agent and GPG signing all work as they
   already do.
 
+## Performance
+
+Measured on Linux with the build that is released (ReleaseSafe), on an Intel
+Core Ultra 7 155H laptop. Zit shows the 5,000 most recent commits of a
+repository.
+
+| | A 3,866-commit project | [git/git](https://github.com/git/git) — 85,906 commits |
+| --- | --- | --- |
+| Read the history (open a repository) | 0.10 s | 0.99 s |
+| Lay out the graph | 0.9 ms | 7 ms |
+| Read the working tree's status | 5 ms | 16 ms |
+| Memory, once settled | 58 MB | 79 MB |
+| CPU while idle | 0.2 % | 0 % |
+
+| Download | Size |
+| --- | --- |
+| Linux x86_64 (`.tar.gz`) | 5.5 MB |
+| Windows x86_64 (`.exe`) | 12.5 MB |
+
+Zit draws a frame only when something changes, so an idle window costs
+nothing. Every number here can be measured again with `zig build bench --
+<repository>` and `tools/measure.sh`; see [docs/PERF.md](docs/PERF.md).
+
 ## Features
 
 <table>

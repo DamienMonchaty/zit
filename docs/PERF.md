@@ -70,6 +70,29 @@ And keep the copy on disk, not in `/tmp`: on tmpfs a mapped file's pages are
 counted as the process's own dirty memory — 12 MB of git's pack index and
 packs showed up as Zit's until the clone moved (`.zig-cache/measure/`).
 
+## Bench, 2026-10-29: git/git
+
+A clone of git/git (85,906 commits, 324 MB of `.git`), ReleaseSafe, Intel
+Core Ultra 7 155H.
+
+| Case | git/git | 3,866 commits |
+|---|---|---|
+| history | 993 ms | 103 ms |
+| graph layout | 7.4 ms | 0.9 ms |
+| status | 16 ms | 5 ms |
+| 50 commits' diffs | 322 ms | 79 ms |
+
+`tools/measure.sh` on git/git, the picture cache kept from a first run: 79 MB
+RSS (96 MB peak), 43 MB Private_Dirty, 0 % idle CPU, 0.3 wake-ups/s. With an
+empty cache the first minute is not idle — 24 % CPU — while hundreds of
+authors' pictures are fetched.
+
+The history is 10× slower for 1.3× the commits shown because the revwalk
+sorts `TOPOLOGICAL | TIME`: libgit2 walks all 85,906 commits before it hands
+back the first one. Sorting by time alone would stream, but a commit dated
+before its parent (clock skew) would then come out first and break the
+lanes. Open: a topological order bounded to the commits shown.
+
 ## Bench, 2026-10-28
 
 A clone of a 3,171-commit repository, clean working tree.
