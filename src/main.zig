@@ -253,6 +253,7 @@ fn loadWorkspace() void {
     remember_tabs = loaded.file.remember_tabs;
     prune_on_fetch = loaded.file.prune;
     integrations = loaded.file.integrations;
+    avatars.use_github.store(integrations, .release);
     default_branch.clearRetainingCapacity();
     default_branch.appendSlice(gpa, loaded.file.default_branch) catch {};
 
@@ -388,6 +389,7 @@ var integrations: bool = true;
 /// again, or let go.
 fn setIntegrations(on: bool) void {
     integrations = on;
+    avatars.use_github.store(on, .release);
     me_loaded = false;
     if (!on and active_view == .pulls) closePulls();
     avatars.setGithubRepo(if (on) githubRemote() else null);

@@ -163,6 +163,10 @@ The UI is [dvui](https://github.com/david-vanderson/dvui) on SDL3.
 SDL_VIDEODRIVER=dummy zig build test   # the whole suite, no display needed
 ```
 
+## Privacy
+
+Zit has no server and collects nothing: see the [privacy policy](PRIVACY.md).
+
 ## License
 
 [MIT](LICENSE). The bundled Inter and JetBrains Mono fonts are under the
