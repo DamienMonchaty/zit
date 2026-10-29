@@ -18,6 +18,9 @@ Every release of Zit, newest first. Downloads are on the
   during a fetch — says so beside that command's pill, instead of behind it.
 - On Windows, console windows no longer flash open each time Zit runs `git` or
   `curl`.
+- With more tabs than the window is wide, the tabs scroll and the pull
+  requests button, the account menu and the window's own buttons stay in
+  sight; the tab switched to is scrolled into view.
 
 ## [0.1.1] — 2026-10-29
 

@@ -8290,6 +8290,9 @@ fn tabList() void {
         .expand = .horizontal,
         .background = false,
         .min_size_content = .{ .h = style.tab_height },
+        // Only the width the rest of the strip leaves: dvui asks for all of
+        // its content, which pushed the buttons after it out of the window.
+        .max_size_content = .width(0),
     });
     defer scroll.deinit();
     // What the tabs leave of the strip moves the window. Before the scroll
@@ -8350,6 +8353,7 @@ fn tabList() void {
                 } else requestTab(.{ .select_in = .{ g, t } }),
                 .close => requestTab(.{ .close_in = .{ g, t } }),
             }
+            if (active) revealTab(flat, rect);
             tabMenu(g, t, flat, rect);
             flat += 1;
         }
@@ -8362,6 +8366,7 @@ fn tabList() void {
             .none, .select => {},
             .close => new_tab_open = false,
         }
+        revealTab(flat, rect);
     }
 
     if (iconButton(@src(), "tab_add", "New tab — Ctrl+T", dvui.entypo.plus, style.textMuted())) {
@@ -8372,6 +8377,18 @@ fn tabList() void {
     if (!std.meta.eql(tab_drop_over, tab_drop_seen)) dvui.refresh(null, @src(), null);
     tab_drop_over = tab_drop_seen;
     tab_drop_seen = null;
+}
+
+/// Where in the strip the active tab was last scrolled into sight.
+var tab_revealed: ?usize = null;
+
+/// Scroll the strip to the active tab when it changes: one switched to out
+/// of sight — Ctrl+Tab, the palette, a repository opened — comes into view.
+/// Only then, so the strip scrolled by hand stays where it was put.
+fn revealTab(at: usize, rect: dvui.Rect.Physical) void {
+    if (tab_revealed == at or rect.w <= 0) return;
+    tab_revealed = at;
+    dvui.scrollTo(.{ .screen_rect = rect });
 }
 
 /// Who commits from this machine, as git's global config says: read once,
@@ -16849,6 +16866,7 @@ fn resetUiGlobals() void {
     forgetTabs();
     groups.deinit(gpa);
     groups = .empty;
+    tab_revealed = null;
     config_dir.deinit(gpa);
     config_dir = .empty;
 
@@ -20755,6 +20773,54 @@ test "dragging a tab onto another moves it there" {
     try std.testing.expectEqualStrings("c", git.repoName(tabs[1].path));
     try std.testing.expectEqualStrings("a", git.repoName(tabs[2].path));
     try std.testing.expectEqualStrings("c", repo_name);
+}
+
+// More tabs than the strip is wide: they scroll in what the strip leaves
+// them, the window's own buttons stay in the window, and a tab switched to
+// out of sight is scrolled to.
+test "more tabs than fit scroll, and leave the window's buttons where they are" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try useTestConfig(root);
+
+    try git.init();
+    defer git.shutdown();
+    defer closeRepo();
+
+    loadWorkspace();
+    const names = [_][]const u8{ "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa" };
+    var bufs: [names.len][std.fs.max_path_bytes]u8 = undefined;
+    for (names, 0..) |name, i| {
+        try expectGit(root, &.{ "init", "-q", "-b", "main", name });
+        openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
+    }
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 700, .h = 600 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    const close = (dvui.tagGet("window:close") orelse return error.TagNotFound).rect;
+    try std.testing.expect(close.x + close.w <= dvui.windowRectPixels().w);
+    const controls = (dvui.tagGet("window:minimise") orelse return error.TagNotFound).rect;
+
+    // The last opened is the active one, and in sight: the strip scrolled to it.
+    const last = (dvui.tagGet("tab:9") orelse return error.TagNotFound).rect;
+    try std.testing.expect(last.x >= 0 and last.x + last.w <= controls.x);
+    const first_before = (dvui.tagGet("tab:0") orelse return error.TagNotFound).rect;
+    try std.testing.expect(first_before.x < 0);
+
+    // Ctrl+Tab goes round to the first, scrolled back into sight.
+    try pressFrame(.tab, .lcontrol);
+    try std.testing.expectEqualStrings("alpha", repo_name);
+    const first = (dvui.tagGet("tab:0") orelse return error.TagNotFound).rect;
+    try std.testing.expect(first.x >= 0 and first.x + first.w <= controls.x);
 }
 
 // The seam is only a 1px line and the cursor, no grab handle; it must still
