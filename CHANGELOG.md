@@ -3,6 +3,12 @@
 Every release of Zit, newest first. Downloads are on the
 [Releases](https://github.com/DamienMonchaty/zit/releases) page.
 
+## Unreleased
+
+### Fixed
+- On Windows, console windows no longer flash open each time Zit runs `git` or
+  `curl`.
+
 ## [0.1.1] — 2026-10-29
 
 ### Changed
