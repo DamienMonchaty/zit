@@ -40,11 +40,9 @@ fn startOptions() dvui.App.StartOptions {
     // "Integrated memory detected, allocating TransferBuffers…" — which says
     // nothing a user can act on.
     dvui.backend.c.SDL_SetLogPriorities(dvui.backend.c.SDL_LOG_PRIORITY_WARN);
-    // SDL's GPU renderer first on Linux, then its Vulkan one, then OpenGL.
-    // The default, OpenGL, maps Mesa's gallium and LLVM into the process —
-    // 117 MB of RSS on an Intel machine, against 58 for Vulkan and 49 for
-    // the GPU renderer (which also runs on Vulkan, with less of its own on
-    // the heap), at the same CPU. Tried in order, so a machine without
+    // SDL's GPU renderer first on Linux, then its Vulkan one, then OpenGL:
+    // OpenGL, the default, maps Mesa's gallium and LLVM into the process, about
+    // twice the RSS of the other two. Tried in order, so a machine without
     // Vulkan still gets OpenGL. Windows keeps SDL's choice, Direct3D.
     if (@import("builtin").os.tag == .linux) {
         _ = dvui.backend.c.SDL_SetHint(dvui.backend.c.SDL_HINT_RENDER_DRIVER, "gpu,vulkan,opengl,software");
@@ -232,8 +230,7 @@ var active_tab: usize = 0;
 /// and in tests, which is what keeps a test run from writing over the real one.
 var config_dir: std.ArrayList(u8) = .empty;
 
-/// Tabs in no group. "Main" is what the one group used to be called before
-/// groups shared the strip, and reads as the same.
+/// Tabs in no group.
 const DEFAULT_GROUP_NAME = "";
 const LEGACY_DEFAULT_GROUP = "Main";
 
@@ -807,7 +804,6 @@ fn openPulls() void {
 fn closePulls() void {
     active_view = .graph;
 }
-/// The history above the conflicts in the merge view.
 /// The two sides of the conflicts over the output they make.
 var output_split: f32 = 0.6;
 
@@ -846,8 +842,7 @@ const DOUBLE_CLICK_NS: i128 = 400 * std.time.ns_per_ms;
 const ChangesView = enum { path, tree };
 var changes_view: ChangesView = .path;
 
-/// Which compiled-in theme is on. Both have always been compiled in; until the
-/// cog in the tab strip did something, only one of them was reachable.
+/// Which compiled-in theme is on.
 var dark_theme: bool = true;
 
 /// A destructive action waiting for a yes.
@@ -879,7 +874,7 @@ const Confirm = struct {
         restore_file,
         /// The worktree's folder. git refuses one with uncommitted work.
         remove_worktree,
-        /// A pull or merge request's number, for these two.
+        /// A pull request's number, for these two.
         merge_request,
         close_request,
         /// `arg` is the GitHub login.
@@ -1573,10 +1568,9 @@ fn appInit(win: *dvui.Window) !void {
     }
 
     // Every program Zit starts reads its environment from here: the user's
-    // own, minus anything that forces colour. A session with CLICOLOR_FORCE
-    // set had programs colour their output, which then would not parse. Minus the editor
-    // overrides too: they beat the `-c core.editor=` and `-c sequence.editor=`
-    // a rebase is driven with, and would open the user's editor instead.
+    // own, minus anything that forces colour (coloured output would not
+    // parse), and minus the editor overrides, which beat the `-c core.editor=`
+    // and `-c sequence.editor=` a rebase is driven with.
     if (init.environ_map.clone(gpa)) |env| {
         child_env = env;
         for ([_][]const u8{ "CLICOLOR_FORCE", "FORCE_COLOR", "GH_FORCE_TTY", "GIT_PAGER", "PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR" }) |key| _ = child_env.?.swapRemove(key);
@@ -1742,7 +1736,7 @@ fn appDeinit(win: *dvui.Window) void {
 }
 
 /// Open the repo named on the command line, or the one containing the current
-/// directory — `zync` in a checkout should just work, like `git` does.
+/// directory — `zit` in a checkout should just work, like `git` does.
 fn openRepoFromArgs() !void {
     // The process arena, not `gpa`: argv is read once and lives as long as the
     // process, so there is nothing to free.
@@ -1767,7 +1761,6 @@ fn openRepoFromArgs() !void {
 
 /// Make `path` the open repository, replacing whatever was open.
 ///
-/// Opening *is* switching until multi-repo tabs land: one repo, one tab.
 /// Failures are reported in the graph pane rather than in a dialog — pointing
 /// at the wrong folder is a normal thing to do, not an error to acknowledge.
 fn openRepo(path: []const u8) void {
@@ -2209,8 +2202,7 @@ fn collectWorkLoad() bool {
         return true;
     };
     swapWork(next);
-    // The old snapshot just went: its pages back now, not at some later
-    // trim — there is no timer doing it any more.
+    // The old snapshot just went: its pages back now, not at some later trim.
     trimHeap();
     return true;
 }
@@ -2318,8 +2310,7 @@ fn askCi() void {
     pr.ciRefresh(repo_path.items, shas[0..n], frame_now_s);
 }
 
-/// Re-list the open pull or merge requests, if the repository is on a host
-/// that has them.
+/// Re-list the open pull requests, if the repository is on GitHub.
 fn refreshRequests() void {
     repo_slug.clearRetainingCapacity();
     if (history == null or !integrations) return pr.refresh(repo_path.items, .none, "");
@@ -4435,7 +4426,6 @@ fn requestListRow(src: std.builtin.SourceLocation, entry: pr.Request, id: usize)
 
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
     defer row.deinit();
-    // Who opened it, by their picture.
     avatarSized(@src(), 0, requestAuthor(entry.author), null, null, 26);
 
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .x = style.space.xs } });
@@ -5066,7 +5056,6 @@ fn requestHeader(d: pr.Detail, reload: *bool) void {
     }
 }
 
-/// Still open: neither merged nor closed.
 /// Ask GitHub to merge it once it can, by the method picked. Deleting its
 /// branch after is the repository's own setting on GitHub, not the call's.
 fn autoMerge(d: pr.Detail) void {
@@ -5167,17 +5156,6 @@ fn savePrEdit() void {
     const labels = jsonList(a, pr_edit_labels.items);
     if (labels.len > 2) requestApi("Labelling", "POST", apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{labels}) catch return, .none);
     pr_edit_open = false;
-}
-
-/// "a, b ,c" -> "a,b,c": what both CLIs take for a list.
-fn commaList(a: std.mem.Allocator, text: []const u8) []const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var it = std.mem.tokenizeAny(u8, text, ", \t\n");
-    while (it.next()) |word| {
-        if (out.items.len > 0) out.append(a, ',') catch return "";
-        out.appendSlice(a, word) catch return "";
-    }
-    return out.items;
 }
 
 /// A request's state, on a pill of its colour.
@@ -5830,7 +5808,6 @@ fn prAnswer(kind: PrAnswer) void {
         .request_changes => requestApi("Requesting changes", "POST", apiPath(&path, "/pulls/{d}/reviews", .{number}), jsonFields(a, &.{ .{ "event", "REQUEST_CHANGES" }, .{ "body", text } }), .clear_comment),
     }
 }
-
 
 /// The branches panel, unless hidden by hand or squeezed out by the
 /// changes panel being dragged wide.
@@ -6517,9 +6494,6 @@ fn plural(n: anytype) []const u8 {
     return if (n == 1) "" else "s";
 }
 
-/// The cog. It was a button that did nothing; behind it belongs the one
-/// preference Zit has, and the list of keys — a shortcut nobody can find is
-/// a shortcut nobody has.
 // === Clone and create ===
 //
 // A window of their own, as in every other client: three things to fill in,
@@ -6850,8 +6824,8 @@ fn dialogButton(src: std.builtin.SourceLocation, caption: []const u8, primary: b
 
 /// Keep a modal centred on the window, from the size it actually is.
 ///
-/// The size is left entirely to `autoSize`: fixing a width and centring on
-/// that guess is what made a window wider than it spill out to the right.
+/// The size is left entirely to `autoSize`: centring on a fixed width spills
+/// a wider window off the right.
 /// `top` pins it that far down instead of centring it vertically.
 ///
 /// After the window's `init`, which is when it takes its size, and before
@@ -8752,11 +8726,7 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
 
 const TabHit = enum { none, select, close };
 
-/// One tab: a name to click and a × beside it — siblings, not nested, so the
-/// tab's own button never swallows the press meant for the ×. A card with
-/// rounded top corners; in a group, the group's run draws the underline.
-/// Each tab as wide as its name, as GitKraken's are — up to this much name,
-/// cut with "…" past it.
+/// Each tab as wide as its name, up to this much, cut with "…" past it.
 const TAB_W: f32 = 180;
 
 /// What kind of tab: its icon.
@@ -8811,6 +8781,8 @@ fn tabDragStart(wd: *dvui.WidgetData, slot: [2]usize) void {
     }
 }
 
+/// A tab's name and its × are siblings, not nested, so the tab's own button
+/// never swallows the press meant for the ×.
 fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint: []const u8, active: bool, width: f32, rect_out: *dvui.Rect.Physical, look: TabLook) TabHit {
     var hit: TabHit = .none;
     const lit = if (look.slot) |s| (if (tab_drop_over) |o| o[0] == s[0] and o[1] == s[1] else false) else false;
@@ -9299,12 +9271,11 @@ fn dropChoice(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8, hint
     return false;
 }
 
-/// Icon over caption, the shape every GUI git client's toolbar converged on:
-/// the icon is what you aim at, the caption is what makes it unambiguous.
+/// Icon over caption: the icon is what you aim at, the caption is what makes
+/// it unambiguous.
 ///
 /// `badge` is drawn beside the caption when it is not zero — how many commits
-/// Pull or Push would actually move. Zit knew that number and never said it,
-/// so the only way to find out was to press the button.
+/// Pull or Push would actually move.
 fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize) bool {
     const enabled = repo != null;
 
@@ -9426,7 +9397,6 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
     return bw.clicked();
 }
 
-/// One line of a menu.
 /// A menu row that opens a submenu beside it: the rect to hang it from,
 /// while it is open.
 fn menuSubRow(src: std.builtin.SourceLocation, caption: []const u8) ?dvui.Rect.Natural {
@@ -9469,13 +9439,11 @@ fn textField(src: std.builtin.SourceLocation, init_opts: dvui.TextEntryWidget.In
     return dvui.textEntry(src, init_opts, with);
 }
 
-
 /// Give a field the keyboard once, the frame after it first appears.
 ///
 /// Not on its first frame: a floating window spends that one hidden while it
-/// measures itself, and a focus asked for then is dropped — which left the
-/// palette and the dialogs typing into nothing. Remembered per widget, so a
-/// click elsewhere is not undone the frame after.
+/// measures itself, and a focus asked for then is dropped. Remembered per
+/// widget, so a click elsewhere is not undone the frame after.
 fn focusOnce(id: dvui.Id) void {
     if (dvui.firstFrame(id)) return;
     if (dvui.dataGet(null, id, "_zit_focused", bool) != null) return;
@@ -9654,7 +9622,7 @@ fn sidebarPane() void {
     refsSidebar();
 }
 
-/// One line of small capitals over a list. The mockup's `side-group-label`.
+/// One line of small capitals over a list.
 fn sidebarLabel(src: std.builtin.SourceLocation, caption: []const u8, count: ?usize) void {
     var row = dvui.box(src, .{ .dir = .horizontal }, .{
         .expand = .horizontal,
@@ -9836,8 +9804,7 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .both,
             .background = false,
-            // Extra on the right: the scroll area keeps a bar there, and the
-            // count was rendering under it.
+            // Extra on the right: the scroll area keeps a bar there.
             .padding = .{ .x = style.space.md, .w = style.space.xl },
         });
         defer row.deinit();
@@ -10052,8 +10019,7 @@ const SideItem = union(enum) { remote: u32, ref: u32 };
 
 /// A section's lines, only those its scroll area shows built, as the graph
 /// does: every line is `style.side_row` high, so where each one sits is
-/// arithmetic, and spacers stand for the rest. 3,000 branches open was
-/// 40 ms a frame building lines nobody saw. Returns the ref asked to be
+/// arithmetic, and spacers stand for the rest. Returns the ref asked to be
 /// checked out.
 fn sideRows(items: []const SideItem, h: git.History, si: *const dvui.ScrollInfo) ?git.Ref {
     const rh = style.side_row;
@@ -10261,7 +10227,7 @@ fn remoteRow(src: std.builtin.SourceLocation, entry: git.Remote, id: usize) void
     }
 }
 
-/// Why the listing failed, in the CLI's own words when it gave any.
+/// Why the listing failed, in GitHub's own words when it gave any.
 fn requestsError() void {
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
@@ -10310,8 +10276,6 @@ fn sidebarNote(src: std.builtin.SourceLocation, text: []const u8) void {
     });
 }
 
-/// The small turning arc beside a "Loading…": something is happening, not
-/// stuck.
 /// Three dots, lit one after the other, five steps a second. Not dvui's
 /// spinner: it turns every frame, which is the display's rate for as long
 /// as anything is loading.
@@ -10335,8 +10299,7 @@ fn loadingSpinner(src: std.builtin.SourceLocation) void {
     animateEvery(row.data().id, 200);
 }
 
-/// The host's own form for a new request, filled from the commits — `--web`,
-/// so nothing here has to be an editor for a description.
+/// The form for a new request, filled from the commits.
 fn requestCreateRequest() void {
     if (pr.host == .none) return setCommandError("No pull requests here: the repository is on no host Zit knows, or the integrations are off in the settings.");
     openPrCreate();
@@ -10779,11 +10742,11 @@ fn stashMenu(entry: git.Stash, id: usize, rect: dvui.Rect.Physical, open_at: ?dv
     }
 }
 
-/// One ref. Double-click is what checks out, like every other git GUI: a single
-/// click on a branch list should never move the working tree.
 /// A branch last committed to longer ago than this reads as done with.
 const STALE_AFTER_S: i64 = 30 * 86400;
 
+/// One ref. Double-click is what checks out, like every other git GUI: a single
+/// click on a branch list should never move the working tree.
 fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
     // Three siblings on one line — the eye, the button that is the ref, the
     // ⋯ — rather than icons inside the button: nested in it, they never saw
@@ -11621,10 +11584,8 @@ fn toggleAuthor(name: []const u8) void {
     author_only.append(gpa, owned) catch gpa.free(owned);
 }
 
-/// A fixed-width cell with its text centred in it, cut with an ellipsis where
-/// it is too long. A label's own min width would pad it on the right instead.
-/// A fixed-width cell of the commit list, its text centred — or, with
-/// `left`, set in by the header's own inset, under its caption.
+/// A fixed-width cell of the commit list, its text centred and cut with "…"
+/// where it is too long.
 fn centerCell(src: std.builtin.SourceLocation, id: usize, text: []const u8, font: dvui.Font, width: f32, margin: dvui.Rect) dvui.Rect.Physical {
     return listCell(src, id, text, font, width, margin, false);
 }
@@ -11913,8 +11874,6 @@ fn clearFileHistory() void {
     file_history.clearRetainingCapacity();
 }
 
-/// What the graph lists while it is filtered: a search result, and — when a
-/// file's history is up — one of the commits that touched it.
 /// Whether the list shows only some commits: searched, a file's history, or
 /// narrowed to some authors.
 fn listFiltered() bool {
@@ -12866,7 +12825,6 @@ fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool
         .gravity_y = 0.5,
         .margin = .{ .x = style.space.xs },
     });
-    // Commits to push, commits to pull: what the branch owes its upstream.
     trackingMarks(ref.tracking, ink);
     requestBadge(ref, ink);
     if (draggable) {
@@ -12995,7 +12953,6 @@ fn trackingMarks(t: git.Tracking, ink: dvui.Color) void {
     }
 }
 
-/// Paint the lanes and dots for the visible rows.
 /// How wide the graph column is: as wide as the history's lanes need, up to
 /// a share of the list — so a repository with a dozen branches open at once
 /// gets a dozen lanes side by side instead of a pile on the column's edge.
@@ -13153,8 +13110,6 @@ fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) f32 {
     return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
 }
 
-/// "5 days ago". Coarse on purpose: the exact minute of a commit from last
-/// spring is noise.
 /// The C library's broken-down time: only the fields every platform has, in
 /// the order they all put them.
 const Tm = extern struct {
@@ -13183,6 +13138,8 @@ fn absoluteTime(buf: []u8, when: i64) []const u8 {
     }) catch "";
 }
 
+/// "5 days ago". Coarse on purpose: the exact minute of a commit from last
+/// spring is noise.
 fn relativeTime(buf: []u8, when: i64) []const u8 {
     const d = frame_now_s - when;
     if (d < 0) return "in the future";
@@ -13859,7 +13816,6 @@ fn isConflictView() bool {
     };
 }
 
-/// A conflicted file, region by region, each with the three answers.
 /// The three-pane merge: each conflict's two sides next to each other on top,
 /// and underneath, the file they are being resolved into.
 fn conflictBody() void {
@@ -14268,7 +14224,6 @@ fn diffLineRow(
         return;
     }
 
-    // A click on a changed line picks it, or puts it back.
     if (pickable and dvui.clicked(box.data(), .{})) togglePicked(line_index.?, file.lines.len);
 
     lineNumber(@src(), line.old_no);
@@ -14664,7 +14619,6 @@ fn commitDetail(id: git.Oid) void {
         }
     };
 
-    // Last, its files.
     const files = if (diff != null) diff_all.len else 0;
     if (accordion(@src(), 1, "FILES", files, &detail_open[1], false)) {
         if (diff != null) commitFiles(id);
@@ -14822,8 +14776,6 @@ fn folderRow(src: std.builtin.SourceLocation, dir: []const u8, id: usize) void {
     }
 }
 
-/// One person on the commit: picture, name, and a line under it — the
-/// address and what they did.
 /// A co-author trailer naming someone other than the author: crediting
 /// yourself as a co-author would list you twice.
 fn coAuthorOther(t: Trailer, author_email: []const u8) bool {
@@ -14831,6 +14783,8 @@ fn coAuthorOther(t: Trailer, author_email: []const u8) bool {
     return author_email.len == 0 or std.ascii.indexOfIgnoreCase(t.value, author_email) == null;
 }
 
+/// One person on the commit: picture, name, and a line under it — the
+/// address and what they did.
 fn personRow(src: std.builtin.SourceLocation, id: usize, as: git.Commit, name: []const u8, email: []const u8, what: []const u8) void {
     var row = dvui.box(src, .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .y = style.space.xs, .w = style.space.lg, .h = style.space.xs } });
     defer row.deinit();
@@ -15217,9 +15171,8 @@ fn changesSection(
 ) void {
     var section = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = id,
-        // An empty list is a header and one line of text: expanding it gave
-        // "Nothing staged." half the panel and squeezed the list that had
-        // files in it into the other half.
+        // An empty list is a header and one line: expanded, it would squeeze
+        // the list that has files into half the panel.
         .expand = if (changes.len == 0) .horizontal else .both,
         .background = false,
         .padding = dvui.Rect.all(0),
@@ -15949,7 +15902,6 @@ fn coAuthorMenu(src: std.builtin.SourceLocation) void {
     dd.deinit();
 }
 
-/// The co-authors picked so far, each with its ×.
 /// One fact about the commit about to be made, as a chip: an icon and a word
 /// in its colour, on a tint of it.
 fn signalChip(src: std.builtin.SourceLocation, id: usize, icon: []const u8, text: []const u8, color: dvui.Color) void {
@@ -15977,6 +15929,7 @@ fn signalChip(src: std.builtin.SourceLocation, id: usize, icon: []const u8, text
     });
 }
 
+/// The co-authors picked so far, each with its ×.
 fn coAuthorChips() void {
     if (co_authors.items.len == 0) return;
     var flow = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .margin = .{ .h = style.space.sm } });
@@ -16710,12 +16663,9 @@ test "the layout renders a frame" {
     try dvui.testing.settle(appFrame);
 }
 
-// The write path, end to end, against a real repository.
-//
-// This is the test that would have caught `git checkout -- <branch>`, which
-// builds and runs and quietly restores a *file* of that name instead of
-// switching branch. Every command Zit sends is a string; only running them
-// says whether they mean what they look like.
+// The write path, end to end, against a real repository: every command Zit
+// sends is a string, and only running it says whether it means what it looks
+// like.
 test "stage, commit and switch branches through the real git commands" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -17043,11 +16993,8 @@ test "staging one hunk moves that hunk and leaves the other alone" {
     try std.testing.expectEqual(@as(usize, 0), empty.files.len);
 }
 
-// The diff pane, rendered against a real diff.
-//
-// Every row in it is positioned by hand inside a scroll area, sharing widget
-// ids with the graph it replaces — which is exactly the kind of thing that
-// builds fine and panics on frame one.
+// Rows are positioned by hand inside a scroll area and share widget ids with
+// the graph: the kind of thing that builds fine and panics on frame one.
 test "the diff pane renders both a file diff and a commit diff" {
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -17244,11 +17191,8 @@ test "the branches panel comes back once the changes panel that pushed it out is
     try std.testing.expect(leftShown());
 }
 
-// Searching the history.
-//
-// The filtered list is built by a loop of its own, with its own row numbering
-// on top of a virtualised scroll — exactly the kind of thing that renders
-// beautifully and shows the wrong commit.
+// The filtered list numbers its own rows on top of a virtualised scroll: easy
+// to render beautifully and show the wrong commit.
 test "searching the history narrows the list to what matches" {
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -17328,8 +17272,6 @@ fn makeConflictedPair(tmp: *std.testing.TmpDir, dir: []const u8) !void {
     try expectGit(dir, &.{ "commit", "-qam", "main side" });
 }
 
-// A conflicted merge, resolved and continued: the path the banner exists for.
-//
 // The continue button sends `-c core.editor=true`, and that flag is the whole
 // reason this test is worth its runtime: without it `git merge --continue`
 // opens an editor, and `run.git` blocks the UI thread until something closes
@@ -17408,9 +17350,6 @@ test "a conflicted merge aborts back to a clean tree" {
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
 }
 
-// Resolving a conflict region by region, which is the part that writes to a
-// file rather than running a command.
-//
 // The parser is unit-tested in `git.zig`; what this covers is the rest of the
 // loop — reading the file git left behind, writing the chosen side back, and
 // git agreeing afterwards that there is nothing left to resolve.
@@ -17466,8 +17405,6 @@ test "a conflict is resolved region by region, then staged" {
     try std.testing.expectEqual(git.State.none, history.?.state);
 }
 
-// An interactive rebase, end to end.
-//
 // The mechanism is a config trick — `sequence.editor=cp <our todo>` — and
 // nothing about it is checked by the compiler. If git ignored it, or the todo
 // were written in the wrong order, the rebase would still "succeed" and quietly
@@ -17680,7 +17617,7 @@ test "a hard reset waits for the confirmation bar" {
     var sha_buf: [8]u8 = undefined;
     ask(.reset_hard, git.oidShort(base.id, &sha_buf));
 
-    // Asking must not do it. This is the whole point of the bar.
+    // Asking must not do it.
     try std.testing.expectEqual(@as(usize, 2), history.?.commits.len);
 
     runConfirmed();
@@ -17738,11 +17675,8 @@ test "the prompt bar creates a branch, and stays open when the name is taken" {
     try std.testing.expect(findRef("-D") == null);
 }
 
-// The three panes that replaced the graph, each rendered once against real
-// data.
-//
-// They position rows by hand inside scroll areas and share widget ids with the
-// graph they stand in for — which builds fine and panics on frame one.
+// Rows are positioned by hand inside scroll areas and share widget ids with
+// the graph: the kind of thing that builds fine and panics on frame one.
 test "the conflict, rebase and blame panes each render a frame" {
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -17786,7 +17720,6 @@ test "the conflict, rebase and blame panes each render a frame" {
 
     clearSelection();
 
-    // Blame.
     selectBlame("lines.txt");
     try dvui.testing.settle(appFrame);
     try std.testing.expect(blame_view != null);
@@ -17851,8 +17784,7 @@ fn makeUpstreamPair(tmp: *std.testing.TmpDir, root: []const u8, up: []const u8, 
     try expectGit(root, &.{ "init", "-q", "-b", "main", "down" });
     try expectGit(down, &.{ "config", "user.email", "test@zync.invalid" });
     try expectGit(down, &.{ "config", "user.name", "Zit Test" });
-    // Unsigned: the machine running this may sign every commit, and a GPG
-    // passphrase prompt per test repo is not a test suite.
+    // Unsigned, as above.
     try expectGit(down, &.{ "config", "commit.gpgsign", "false" });
     try expectGit(down, &.{ "config", "tag.gpgsign", "false" });
 }
@@ -17875,8 +17807,6 @@ fn pumpJob() !void {
     if (job != null) return error.JobNeverFinished;
 }
 
-// A networked command, off the UI thread and back again.
-//
 // Nothing about the threading is checked by the compiler: a job that never
 // completes, or one whose result is never folded in, looks exactly like one
 // that worked until you notice the refs did not move.
@@ -17910,8 +17840,7 @@ test "a networked command runs off the UI thread and folds its result in" {
     try std.testing.expect(runAction());
 
     const started = job orelse return error.NoJobStarted;
-    // If this ever fails there was no concurrency to be had, the command ran on
-    // this thread after all, and every fetch is freezing the window again.
+    // Ran inline on this thread instead: every fetch would freeze the window.
     try std.testing.expect(!started.inline_run);
 
     try pumpJob();
@@ -17923,11 +17852,8 @@ test "a networked command runs off the UI thread and folds its result in" {
     try std.testing.expectEqual(@as(usize, 1), history.?.remotes.len);
 }
 
-// The counts on Pull and Push.
-//
-// These come out of libgit2 rather than out of a command, so nothing else in
-// the suite would notice them going wrong — and the state they describe is
-// exactly the one a git GUI is for: whether there is anything to send.
+// The counts on Pull and Push. They come from libgit2, not a command, so
+// nothing else in the suite would notice them going wrong.
 test "the branch knows how far it is from its upstream" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18076,10 +18002,6 @@ fn useTestConfig(root: []const u8) !void {
     try config_dir.appendSlice(gpa, "/cfg");
 }
 
-// Tabs, groups, and the file that outlives the process.
-//
-// The persistence is the point: the complaint that started it was that Zit
-// forgot every repository the moment it closed.
 test "the tab strip comes back after a restart" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18385,9 +18307,8 @@ fn answerConfirm() !void {
     try std.testing.expectEqual(@as(?Confirm, null), confirm);
 }
 
-// The names: renaming a branch and a remote, re-pointing a remote, a stash with
-// a message, and the delete that `-d` refuses. Each is one argv built from a
-// prompt, and only running it says the words are in the right order.
+// Each is one argv built from a prompt; only running it says the words are in
+// the right order.
 test "renames, a named stash and a forced delete go through git" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18629,9 +18550,8 @@ test "ignoring a file appends it to .gitignore and it drops out of the changes" 
     for (work.?.unstaged) |change| try std.testing.expect(!std.mem.eql(u8, change.path, "a[1].txt"));
 }
 
-// Everything that changes the remote: a branch pushed with tracking, a force
-// push over it, and both kinds of remote delete. All go off-thread, two of
-// them after a confirmation, which is a path no other test takes.
+// All go off-thread, two of them after a confirmation: a path no other test
+// takes.
 test "branches and tags are pushed, force pushed and deleted on the remote" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18731,8 +18651,6 @@ fn commitFile(tmp: *std.testing.TmpDir, dir: []const u8, sub_path: []const u8, m
     try expectGit(dir, &.{ "commit", "-qm", message });
 }
 
-// Fetch, then each pull the toolbar's menu offers, clicked as a person
-// would: from behind, then from a branch that moved on both sides.
 test "fetch, and each pull the menu offers, through the toolbar" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18812,7 +18730,6 @@ fn commitCenter(summary: []const u8) !dvui.Point.Physical {
     return tagCenter(try std.fmt.bufPrint(&tag_buf, "commit:{s}", .{git.oidShort(c.id, &short)}));
 }
 
-// A commit's menu: checking out comes first, the resets fold into one row.
 test "a commit's menu leads with check out, and resets from a submenu" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18842,7 +18759,7 @@ test "a commit's menu leads with check out, and resets from a submenu" {
     const detach_row = try tagCenter("menu:Check out this commit (detaches HEAD)");
     const reset_row = try tagCenter("menu:Reset branch here");
     try std.testing.expect(branch_row.y < detach_row.y and detach_row.y < reset_row.y);
-    // The three resets are not rows of their own any more.
+    // The three resets are not top-level rows.
     try std.testing.expect(dvui.tagGet("menu:Soft — keep changes staged") == null);
 
     try clickAt(reset_row);
@@ -18862,8 +18779,7 @@ test "a commit's menu leads with check out, and resets from a submenu" {
     try std.testing.expectEqual(.graph, active_view);
 }
 
-// A commit's menu: cherry-pick one from another branch, then revert it —
-// and a merge, which neither takes without naming its first parent.
+// A merge is neither picked nor reverted without naming its first parent.
 test "cherry-pick and revert from a commit's menu, a merge's too" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18929,8 +18845,6 @@ test "cherry-pick and revert from a commit's menu, a merge's too" {
     try expectSubject(dir, "HEAD~1", "merge feat");
 }
 
-// The rest of a day's commands, clicked: a stash applied and kept, the last
-// commit amended from its own message, and a tag made from a commit's menu.
 test "stash apply keeps the stash, amend starts from the last message, a tag from a commit's menu" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -18994,8 +18908,6 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     try std.testing.expect(findRef("v0.1") != null);
 }
 
-// The toolbar's branch, as a menu: filtered down, a click switches — to a
-// local branch, or to a remote's, which makes the local one tracking it.
 test "the toolbar's branch menu filters and switches branches" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -19096,8 +19008,6 @@ test "the avatar's menu opens the signing card, and asks before signing out" {
     try std.testing.expect(confirm == null);
 }
 
-// The AUTHOR column's menu narrows the list to whoever is ticked; the version
-// in the footer opens what the version does.
 test "the author column filters the list, and the version opens the features" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -19147,8 +19057,8 @@ test "a request's lists, run ids and checks read the way the commands want them"
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("ann,bo,core", commaList(a, " ann, bo ,core,"));
-    try std.testing.expectEqualStrings("", commaList(a, " , "));
+    try std.testing.expectEqualStrings("[\"ann\",\"bo\",\"core\"]", jsonList(a, " ann, bo ,core,"));
+    try std.testing.expectEqualStrings("[]", jsonList(a, " , "));
 
     try std.testing.expectEqualStrings("123", runIdOf("https://github.com/o/r/actions/runs/123/job/456").?);
     try std.testing.expectEqualStrings("9", runIdOf("https://github.com/o/r/actions/runs/9").?);
@@ -19325,8 +19235,6 @@ test "a leading tilde means home, and only a leading one" {
     try std.testing.expectEqualStrings("rel", expandHome(&buf, "rel"));
 }
 
-// Undo, against the real reflog: a commit comes back off, its changes still
-// staged, and undoing that puts it back; a checkout goes back where it was.
 test "undo takes back a commit and a checkout, and undoing an undo redoes" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -19787,8 +19695,6 @@ test "a file's history follows it back through a rename" {
     try std.testing.expect(!shownNow(other, h.indexOf(other.id).?));
 }
 
-// Line staging against real git: pick one changed line out of a hunk of two,
-// stage it, and the other stays behind; then take it back out the same way.
 test "changes picked together are stashed or staged together, and only they" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -20394,8 +20300,6 @@ test "a frame drawn again with nothing changed allocates nothing" {
     try std.testing.expectEqual(before, counting.allocs);
 }
 
-// Everything a repository holds, opened and let go of again, three times
-// over: `std.testing.allocator` fails the test on any byte left behind.
 // The mouse swept over every part of the window, then left alone: the frames
 // it asked for stop within a few, not 100 later — no hover that keeps
 // drawing, no widget whose size goes back and forth.
@@ -20778,8 +20682,8 @@ test "dragging a tab onto another moves it there" {
     try std.testing.expectEqualStrings("c", repo_name);
 }
 
-// The seam has no grab handle any more, only a 1px line and the cursor; this
-// says it can still be grabbed and moved.
+// The seam is only a 1px line and the cursor, no grab handle; it must still
+// drag.
 test "the sidebar seam still drags" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -21141,10 +21045,9 @@ fn typeText(text: []const u8) !void {
     try dvui.testing.settle(frameArrowCursor);
 }
 
-// The audit: every control a day of work goes through, driven by the mouse and
-// keyboard the way a person drives them, each checked against what git then
-// says. The function-level tests prove the commands; this proves the clicks
-// reach them — which is exactly what a button nested in a button got wrong.
+// Every control a day of work goes through, driven by mouse and keyboard and
+// checked against git: the function-level tests prove the commands, this
+// proves the clicks reach them.
 test "audit: the main controls do what they say when clicked" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;

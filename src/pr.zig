@@ -167,13 +167,11 @@ pub const Check = struct {
     seconds: i64 = 0,
 };
 
-
 pub const Status = enum { idle, loading, ready, failed };
 
 // === The queries ===
 //
-// `gh --json` handed connections back flattened; GraphQL keeps them as
-// `{nodes:[…]}`, which is the shape the readers below take.
+// GraphQL keeps connections as `{nodes:[…]}`, the shape the readers below take.
 
 /// Open, merged or closed requests, newest change first.
 const LIST_QUERY =

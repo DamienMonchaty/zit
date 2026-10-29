@@ -131,9 +131,7 @@ pub const Commit = struct {
     email: []const u8 = "",
     /// Seconds since the epoch, in the author's own timezone-free terms.
     time: i64,
-    /// In the history's arena. A slice rather than a fixed array: almost
-    /// every commit has one parent, and eight slots in each of 5,000 commits
-    /// was 800 KB of zeros.
+    /// In the history's arena. A slice: almost every commit has one parent.
     parents: []const Oid = &.{},
 };
 
@@ -251,8 +249,7 @@ pub const RefFilter = struct {
     /// Remote branches walked too.
     remotes: bool = true,
 
-    /// `hidden` as a set, where the caller keeps one: asked for every ref,
-    /// a list of thousands hidden made each ask a walk through them all.
+    /// `hidden` as a set, where the caller keeps one, so each ref is one lookup.
     hidden_set: ?*const std.StringHashMapUnmanaged(void) = null,
 
     pub fn walks(self: RefFilter, r: Ref) bool {
@@ -924,11 +921,9 @@ pub const Repo = struct {
     }
 
     /// The commits, into `arena`. The list grows on `gpa` and is copied into
-    /// the arena once, at its size: grown in the arena, every buffer it
-    /// outgrew stayed there with it — twice the list's size, for nothing.
+    /// the arena once, at its size, so outgrown buffers are not left there.
     /// Authors and addresses are stored once each, however many commits.
     fn readCommits(self: Repo, gpa: std.mem.Allocator, arena: std.mem.Allocator, refs: []const Ref, filter_in: RefFilter) Error![]Commit {
-        // Each ref against the hidden ones, through a set.
         var hidden_set: std.StringHashMapUnmanaged(void) = .empty;
         defer hidden_set.deinit(gpa);
         var filter = filter_in;
@@ -1284,12 +1279,6 @@ pub const Repo = struct {
         return out.toOwnedSlice(arena) catch &.{};
     }
 
-    /// Who last touched each line of a tracked file. `text` is the file as the
-    /// caller read it, so this layer stays out of the filesystem.
-    ///
-    /// ponytail: no `-C`/`-M` copy and rename detection. Those are what make
-    /// blame slow, and the answer without them is the one you wanted anyway
-    /// nine times in ten; add the flags behind a toggle if the tenth matters.
     /// A commit's whole message, trimmed, copied into `arena`; empty when the
     /// commit cannot be read.
     pub fn commitMessage(self: Repo, arena: std.mem.Allocator, id: Oid) []const u8 {
@@ -1300,6 +1289,12 @@ pub const Repo = struct {
         return arena.dupe(u8, std.mem.trim(u8, std.mem.span(message), " \t\r\n")) catch "";
     }
 
+    /// Who last touched each line of a tracked file. `text` is the file as the
+    /// caller read it, so this layer stays out of the filesystem.
+    ///
+    /// ponytail: no `-C`/`-M` copy and rename detection. Those are what make
+    /// blame slow, and the answer without them is the one you wanted anyway
+    /// nine times in ten; add the flags behind a toggle if the tenth matters.
     pub fn readBlame(
         self: Repo,
         gpa: std.mem.Allocator,
