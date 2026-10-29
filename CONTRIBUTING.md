@@ -47,8 +47,9 @@ it, and match the style of the code around it.
 
 ## Releasing
 
-1. On `develop`, set the new version in `build.zig.zon` and `APP_VERSION` in
-   `src/main.zig`, and add its section to `CHANGELOG.md`.
+1. On `develop`, set the new version in `build.zig.zon` (the app reads it
+   from there) and in `assets/zit.manifest` (as `0.1.2.0`), and add its
+   section to `CHANGELOG.md`.
 2. Merge `develop` into `main` through a pull request.
 3. Tag the merge and push the tag:
    ```sh
