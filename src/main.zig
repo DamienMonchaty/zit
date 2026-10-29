@@ -1668,7 +1668,7 @@ fn appDeinit(win: *dvui.Window) void {
     clearJobThen();
     job_then.deinit(gpa);
     closeConnect();
-    for ([_]*std.ArrayList(u8){ &connect_code, &connect_device, &connect_uri, &connect_note, &connect_token }) |l| l.deinit(gpa);
+    for ([_]*std.ArrayList(u8){ &connect_code, &connect_device, &connect_uri, &connect_note }) |l| l.deinit(gpa);
     github.deinit();
     // After the workers above, the last that start programs with it.
     run.env_override = null;
@@ -7156,7 +7156,7 @@ fn settingsDialog() void {
             // Who Zit is connected as, and the way in or out.
             if (integrations) {
                 loadMe();
-                settingsField(@src(), "Account", "A code typed on github.com, or a token — kept readable by you alone");
+                settingsField(@src(), "Account", "A code typed on github.com — the token it gives is kept readable by you alone");
                 var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
                     .expand = .horizontal,
                     .background = true,
@@ -8482,57 +8482,29 @@ fn signOutGithub(login: []const u8) void {
 var connect_open = false;
 var connect_rect: dvui.Rect = .{};
 var connect_job: ?*run.Capture = null;
-var connect_state: enum { choose, asking, waiting, paste, user, done, failed } = .choose;
+var connect_state: enum { asking, waiting, user, done, failed } = .asking;
 /// GitHub's code to type, and what Zit asks with; owned.
 var connect_code: std.ArrayList(u8) = .empty;
 var connect_device: std.ArrayList(u8) = .empty;
 var connect_uri: std.ArrayList(u8) = .empty;
 var connect_interval_s: u32 = 5;
 var connect_note: std.ArrayList(u8) = .empty;
-/// The token, held between its arrival and the `/user` that names it.
-var connect_token: std.ArrayList(u8) = .empty;
 /// Asked from the identity dialog: its fields filled once connected.
 var connect_fills_identity = false;
 
-/// The dialog, at its first question: a code or a token. Also its Back.
+/// The dialog, and OAuth's device flow under way: a code from GitHub, typed
+/// on its page in the browser. Also its Try again.
 fn openConnect() void {
     connect_open = true;
     connect_rect = .{};
-    connect_state = .choose;
+    connect_state = .asking;
     connect_code.clearRetainingCapacity();
     connect_note.clearRetainingCapacity();
-    connect_token.clearRetainingCapacity();
     if (connect_job) |j| j.deinit(app_io);
-    connect_job = null;
-}
-
-/// OAuth's device flow: a code from GitHub, typed on its page in the browser.
-fn startDeviceFlow() void {
-    connect_rect = .{};
-    connect_state = .asking;
     connect_job = github.startDevice() catch {
         connectFailed("Could not run curl. Is it installed?");
         return;
     };
-}
-
-/// Instead of the code: a token made on github.com and pasted in, as
-/// GitKraken also allows — a classic one passes organisations that have not
-/// approved Zit's app.
-fn pasteToken() void {
-    connect_rect = .{};
-    connect_token.clearRetainingCapacity();
-    connect_state = .paste;
-}
-
-/// The pasted token, kept if GitHub says whose it is.
-fn usePastedToken() void {
-    const token = std.mem.trim(u8, connect_token.items, " \t\r\n");
-    if (token.len == 0) return;
-    github.save(token, "") catch return connectFailed("Could not keep the token: no config folder.");
-    connect_token.clearRetainingCapacity();
-    connect_state = .user;
-    connect_job = github.start(".", "GET", "/user", null) catch return connectFailed("Could not run curl.");
 }
 
 fn connectFailed(why: []const u8) void {
@@ -8546,7 +8518,6 @@ fn closeConnect() void {
     connect_open = false;
     if (connect_job) |j| j.deinit(app_io);
     connect_job = null;
-    connect_token.clearRetainingCapacity();
 }
 
 /// What came back, and the next ask: on the timer GitHub set, while the
@@ -8597,7 +8568,7 @@ fn pumpConnect(timer_id: dvui.Id) void {
                 // A token GitHub turns down is not kept.
                 if (!got.ok()) {
                     github.signOut();
-                    return connectFailed(if (got.code == 401) "GitHub did not take that token." else github.failure(a.allocator(), got) orelse "GitHub did not say who signed in.");
+                    return connectFailed(if (got.code == 401) "GitHub did not accept the sign-in." else github.failure(a.allocator(), got) orelse "GitHub did not say who signed in.");
                 }
                 const user = std.json.parseFromSliceLeaky(struct { login: []const u8 = "" }, a.allocator(), got.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return connectFailed("GitHub did not say who signed in.");
                 // The token is on disk already: only the name it goes by.
@@ -8635,10 +8606,8 @@ fn connectDialog() void {
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
     defer body.deinit();
     const text = switch (connect_state) {
-        .choose => "Sign in on github.com with a code, or paste a token made there. An organisation that has not approved Zit only lets a token in.",
         .asking => "Asking GitHub for a code…",
         .waiting => "Type this code on the GitHub page that just opened — it is in your clipboard — and approve Zit.",
-        .paste => "A classic token with the repo and read:org scopes — or a fine-grained one, owned by the organisation, that can read its pull requests and issues.",
         .user => "Finding out who you are…",
         .done => "Connected.",
         .failed => connect_note.items,
@@ -8657,48 +8626,12 @@ fn connectDialog() void {
         if (dialogButton(@src(), "Open the page again", false)) openUrl(connect_uri.items);
         loadingSpinner(@src());
     }
-    var entered = false;
-    if (connect_state == .paste) {
-        const te = textField(@src(), .{
-            .text = .{ .array_list = .{ .backing = &connect_token, .allocator = gpa, .limit = 256 } },
-            .placeholder = "ghp_…",
-            .password_char = "•",
-        }, .{
-            .expand = .horizontal,
-            // However long the token, the field scrolls rather than widen
-            // the dialog.
-            .min_size_content = .{ .w = 1, .h = style.body().lineHeight() },
-            .max_size_content = .width(1),
-            .font = style.body(),
-            .background = true,
-            .color_fill = .{ .color = style.surfaceInput() },
-            .border = dvui.Rect.all(1),
-            .color_border = .{ .color = style.border() },
-            .corners = style.radius.input,
-            .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
-        });
-        if (te.enter_pressed) entered = true;
-        const field_id = te.data().id;
-        te.deinit();
-        focusOnce(field_id);
-    }
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.lg } });
         defer line.deinit();
-        if (connect_state == .paste and linkButton(@src(), "Create one on GitHub", style.accent())) openUrl("https://github.com/settings/tokens/new?scopes=repo,read:org&description=Zit");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        switch (connect_state) {
-            .choose => {
-                if (dialogButton(@src(), "Use a token", false)) pasteToken();
-                if (dialogButton(@src(), "Sign in with a code", true)) startDeviceFlow();
-            },
-            .paste => {
-                if (dialogButton(@src(), "Back", false)) openConnect();
-                if (dialogButton(@src(), "Connect", connect_token.items.len > 0) or entered) usePastedToken();
-            },
-            .waiting, .failed => if (dialogButton(@src(), "Back", false)) openConnect(),
-            else => if (dialogButton(@src(), "Cancel", false)) closeConnect(),
-        }
+        if (connect_state == .failed and dialogButton(@src(), "Try again", true)) openConnect();
+        if (dialogButton(@src(), "Cancel", false)) closeConnect();
     }
     if (escapePressed()) closeConnect();
     if (!connect_open) closeConnect();
@@ -16191,7 +16124,7 @@ const features = [_]Feature{
         "Merge, auto-merge, close",
         "Re-run the failed checks",
         "Issues",
-        "Sign in with a code, or a token",
+        "Sign in with a code on github.com",
         "Off: nothing is asked of GitHub",
     } },
     .{ .icon = dvui.entypo.archive, .title = "Conflicts", .items = &.{
@@ -21370,9 +21303,9 @@ test "audit: the main controls do what they say when clicked" {
     try std.testing.expectEqual(RepoDialog.none, repo_dialog);
 }
 
-// GitHub, two ways in — a code or a token — one at a time, with a way back.
-// Nothing here reaches GitHub: a click that would is not made.
-test "the connect dialog asks a code or a token, and Back goes back" {
+// The code GitHub hands out, big enough to copy by eye, in a dialog that
+// keeps its width. Nothing here reaches GitHub: the flow is set, not started.
+test "the connect dialog shows the code and keeps its width" {
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1000, .h = 700 } });
     defer t.deinit();
     gpa = std.testing.allocator;
@@ -21381,41 +21314,25 @@ test "the connect dialog asks a code or a token, and Back goes back" {
     defer resetUiGlobals();
     defer {
         closeConnect();
-        connect_token.deinit(gpa);
-        connect_token = .empty;
         connect_code.deinit(gpa);
         connect_code = .empty;
         connect_note.deinit(gpa);
         connect_note = .empty;
     }
 
-    openConnect();
-    try dvui.testing.settle(frameArrowCursor);
-    try std.testing.expect(connect_open);
-    try std.testing.expect(connect_job == null);
-
-    try clickAt(try tagCenter("dialog:Use a token"));
-    try std.testing.expect(connect_state == .paste);
-
-    // Connect with nothing typed stays put.
-    try clickAt(try tagCenter("dialog:Connect"));
-    try std.testing.expect(connect_state == .paste);
-
-    // Typed, then Back: the first question again, the token forgotten.
-    try connect_token.appendSlice(gpa, "ghp_secret");
-    try clickAt(try tagCenter("dialog:Back"));
-    try std.testing.expect(connect_state == .choose);
-    try std.testing.expectEqual(@as(usize, 0), connect_token.items.len);
-
-    // The dialog keeps its width, whatever is pasted.
-    pasteToken();
-    try connect_token.appendSlice(gpa, "ghp_0123456789abcdefghijABCDEFGHIJ0123456789abcdefghij");
+    connect_open = true;
+    connect_rect = .{};
+    connect_state = .waiting;
+    try connect_code.appendSlice(gpa, "ABCD-1234");
     try dvui.testing.settle(frameArrowCursor);
     try std.testing.expect(connect_rect.w <= 440);
 
-    try pressFrame(.escape, .none);
+    // A failure says why, and Cancel closes.
+    connectFailed("GitHub did not accept the sign-in.");
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(dvui.tagGet("dialog:Try again") != null);
+    try clickAt(try tagCenter("dialog:Cancel"));
     try std.testing.expect(!connect_open);
-    try std.testing.expectEqual(@as(usize, 0), connect_token.items.len);
 }
 
 test "a long message is cut with an ellipsis, a short one left alone" {
