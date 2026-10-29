@@ -5,6 +5,8 @@ Every release of Zit, newest first. Downloads are on the
 
 ## Unreleased
 
+## [0.1.2] — 2026-10-29
+
 ### Fixed
 - The text of a one-line field is centred in it, instead of sitting near its top.
 - The first tab starts at the window's edge, and the active tab is joined to the
