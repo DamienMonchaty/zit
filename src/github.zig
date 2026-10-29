@@ -13,7 +13,7 @@ const run = @import("run.zig");
 
 /// The OAuth App Zit signs in as (github.com/settings/applications), device
 /// flow on. Public by design: the device flow needs no secret.
-pub const CLIENT_ID = "Ov23li8L4ysVGsWdpknv";
+pub const CLIENT_ID = "Ov23lioNe1gRkBs8j14h";
 /// What the token may do: the repositories' pull requests, issues and checks,
 /// private ones too; the organisations they are in, to list them.
 const SCOPES = "repo read:org";
