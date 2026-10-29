@@ -18986,6 +18986,7 @@ test "the toolbar's branch menu filters and switches branches" {
     try typeText("feat");
     try std.testing.expect(dvui.tagGet("switch:main") == null);
     try clickAt(try tagCenter("switch:feature"));
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqualStrings("feature", history.?.head.?);
 
@@ -18993,6 +18994,7 @@ test "the toolbar's branch menu filters and switches branches" {
     try clickAt(try tagCenter("toolbar:branch"));
     try std.testing.expectEqual(@as(usize, 0), switch_filter.items.len);
     try clickAt(try tagCenter("switch:origin/remote-only"));
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqualStrings("remote-only", history.?.head.?);
     try expectGit(down, &.{ "rev-parse", "--verify", "-q", "remote-only@{upstream}" });
