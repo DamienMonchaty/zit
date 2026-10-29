@@ -155,6 +155,9 @@ fn runToEnd(
         .stdin = if (input == null) .ignore else .pipe,
         .stdout = .pipe,
         .stderr = .pipe,
+        // Zit is a GUI program with no console, so Windows opens a new one for
+        // every console program it starts — a window per `git` and `curl`.
+        .create_no_window = true,
     });
     errdefer child.kill(io);
 
