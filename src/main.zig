@@ -1991,7 +1991,7 @@ const HistoryLoad = struct {
         var r = git.Repo.open(self.path) catch return;
         defer r.deinit();
         var h = r.readHistoryFiltered(gpa, self.filter) catch return;
-        const l = graph.build(gpa, h.commits, h.head_oid, h.refs) catch {
+        const l = graph.build(gpa, h.commits, h.head_oid) catch {
             h.deinit();
             return;
         };
@@ -2490,7 +2490,7 @@ fn reloadHistory() void {
         setCommandError(git.lastError());
         return;
     };
-    var next_lanes = graph.build(gpa, next_history.commits, next_history.head_oid, next_history.refs) catch {
+    var next_lanes = graph.build(gpa, next_history.commits, next_history.head_oid) catch {
         next_history.deinit();
         setCommandError("Out of memory laying out the graph.");
         return;
@@ -11632,7 +11632,7 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
     // right whenever the list overflows; the header has to keep the same, or
     // every column header sits that far right of its column.
     const bar_w: f32 = if (graph_scroll.virtual_size.h > graph_scroll.viewport.h + 0.5) dvui.ScrollBarWidget.defaults.min_sizeGet().w else 0;
-    const lane_w: f32 = if (with_lanes) graphColumn() + style.graph.gap else 0;
+    const lane_w: f32 = if (with_lanes) graphLead() else 0;
 
     {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -11910,7 +11910,7 @@ const MESSAGE_MIN: f32 = 220;
 fn columnsShown() struct { author: bool, sha: bool } {
     const w = graph_scroll.viewport.w;
     if (w <= 0) return .{ .author = true, .sha = true };
-    var room = w - 2 * style.space.lg - graphColumn() - style.graph.gap - col_time - col_sha - col_author - 2 * style.space.md;
+    var room = w - 2 * style.space.lg - graphLead() - col_time - col_sha - col_author - 2 * style.space.md;
     const sha = room >= MESSAGE_MIN;
     if (!sha) room += col_sha;
     return .{ .author = room >= MESSAGE_MIN, .sha = sha };
@@ -12384,7 +12384,7 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
     // accent, a commit still being written.
     {
         var column = dvui.box(@src(), .{}, .{
-            .min_size_content = .{ .w = graphColumn() + style.graph.gap },
+            .min_size_content = .{ .w = graphLead() },
             .expand = .vertical,
             .background = false,
             .padding = dvui.Rect.all(0),
@@ -12399,7 +12399,7 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
             .min_size_content = .{ .w = style.avatar, .h = style.avatar },
             .max_size_content = .size(.{ .w = style.avatar, .h = style.avatar }),
             .gravity_y = 0.5,
-            .margin = .{ .x = laneX(0) - style.avatar / 2 - style.space.lg },
+            .margin = .{ .x = BRANCH_COL_W + laneX(0) - style.avatar / 2 - style.space.lg },
             .padding = dvui.Rect.all(0),
         });
         defer node.deinit();
@@ -12510,16 +12510,40 @@ fn commitRow(
     // Only under the pointer, as GitComet has it: the lines alone say which
     // branch is which.
     if (lane) |l| if (!selected and hovered) {
-        const x0 = style.space.lg + laneX(l.lane);
+        const x0 = style.space.lg + BRANCH_COL_W + laneX(l.lane);
         const x1 = style.space.lg + graphRuleX();
         // The branch the commit is on, lit the way GitKraken lights it.
         rs.rectToPhysical(.{ .x = x0, .y = 0, .w = x1 - x0, .h = rh - 1 })
             .fill(.{}, .{ .color = .{ .color = style.laneWash(hue.?, hovered) }, .fade = 0 });
     };
 
-    // The lanes are painted over this gap by `drawLanes`.
-    // A search shows no lanes, so it keeps no room for them.
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = if (lanes_drawn) graphColumn() + style.graph.gap else 0 } });
+    // Where the lanes are drawn, the branch names have a column of their own
+    // before the graph, as GitComet lays it out, dotted across to the node.
+    // A search shows no lanes, so its names stay in front of the message.
+    if (lanes_drawn) {
+        var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = BRANCH_COL_W, .h = rh },
+            .max_size_content = .width(BRANCH_COL_W),
+            .background = false,
+            .padding = .{ .w = style.space.xs },
+        });
+        var chips = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = 0.5, .background = false });
+        const shown = refTags(h, commit, row_index, 1, hue);
+        chips.deinit();
+        cell.deinit();
+        if (shown) if (lane) |l| {
+            // GitComet's leader: dots from the names to the node.
+            const from = style.space.lg + BRANCH_COL_W - style.space.xs;
+            const to = style.space.lg + BRANCH_COL_W + laneX(l.lane) - style.avatar / 2 - 2;
+            var x = from;
+            while (x + 1.5 <= to) : (x += 4) {
+                rs.rectToPhysical(.{ .x = x, .y = rh / 2 - 0.75, .w = 1.5, .h = 1.5 })
+                    .fill(.{}, .{ .color = .{ .color = hue.? }, .fade = 0 });
+            }
+        };
+        // The lanes are painted over this gap by `drawLanes`.
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = graphColumn() + style.graph.gap } });
+    }
 
     // Tags and message share one region that takes what the fixed columns
     // leave and never asks for more — so two long branch names squeeze the
@@ -12532,25 +12556,19 @@ fn commitRow(
         .padding = dvui.Rect.all(0),
     });
 
-    // Ref tags sit in front of the message, where the mockup puts them: a
-    // branch name means "the message to the right of me is where it points".
-    {
-        var drawn: usize = 0;
-        var hidden: usize = 0;
-        for (h.refs, 0..) |ref, i| {
-            if (!git.oidEql(ref.target, commit.id)) continue;
-            // A branch and its remote copy at the same commit say one thing:
-            // one tag, marked as on the remote too.
-            const synced = sameOnRemote(h, ref);
-            if (synced and ref.kind == .remote) continue;
-            if (drawn >= 2) {
-                hidden += 1;
-                continue;
-            }
-            refTag(@src(), ref, i, synced, true, hue);
-            drawn += 1;
-        }
-        if (hidden > 0) moreRefs(@src(), commit, hidden, row_index);
+    if (!lanes_drawn) _ = refTags(h, commit, row_index, 2, null);
+    // GitComet's message border: the line's colour, before the message.
+    if (hue) |c| {
+        var bar = dvui.box(@src(), .{}, .{
+            .min_size_content = .{ .w = 3, .h = rh - 10 },
+            .max_size_content = .size(.{ .w = 3, .h = rh - 10 }),
+            .background = true,
+            .color_fill = .{ .color = c },
+            .corners = .all(1.5),
+            .gravity_y = 0.5,
+            .margin = .{ .w = 6 },
+        });
+        bar.deinit();
     }
 
     if (!lanes_drawn) avatar(@src(), 0, commit, null, null);
@@ -12958,6 +12976,27 @@ fn sameOnRemote(h: git.History, ref: git.Ref) bool {
 /// its colour and bold, the one picked in "Branches:" outlined and bold —
 /// the two Git Graph sets apart from the rest. `synced`, a cloud after the
 /// name: the remote branch of that name is at the same commit.
+/// The names on `commit`, `most` of them, then "+N" for the rest; whether
+/// any was drawn. A branch and its remote copy at the same commit say one
+/// thing: one tag, marked as on the remote too.
+fn refTags(h: git.History, commit: git.Commit, row_index: usize, most: usize, lane: ?dvui.Color) bool {
+    var drawn: usize = 0;
+    var hidden: usize = 0;
+    for (h.refs, 0..) |ref, i| {
+        if (!git.oidEql(ref.target, commit.id)) continue;
+        const synced = sameOnRemote(h, ref);
+        if (synced and ref.kind == .remote) continue;
+        if (drawn >= most) {
+            hidden += 1;
+            continue;
+        }
+        refTag(@src(), ref, i, synced, true, lane);
+        drawn += 1;
+    }
+    if (hidden > 0) moreRefs(@src(), commit, hidden, row_index);
+    return drawn > 0;
+}
+
 /// `lane`: the colour of the graph line the ref's commit sits on. A branch
 /// takes it, as GitKraken colours one, so a name is matched to its line at a
 /// glance; a tag keeps its own.
@@ -12998,7 +13037,8 @@ fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool
         .font = if (ref.head or picked) style.smallBold() else style.small(),
         .color_text = .{ .color = ink },
         .gravity_y = 0.5,
-        .max_size_content = .width(140),
+        // In the branch column, cut to fit it with the "+N" after.
+        .max_size_content = .width(if (lane != null) 72 else 140),
         .padding = dvui.Rect.all(0),
     });
     if (synced) dvui.icon(@src(), "synced", dvui.entypo.cloud, .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
@@ -13194,7 +13234,7 @@ fn drawLanes(
 
     var canvas = dvui.box(src, .{}, .{
         .rect = .{
-            .x = style.space.lg,
+            .x = style.space.lg + BRANCH_COL_W,
             .y = 0,
             .w = graphColumn(),
             .h = graph_scroll.virtual_size.h,
@@ -13262,22 +13302,23 @@ fn drawLanes(
                 // row next to the commit, a quarter circle drawn as a cubic.
                 const r = @min(style.graph.corner, @abs(x1 - x0), rh / 2);
                 const k: f32 = 0.5522847;
-                if (link.from == row.lane) {
-                    // Leaving this row's commit: across at its height, the
-                    // corner, then straight down.
+                if (link.joins or (into_node and link.from != row.lane)) {
+                    // Into the next row's commit — a branch joining the line
+                    // it left, by the commit it left from: straight down its
+                    // own column, the corner, then across into it.
+                    path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y_next - r }));
+                    for (1..steps + 1) |s| {
+                        const t = @as(f32, @floatFromInt(s)) / steps;
+                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x0, .y = y_next - r }, .{ .x = x0, .y = y_next - r * (1 - k) }, .{ .x = x0 + sx * r * k, .y = y_next }, .{ .x = x0 + sx * r, .y = y_next }, t)));
+                    }
+                } else if (link.from == row.lane) {
+                    // Leaving this row's commit — a merge to its other
+                    // parent: across at its height, the corner, then down.
                     const turn = x1 - sx * r;
                     path.addPoint(rs.pointToPhysical(.{ .x = turn, .y = y }));
                     for (1..steps + 1) |s| {
                         const t = @as(f32, @floatFromInt(s)) / steps;
                         path.addPoint(rs.pointToPhysical(bezier(.{ .x = turn, .y = y }, .{ .x = turn + sx * r * k, .y = y }, .{ .x = x1, .y = y + r * (1 - k) }, .{ .x = x1, .y = y + r }, t)));
-                    }
-                } else if (into_node) {
-                    // Into the next row's commit: straight down, the corner,
-                    // then across into it.
-                    path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y_next - r }));
-                    for (1..steps + 1) |s| {
-                        const t = @as(f32, @floatFromInt(s)) / steps;
-                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x0, .y = y_next - r }, .{ .x = x0, .y = y_next - r * (1 - k) }, .{ .x = x0 + sx * r * k, .y = y_next }, .{ .x = x0 + sx * r, .y = y_next }, t)));
                     }
                 } else {
                     // A lane sliding over as one to its left ends: a soft S
@@ -13339,7 +13380,17 @@ fn drawLanes(
 /// The rule between the graph and the message, from the list's content edge:
 /// in the gap after the deepest node, a little short of the text.
 fn graphRuleX() f32 {
-    return graphColumn() + style.graph.gap - style.space.sm;
+    return graphLead() - style.space.sm;
+}
+
+/// GitComet's branch column, left of the graph: a commit's branch names,
+/// dotted across to its node, rather than in front of its message.
+const BRANCH_COL_W: f32 = 130;
+
+/// What comes before the message where the lanes are drawn: the branch
+/// column, the graph, and the gap after it.
+fn graphLead() f32 {
+    return BRANCH_COL_W + graphColumn() + style.graph.gap;
 }
 
 /// Where lane `lane` runs, from the graph column's left edge.
@@ -17380,7 +17431,7 @@ test "a narrow list gives up the sha, then the author, before the message" {
     graph_scroll.viewport.w = 2000;
     try std.testing.expect(columnsShown().sha and columnsShown().author);
     // Room for the message only once the sha is gone.
-    graph_scroll.viewport.w = 2 * style.space.lg + graphColumn() + style.graph.gap + col_time + col_author + 2 * style.space.md + MESSAGE_MIN + 10;
+    graph_scroll.viewport.w = 2 * style.space.lg + graphLead() + col_time + col_author + 2 * style.space.md + MESSAGE_MIN + 10;
     try std.testing.expect(!columnsShown().sha and columnsShown().author);
     graph_scroll.viewport.w = 400;
     try std.testing.expect(!columnsShown().sha and !columnsShown().author);
