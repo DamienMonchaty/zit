@@ -208,13 +208,16 @@ const Tab = struct {
     path: []u8,
 };
 
-/// A run of tabs in the strip. Named, it is a group — a coloured label
-/// before its tabs, foldable to that label. Unnamed, it is tabs in no group.
+/// A workspace: a named, coloured set of repositories, the strip showing one
+/// at a time. Switching to another keeps the window and the view and opens
+/// the repository it was on. The unnamed one is "Default".
 const TabGroup = struct {
     name: []u8,
     tabs: std.ArrayList(Tab),
     color: u8 = 0,
     collapsed: bool = false,
+    /// The tab it was on.
+    last: usize = 0,
 
     fn deinit(self: *TabGroup) void {
         for (self.tabs.items) |tab| gpa.free(tab.path);
@@ -260,7 +263,7 @@ fn loadWorkspace() void {
     // them back — but not opened.
     for (if (remember_tabs) loaded.file.groups else &.{}) |saved| {
         const name = gpa.dupe(u8, if (std.mem.eql(u8, saved.name, LEGACY_DEFAULT_GROUP)) DEFAULT_GROUP_NAME else saved.name) catch continue;
-        var group: TabGroup = .{ .name = name, .tabs = .empty, .color = saved.color, .collapsed = saved.collapsed };
+        var group: TabGroup = .{ .name = name, .tabs = .empty, .color = saved.color, .last = saved.last };
 
         for (saved.repos) |path| {
             const owned = gpa.dupe(u8, path) catch continue;
@@ -280,6 +283,7 @@ fn loadWorkspace() void {
 
     active_group = @min(loaded.file.active_group, groups.items.len -| 1);
     active_tab = loaded.file.active_repo;
+    mergeDefaultWorkspaces();
     dark_theme = loaded.file.dark;
     for (loaded.file.recent) |path| addRecent(path, false);
     commit_prefs = loaded.file.commit;
@@ -299,6 +303,9 @@ fn loadWorkspace() void {
 /// one a frame. A write that fails is tried again later and later, up to a
 /// minute apart (`flushWorkspace`). Tests write at once; they read it back.
 fn saveWorkspace() void {
+    // Every change of tab comes through here: the workspace remembers the
+    // one it is on, for when it is switched back to.
+    if (activeGroup()) |g| g.last = active_tab;
     if (config_dir.items.len == 0) return;
     // Outside a frame — at exit — there is no later: now.
     if (@import("builtin").is_test or !in_frame) {
@@ -350,7 +357,7 @@ fn writeWorkspace() bool {
         const repos = gpa.alloc([]const u8, group.tabs.items.len) catch return false;
         for (group.tabs.items, 0..) |tab, i| repos[i] = tab.path;
 
-        list.append(gpa, .{ .name = group.name, .repos = repos, .color = group.color, .collapsed = group.collapsed }) catch {
+        list.append(gpa, .{ .name = group.name, .repos = repos, .color = group.color, .last = group.last }) catch {
             gpa.free(repos);
             return false;
         };
@@ -443,9 +450,8 @@ fn clearRecent() void {
 /// Nothing on disk is touched.
 fn forgetRepo(path: []const u8) void {
     removeRecent(path);
-    // The other groups first, and only then the active one: closing its last
-    // tab drops the group from under this loop and opens the first tab left
-    // anywhere — which must not be this repository again.
+    // The other workspaces first, then the active one, whose closes go
+    // through `closeTab` to move the open repository along.
     for (groups.items, 0..) |*group, gi| {
         if (gi == active_group) continue;
         var i: usize = group.tabs.items.len;
@@ -454,9 +460,7 @@ fn forgetRepo(path: []const u8) void {
             if (std.mem.eql(u8, group.tabs.items[i].path, path)) gpa.free(group.tabs.orderedRemove(i).path);
         }
     }
-    // A group it was the only tab of goes too, as when its last tab closes.
-    dropEmptyGroups();
-    // Looked up afresh each time: a close can move the active group.
+    for (groups.items) |*group| group.last = @min(group.last, group.tabs.items.len -| 1);
     while (activeGroup()) |group| {
         const i = for (group.tabs.items, 0..) |tab, i| {
             if (std.mem.eql(u8, tab.path, path)) break i;
@@ -547,33 +551,46 @@ fn closeTabIn(g: usize, index: usize) void {
     const removed = groups.items[g].tabs.orderedRemove(index);
     addRecent(removed.path, true);
     gpa.free(removed.path);
-    dropEmptyGroups();
     saveWorkspace();
 }
 
-/// A group with no tabs left goes, as in a browser — unless it is all
-/// there is, since everything downstream assumes a group exists.
-fn dropEmptyGroups() void {
-    var g: usize = groups.items.len;
-    while (g > 0 and groups.items.len > 1) {
-        g -= 1;
-        if (groups.items[g].tabs.items.len > 0) continue;
-        var removed = groups.orderedRemove(g);
-        removed.deinit();
-        if (active_group > g) active_group -= 1 else if (active_group == g) {
-            active_group = @min(g, groups.items.len - 1);
-            active_tab = 0;
+/// Each workspace without a name is the same "Default": files of before the
+/// workspaces had a run of ungrouped tabs between every two groups. Their
+/// tabs go into the first, the one shown staying the one shown.
+fn mergeDefaultWorkspaces() void {
+    const shown: ?[]const u8 = if (activeGroup()) |g| (if (active_tab < g.tabs.items.len) g.tabs.items[active_tab].path else null) else null;
+    var first: ?usize = null;
+    var g: usize = 0;
+    while (g < groups.items.len) {
+        if (groups.items[g].name.len > 0) {
+            g += 1;
+            continue;
         }
+        const into = first orelse {
+            first = g;
+            g += 1;
+            continue;
+        };
+        var merged = groups.orderedRemove(g);
+        groups.items[into].tabs.appendSlice(gpa, merged.tabs.items) catch {
+            merged.deinit();
+            continue;
+        };
+        // The paths now belong to the first; only the list and name go.
+        merged.tabs.deinit(gpa);
+        gpa.free(merged.name);
+        if (active_group > g) active_group -= 1;
     }
+    if (shown) |path| for (groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
+        if (tab.path.ptr != path.ptr) continue;
+        active_group = gi;
+        active_tab = ti;
+    };
 }
 
-/// After the active group lost its last tab: the first tab anywhere, or
-/// nothing open.
-fn selectAnyTab() void {
-    for (groups.items, 0..) |group, g| {
-        if (group.tabs.items.len > 0) return selectTabIn(g, 0);
-    }
-    closeRepo();
+/// What a workspace is called: its name, or "Default" for the unnamed one.
+fn workspaceName(group: TabGroup) []const u8 {
+    return if (group.name.len > 0) group.name else "Default";
 }
 
 fn closeTab(index: usize) void {
@@ -592,9 +609,9 @@ fn closeTab(index: usize) void {
     if (active_tab >= group.tabs.items.len) active_tab = group.tabs.items.len -| 1;
 
     if (group.tabs.items.len == 0) {
+        // The workspace stays, empty, on its start page.
         closeRepo();
-        dropEmptyGroups();
-        selectAnyTab();
+        new_tab_open = true;
     } else if (was_active) {
         openRepo(group.tabs.items[active_tab].path);
     }
@@ -602,15 +619,39 @@ fn closeTab(index: usize) void {
     saveWorkspace();
 }
 
+/// Switch to workspace `index`, in the same window and the same view: the
+/// repository it was on, or its start page when it has none.
 fn selectGroup(index: usize) void {
     if (index >= groups.items.len) return;
-    if (groups.items[index].tabs.items.len == 0) {
+    const group = &groups.items[index];
+    if (group.tabs.items.len == 0) {
         active_group = index;
         active_tab = 0;
         closeRepo();
+        new_tab_open = true;
         return saveWorkspace();
     }
-    selectTabIn(index, 0);
+    new_tab_open = false;
+    selectTabIn(index, @min(group.last, group.tabs.items.len - 1));
+}
+
+/// A new, empty workspace named `name`, in a colour no other has yet where
+/// there is one, switched to.
+fn newWorkspace(name: []const u8) void {
+    const owned = gpa.dupe(u8, name) catch return;
+    groups.append(gpa, .{ .name = owned, .tabs = .empty, .color = unusedColor() }) catch return gpa.free(owned);
+    selectGroup(groups.items.len - 1);
+}
+
+fn unusedColor() u8 {
+    var color: u8 = 0;
+    while (color < GROUP_COLORS - 1) : (color += 1) {
+        const used = for (groups.items) |other| {
+            if (other.color == color) break true;
+        } else false;
+        if (!used) break;
+    }
+    return color;
 }
 
 /// The palette's colours, a group each; the index is what is saved.
@@ -629,19 +670,12 @@ fn groupColor(i: u8) dvui.Color {
     };
 }
 
-/// A new group named `name`, holding tab `t` of group `g`, right after it.
+/// A new workspace named `name`, holding tab `t` of workspace `g`, right
+/// after it.
 fn groupTab(name: []const u8, g: usize, t: usize) void {
     if (g >= groups.items.len or t >= groups.items[g].tabs.items.len) return;
     const owned = gpa.dupe(u8, name) catch return;
-    // A colour the strip does not show yet, where there is one.
-    var color: u8 = 0;
-    while (color < GROUP_COLORS - 1) : (color += 1) {
-        const used = for (groups.items) |other| {
-            if (other.name.len > 0 and other.color == color) break true;
-        } else false;
-        if (!used) break;
-    }
-    groups.insert(gpa, g + 1, .{ .name = owned, .tabs = .empty, .color = color }) catch return gpa.free(owned);
+    groups.insert(gpa, g + 1, .{ .name = owned, .tabs = .empty, .color = unusedColor() }) catch return gpa.free(owned);
     if (active_group > g) active_group += 1;
     moveTab(g, t, g + 1);
 }
@@ -674,30 +708,8 @@ fn moveTabTo(from: usize, t: usize, to: usize, at: usize) void {
         active_group = g;
         active_tab = i;
     };
-    groups.items[to].collapsed = false;
-    dropEmptyGroups();
-    saveWorkspace();
-}
-
-/// Tab `t` of group `g` out of it, into the tabs in no group just after.
-fn ungroupTab(g: usize, t: usize) void {
-    if (g >= groups.items.len or groups.items[g].name.len == 0) return;
-    const next = g + 1;
-    if (next >= groups.items.len or groups.items[next].name.len > 0) {
-        const owned = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
-        groups.insert(gpa, next, .{ .name = owned, .tabs = .empty }) catch return gpa.free(owned);
-        if (active_group > g) active_group += 1;
-    }
-    moveTab(g, t, next);
-}
-
-/// The label goes, the tabs stay where they are.
-fn ungroup(g: usize) void {
-    if (g >= groups.items.len) return;
-    const name = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
-    gpa.free(groups.items[g].name);
-    groups.items[g].name = name;
-    groups.items[g].collapsed = false;
+    // Whatever the moved tab left behind as `last` is a tab still there.
+    for (groups.items) |*group| group.last = @min(group.last, group.tabs.items.len -| 1);
     saveWorkspace();
 }
 
@@ -722,12 +734,7 @@ fn closeGroup(index: usize) void {
         } else |_| {}
     }
     if (active_group > index) active_group -= 1;
-    if (was_active) {
-        active_group = 0;
-        active_tab = 0;
-        selectAnyTab();
-    }
-    saveWorkspace();
+    if (was_active) selectGroup(0) else saveWorkspace();
 }
 
 /// The networked command running on another thread, if any.
@@ -897,8 +904,6 @@ const Prompt = struct {
         new_branch,
         new_tag,
         add_remote,
-        new_group,
-        rename_group,
         /// `arg` is the branch's current name.
         rename_branch,
         stash,
@@ -915,8 +920,6 @@ const Prompt = struct {
             .new_branch => "New branch",
             .new_tag => "New tag",
             .add_remote => "Add remote",
-            .new_group => "New tab group",
-            .rename_group => "Rename this group",
             .rename_branch => "Rename branch",
             .stash => "Stash, as",
             .rename_remote => "Rename remote",
@@ -930,7 +933,6 @@ const Prompt = struct {
             .new_branch, .rename_branch => "branch name",
             .new_tag => "tag name",
             .add_remote => "name url",
-            .new_group, .rename_group => "group name",
             .stash => "what this stash is",
             .rename_remote => "remote name",
             .remote_url => "url",
@@ -941,7 +943,7 @@ const Prompt = struct {
     /// The button that answers the bar.
     fn verb(kind: Kind) []const u8 {
         return switch (kind) {
-            .rename_branch, .rename_remote, .rename_group => "Rename",
+            .rename_branch, .rename_remote => "Rename",
             .stash => "Stash",
             .remote_url => "Save",
             .add_remote, .add_worktree => "Add",
@@ -1710,6 +1712,7 @@ fn appDeinit(win: *dvui.Window) void {
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     signing_key.deinit(gpa);
+    ws_name.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
     clearRecent();
     recent.deinit(gpa);
@@ -2705,18 +2708,17 @@ const TabAction = union(enum) {
     /// Group, tab.
     select_in: [2]usize,
     close_in: [2]usize,
-    group_toggle: usize,
     /// Group, colour.
     group_color: [2]usize,
-    ungroup: usize,
     /// Group, tab, the group it goes to.
     tab_to: [3]usize,
-    tab_out: [2]usize,
     /// Group, tab, then the group and slot it was dragged to.
     tab_at: [4]usize,
     /// A repository picked out of the menu of known ones, owned — the list it
     /// came from is about to be rebuilt underneath it.
     open: []u8,
+    /// The workspace dialog answered: what it holds is applied.
+    workspace_named,
 };
 
 var tab_action: TabAction = .none;
@@ -3328,18 +3330,13 @@ fn runTabAction() void {
         .close_group => |i| closeGroup(i),
         .select_in => |gt| selectTabIn(gt[0], gt[1]),
         .close_in => |gt| closeTabIn(gt[0], gt[1]),
-        .group_toggle => |g| if (g < groups.items.len) {
-            groups.items[g].collapsed = !groups.items[g].collapsed;
-            saveWorkspace();
-        },
         .group_color => |gc| if (gc[0] < groups.items.len) {
             groups.items[gc[0]].color = @intCast(gc[1]);
             saveWorkspace();
         },
-        .ungroup => |g| ungroup(g),
         .tab_to => |m| moveTab(m[0], m[1], m[2]),
         .tab_at => |m| moveTabTo(m[0], m[1], m[2], m[3]),
-        .tab_out => |gt| ungroupTab(gt[0], gt[1]),
+        .workspace_named => applyWorkspaceDialog(),
         .open => |path| {
             defer gpa.free(path);
             openAndRemember(path);
@@ -3650,15 +3647,6 @@ fn runPrompt() void {
             } else {
                 gitDo(&.{ "worktree", "add", "-b", pair[1], dest });
             }
-        },
-        // Nothing to run and nothing to fail: these only rearrange the strip.
-        .new_group => {
-            groupTab(name, group_target[0], group_target[1]);
-            return clearPrompt();
-        },
-        .rename_group => {
-            renameGroup(group_target[0], name);
-            return clearPrompt();
         },
     }
 
@@ -4026,6 +4014,7 @@ fn appFrame() !dvui.App.Result {
     repoDialog();
     identityDialog();
     connectDialog();
+    workspaceDialog();
     settingsDialog();
     keysDialog();
     prEditDialog();
@@ -8180,6 +8169,7 @@ fn tabStrip() void {
     defer strip.deinit();
 
     active_tab_foot = null;
+    workspaceSwitcher();
     tabList();
     pullsButton();
     userMenu();
@@ -8318,29 +8308,13 @@ fn tabList() void {
     const width = TAB_W;
 
     // Only recorded here, run after the frame: selecting or closing one
-    // rebuilds the snapshots the rest of this frame is drawn from.
+    // rebuilds the snapshots the rest of this frame is drawn from. The
+    // workspace's tabs only: the others are a click away in its switcher.
     var flat: usize = 0;
-    for (groups.items, 0..) |group, g| {
-        const named = group.name.len > 0;
-        const hue = groupColor(group.color);
-        // A group is one run, label and tabs, underlined end to end in its
-        // colour.
-        var span = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .id_extra = g,
-            .expand = .vertical,
-            .background = false,
-            .border = .{ .h = if (named) 2 else 0 },
-            .color_border = .{ .color = hue },
-            .margin = .{ .w = if (named) style.space.sm else 0 },
-        });
-        defer span.deinit();
-        if (named) groupChip(g, group, hue);
-        if (named and group.collapsed) {
-            flat += group.tabs.items.len;
-            continue;
-        }
+    if (activeGroup()) |group| {
+        const g = active_group;
         for (group.tabs.items, 0..) |tab, t| {
-            const current = repo != null and g == active_group and t == active_tab;
+            const current = repo != null and t == active_tab;
             const active = !new_tab_open and current;
             var rect: dvui.Rect.Physical = .{};
             switch (tabButton(@src(), flat, git.repoName(tab.path), tab.path, active, width, &rect, .{ .slot = .{ g, t } })) {
@@ -8684,87 +8658,197 @@ fn connectDialog() void {
     if (!connect_open) closeConnect();
 }
 
-/// A group's label: its colour, its name — and how many tabs, folded. A
-/// click folds or unfolds it; a right-click offers the rest.
-fn groupChip(g: usize, group: TabGroup, hue: dvui.Color) void {
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{ .draw_focus = false }, .{
-        .id_extra = g,
-        .tag = frameTag("group", group.name),
+/// The workspace shown, at the strip's start: its colour, its name, and a
+/// menu of every workspace — each switched to in this window and this view —
+/// with new, rename, colour and delete.
+fn workspaceSwitcher() void {
+    const group = activeGroup() orelse return;
+    const button = DropButton.begin(@src(), .{
+        .tag = "workspace:switcher",
         .gravity_y = 0.5,
-        .background = true,
-        .color_fill = .{ .color = hue },
-        .color_fill_hover = .{ .color = hue.lerp(style.text(), 0.15) },
+        .background = false,
+        .color_fill_hover = .{ .color = style.rowHover() },
         .corners = style.radius.input,
-        .margin = .{ .x = style.space.sm, .w = style.space.xxs },
-        .padding = .{ .x = style.space.md, .y = 3, .w = style.space.md, .h = 3 },
+        .margin = .{ .x = style.space.sm, .w = style.space.xs },
+        .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.xs, .h = 3 },
     });
-    bw.processEvents();
-    bw.drawBackground();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-        defer line.deinit();
-        const ink = style.background();
-        dvui.label(@src(), "{s}", .{group.name}, .{ .font = style.smallBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        if (group.collapsed) {
-            dvui.label(@src(), "{d}", .{group.tabs.items.len}, .{ .font = style.small(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
-        }
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+        defer face.deinit();
+        workspaceDot(@src(), 0, group.color);
+        dvui.label(@src(), "{s}", .{workspaceName(group.*)}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
+        dvui.icon(@src(), "workspace_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.xs },
+        });
     }
-    if (bw.clicked()) requestTab(.{ .group_toggle = g });
-    const rect = bw.data().borderRectScale().r;
-    bw.deinit();
-    groupMenu(g, rect);
-}
+    const menu = button.open();
+    defer button.end(menu);
+    const m = menu orelse return;
 
-/// A group's right-click: rename, recolour, ungroup, close.
-fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
-    const ctx = dvui.context(@src(), .{ .rect = rect }, .{ .id_extra = g });
-    defer ctx.deinit();
-    const cp = ctx.activePoint() orelse return;
-    var fw = contextMenu(cp);
-    defer fw.deinit();
-
-    if (menuRow(@src(), "Rename…")) {
-        fw.close();
-        group_target = .{ g, 0 };
-        askNameWith(.rename_group, "", groups.items[g].name);
-    }
-    {
-        var swatches = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
-        defer swatches.deinit();
-        for (0..GROUP_COLORS) |c| {
-            const current = groups.items[g].color == c;
-            var bw: dvui.ButtonWidget = undefined;
-            bw.init(@src(), .{ .draw_focus = false }, .{
-                .id_extra = c,
-                .min_size_content = .{ .w = 16, .h = 16 },
-                .background = true,
-                .color_fill = .{ .color = groupColor(@intCast(c)) },
-                .corners = .all(8),
-                .border = dvui.Rect.all(if (current) 2 else 0),
-                .color_border = .{ .color = style.text() },
-                .margin = .{ .w = style.space.sm },
+    dropHeading(@src(), 0, "WORKSPACES");
+    for (groups.items, 0..) |other, g| {
+        var mi = dvui.menuItem(@src(), .{}, .{
+            .id_extra = g,
+            .tag = frameTag("workspace", workspaceName(other)),
+            .expand = .horizontal,
+            .min_size_content = .{ .w = 260 },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+        });
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+            defer row.deinit();
+            workspaceDot(@src(), g + 1, other.color);
+            dvui.label(@src(), "{s}", .{workspaceName(other)}, .{ .font = if (g == active_group) style.smallBold() else style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
+            const n = other.tabs.items.len;
+            dvui.label(@src(), "{d} {s}", .{ n, if (n == 1) "repository" else "repositories" }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+            if (g == active_group) dvui.icon(@src(), "workspace_on", dvui.entypo.check, .{ .fill_color = .{ .color = style.accent() } }, .{
+                .min_size_content = .{ .w = 11, .h = 11 },
+                .gravity_y = 0.5,
+                .margin = .{ .x = style.space.sm },
             });
-            bw.processEvents();
-            bw.drawBackground();
-            if (bw.clicked()) {
-                fw.close();
-                requestTab(.{ .group_color = .{ g, c } });
-            }
-            bw.deinit();
+        }
+        const picked = mi.activeRect() != null;
+        mi.deinit();
+        if (picked) {
+            m.close();
+            if (g != active_group) requestTab(.{ .select_group = g });
         }
     }
-    if (menuRow(@src(), "Ungroup")) {
-        fw.close();
-        requestTab(.{ .ungroup = g });
+
+    _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = style.space.xs, .h = style.space.xs } });
+    if (menuIcon(@src(), dvui.entypo.plus, "New workspace…", false)) {
+        m.close();
+        openWorkspaceDialog(.new);
     }
-    if (menuRow(@src(), "Close the group")) {
-        fw.close();
-        requestTab(.{ .close_group = g });
+    if (menuIcon(@src(), dvui.entypo.pencil, "Rename this workspace…", false)) {
+        m.close();
+        openWorkspaceDialog(.rename);
+    }
+    if (colorSwatches(@src(), group.color, .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm })) |c| {
+        m.close();
+        requestTab(.{ .group_color = .{ active_group, c } });
+    }
+    if (groups.items.len > 1 and menuIcon(@src(), dvui.entypo.trash, "Delete this workspace", true)) {
+        m.close();
+        requestTab(.{ .close_group = active_group });
     }
 }
 
-/// A tab's right-click: into a group, out of one, closed.
+/// The workspace colours as round buttons, `current` ringed: the one
+/// clicked, if any.
+fn colorSwatches(src: std.builtin.SourceLocation, current: u8, pad: dvui.Rect) ?usize {
+    var swatches = dvui.box(src, .{ .dir = .horizontal }, .{ .background = false, .padding = pad });
+    defer swatches.deinit();
+    var picked: ?usize = null;
+    for (0..GROUP_COLORS) |c| {
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{ .draw_focus = false }, .{
+            .id_extra = c,
+            .min_size_content = .{ .w = 16, .h = 16 },
+            .background = true,
+            .color_fill = .{ .color = groupColor(@intCast(c)) },
+            .corners = .all(8),
+            .border = dvui.Rect.all(if (current == c) 2 else 0),
+            .color_border = .{ .color = style.text() },
+            .margin = .{ .w = style.space.sm },
+        });
+        bw.processEvents();
+        bw.drawBackground();
+        if (bw.clicked()) picked = c;
+        bw.deinit();
+    }
+    return picked;
+}
+
+/// Naming a workspace, in a dialog: a new one, a new one for the tab
+/// `group_target` names, or the one shown renamed — with its colour.
+const WorkspaceDialog = enum { new, with_tab, rename };
+var ws_dialog: ?WorkspaceDialog = null;
+var ws_rect: dvui.Rect = .{};
+var ws_name: std.ArrayList(u8) = .empty;
+var ws_color: u8 = 0;
+
+fn openWorkspaceDialog(kind: WorkspaceDialog) void {
+    ws_dialog = kind;
+    ws_rect = .{};
+    ws_name.clearRetainingCapacity();
+    ws_color = unusedColor();
+    if (kind == .rename) if (activeGroup()) |g| {
+        ws_name.appendSlice(gpa, g.name) catch {};
+        ws_color = g.color;
+    };
+}
+
+fn workspaceDialog() void {
+    const kind = ws_dialog orelse return;
+    var open = true;
+    const win = dvui.windowRect();
+    var fw = modalWindow(@src(), &ws_rect, &open, style.surface(), 400, dvui.Rect.all(0));
+    defer fw.deinit();
+    centerModal(fw.data(), win, null);
+    dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of repositories, switched to in this window", &open);
+
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
+    defer body.deinit();
+    var entered = false;
+    _ = dialogField(@src(), 0, "Name", &ws_name, "e.g. Client work", true, &entered);
+    dialogLabel(@src(), "Colour");
+    if (colorSwatches(@src(), ws_color, .{ .y = style.space.xs, .h = style.space.lg })) |c| ws_color = @intCast(c);
+
+    const named = std.mem.trim(u8, ws_name.items, " \t").len > 0;
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
+        defer line.deinit();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (dialogButton(@src(), "Cancel", false)) open = false;
+        if ((dialogButton(@src(), if (kind == .rename) "Rename" else "Create", named) or entered) and named) requestTab(.workspace_named);
+    }
+    if (escapePressed() or !open) ws_dialog = null;
+}
+
+/// What the dialog was answered with, applied between frames.
+fn applyWorkspaceDialog() void {
+    const kind = ws_dialog orelse return;
+    ws_dialog = null;
+    const name = std.mem.trim(u8, ws_name.items, " \t");
+    if (name.len == 0) return;
+    const target = switch (kind) {
+        .new => blk: {
+            newWorkspace(name);
+            break :blk groups.items.len - 1;
+        },
+        // Made right after the tab's own.
+        .with_tab => blk: {
+            groupTab(name, group_target[0], group_target[1]);
+            break :blk group_target[0] + 1;
+        },
+        .rename => blk: {
+            renameGroup(active_group, name);
+            break :blk active_group;
+        },
+    };
+    if (target < groups.items.len) groups.items[target].color = ws_color;
+    saveWorkspace();
+}
+
+/// A workspace's colour, as a dot.
+fn workspaceDot(src: std.builtin.SourceLocation, id: usize, color: u8) void {
+    var dot = dvui.box(src, .{}, .{
+        .id_extra = id,
+        .min_size_content = .{ .w = 8, .h = 8 },
+        .max_size_content = .size(.{ .w = 8, .h = 8 }),
+        .background = true,
+        .color_fill = .{ .color = groupColor(color) },
+        .corners = .all(4),
+        .gravity_y = 0.5,
+    });
+    dot.deinit();
+}
+
+/// A tab's right-click: to another workspace, to a new one, closed.
 fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     const ctx = dvui.context(@src(), .{ .rect = rect }, .{ .id_extra = id });
     defer ctx.deinit();
@@ -8772,24 +8856,20 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     var fw = contextMenu(cp);
     defer fw.deinit();
 
-    if (menuRow(@src(), "Add to a new group…")) {
-        fw.close();
-        group_target = .{ g, t };
-        askName(.new_group, "");
-    }
     for (groups.items, 0..) |other, gi| {
-        if (gi == g or other.name.len == 0) continue;
-        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to {s}", .{other.name}) catch continue;
-        if (menuRowAt(@src(), caption, gi)) {
+        if (gi == g) continue;
+        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to {s}", .{workspaceName(other)}) catch continue;
+        if (menuIconAt(@src(), gi, dvui.entypo.layers, caption)) {
             fw.close();
             requestTab(.{ .tab_to = .{ g, t, gi } });
         }
     }
-    if (groups.items[g].name.len > 0 and menuRow(@src(), "Remove from the group")) {
+    if (menuIcon(@src(), dvui.entypo.plus, "Move to a new workspace…", false)) {
         fw.close();
-        requestTab(.{ .tab_out = .{ g, t } });
+        group_target = .{ g, t };
+        openWorkspaceDialog(.with_tab);
     }
-    if (menuRow(@src(), "Close")) {
+    if (menuIcon(@src(), dvui.entypo.cross, "Close", false)) {
         fw.close();
         requestTab(.{ .close_in = .{ g, t } });
     }
@@ -9473,25 +9553,28 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
 
 /// A menu row that opens a submenu beside it: the rect to hang it from,
 /// while it is open.
-fn menuSubRow(src: std.builtin.SourceLocation, caption: []const u8) ?dvui.Rect.Natural {
+fn menuSubRow(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8) ?dvui.Rect.Natural {
     var mi = dvui.menuItem(src, .{ .submenu = true }, .{
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
+        .corners = style.radius.input,
+        .padding = .{ .x = style.space.md, .y = 5, .w = style.space.md, .h = 5 },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
     defer row.deinit();
-    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.small(), .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    dvui.icon(@src(), "menu_icon", icon, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+        .min_size_content = .{ .w = 12, .h = 12 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.md },
+    });
+    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     dvui.icon(@src(), "submenu", dvui.entypo.chevron_small_right, .{ .fill_color = .{ .color = style.textFaint() } }, .{
         .min_size_content = .{ .w = 11, .h = 11 },
         .gravity_y = 0.5,
     });
     return mi.activeRect();
-}
-
-fn menuRow(src: std.builtin.SourceLocation, caption: []const u8) bool {
-    return menuRowAt(src, caption, 0);
 }
 
 /// A text entry with its caret visible and no ring. dvui draws both, while
@@ -9536,19 +9619,6 @@ fn focusOnce(id: dvui.Id) void {
 /// widget up by, built from text the widget already shows.
 fn frameTag(prefix: []const u8, name: []const u8) ?[]const u8 {
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}:{s}", .{ prefix, name }) catch null;
-}
-
-/// One line of a menu built in a loop, where `@src()` alone is the same for
-/// every row of it.
-fn menuRowAt(src: std.builtin.SourceLocation, caption: []const u8, id: usize) bool {
-    return dvui.menuItemLabel(src, caption, .{}, .{
-        .id_extra = id,
-        // One menu is open at a time and its captions differ, so the caption
-        // is unique while it is on screen.
-        .tag = frameTag("menu", caption),
-        .expand = .horizontal,
-        .font = style.small(),
-    }) != null;
 }
 
 /// The one search box: a framed field with a magnifier at the end of it.
@@ -12593,28 +12663,28 @@ fn commitMenu(
     if (history) |h| for (h.refs, 0..) |ref, i| {
         if (ref.kind != .local or ref.head or !git.oidEql(ref.target, commit.id)) continue;
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Check out {s}", .{ref.name}) catch continue;
-        if (menuRowAt(@src(), caption, i)) {
+        if (menuIconAt(@src(), i, dvui.entypo.login, caption)) {
             fw.close();
             checkout(ref);
         }
     };
-    if (menuRow(@src(), "Check out this commit (detaches HEAD)")) {
+    if (menuIcon(@src(), dvui.entypo.login, "Check out this commit (detaches HEAD)", false)) {
         fw.close();
         request(&.{ "checkout", sha });
     }
 
     menuSeparator(1);
-    if (menuRow(@src(), "New branch here")) {
+    if (menuIcon(@src(), dvui.entypo.flow_branch, "New branch here", false)) {
         fw.close();
         askName(.new_branch, sha);
     }
-    if (menuRow(@src(), "Tag this commit")) {
+    if (menuIcon(@src(), dvui.entypo.tag, "Tag this commit", false)) {
         fw.close();
         askName(.new_tag, sha);
     }
 
     menuSeparator(2);
-    if (menuRow(@src(), "Cherry-pick onto current branch")) {
+    if (menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
         fw.close();
         // A merge, like a revert of one: its change is the diff against the
         // first parent, the branch it was merged into.
@@ -12624,7 +12694,7 @@ fn commitMenu(
             request(&.{ "cherry-pick", sha });
         }
     }
-    if (menuRow(@src(), "Revert")) {
+    if (menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
         fw.close();
         // A merge has no single change to undo until one parent is named; the
         // first is the branch it was merged into, which is what "undo this
@@ -12635,14 +12705,14 @@ fn commitMenu(
             request(&.{ "revert", "--no-edit", sha });
         }
     }
-    if (menuRow(@src(), "Rebase from here, interactively")) {
+    if (menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
         fw.close();
         // The clicked commit is replayed too, so the list starts at its parent.
         beginRebase(if (commit.parents.len > 0) commit.parents[0] else null);
     }
     // The three resets, one row: they differ only in what happens to the
     // changes, which is the choice the submenu asks for.
-    if (menuSubRow(@src(), "Reset branch here")) |r| {
+    if (menuSubRow(@src(), dvui.entypo.back_in_time, "Reset branch here")) |r| {
         var sub = dvui.floatingMenu(@src(), .{ .from = r }, .{
             .background = true,
             .color_fill = .{ .color = style.surfaceRaised() },
@@ -12653,27 +12723,27 @@ fn commitMenu(
             .min_size_content = .{ .w = 220 },
         });
         defer sub.deinit();
-        if (menuRow(@src(), "Soft — keep changes staged")) {
+        if (menuIcon(@src(), dvui.entypo.back, "Soft — keep changes staged", false)) {
             fw.close();
             request(&.{ "reset", "--soft", sha });
         }
-        if (menuRow(@src(), "Mixed — keep changes unstaged")) {
+        if (menuIcon(@src(), dvui.entypo.back, "Mixed — keep changes unstaged", false)) {
             fw.close();
             request(&.{ "reset", "--mixed", sha });
         }
-        if (menuRow(@src(), "Hard — discard changes")) {
+        if (menuIcon(@src(), dvui.entypo.trash, "Hard — discard changes", true)) {
             fw.close();
             ask(.reset_hard, sha);
         }
     }
 
     menuSeparator(3);
-    if (menuRow(@src(), "Show diff")) {
+    if (menuIcon(@src(), dvui.entypo.text_document, "Show diff", false)) {
         fw.close();
         selectCommit(commit.id);
     }
     if (history) |h| if (h.head_oid) |head_oid| {
-        if (!git.oidEql(head_oid, commit.id) and menuRow(@src(), "Compare with the checked-out commit")) {
+        if (!git.oidEql(head_oid, commit.id) and menuIcon(@src(), dvui.entypo.flow_parallel, "Compare with the checked-out commit", false)) {
             fw.close();
             var a: [8]u8 = undefined;
             var name_buf: [64]u8 = undefined;
@@ -12685,12 +12755,12 @@ fn commitMenu(
     };
 
     menuSeparator(4);
-    if (menuRow(@src(), "Copy the full sha")) {
+    if (menuIcon(@src(), dvui.entypo.copy, "Copy the full sha", false)) {
         fw.close();
         var hex: [41]u8 = undefined;
         dvui.clipboardTextSet(git.oidHex(commit.id, &hex));
     }
-    if (menuRow(@src(), "Copy the message")) {
+    if (menuIcon(@src(), dvui.entypo.clipboard, "Copy the message", false)) {
         fw.close();
         dvui.clipboardTextSet(commit.summary);
     }
@@ -15627,30 +15697,30 @@ fn changeMenu(
     defer fw.deinit();
 
     if (staged) {
-        if (menuRow(@src(), "Unstage")) {
+        if (menuIcon(@src(), dvui.entypo.squared_minus, "Unstage", false)) {
             fw.close();
             requestStage(change.path, change.old_path, false);
         }
     } else {
-        if (menuRow(@src(), "Stage")) {
+        if (menuIcon(@src(), dvui.entypo.squared_plus, "Stage", false)) {
             fw.close();
             requestStage(change.path, change.old_path, true);
         }
     }
 
-    if (menuRow(@src(), "Open this file")) {
+    if (menuIcon(@src(), dvui.entypo.document, "Open this file", false)) {
         fw.close();
         openPath(change.path);
     }
-    if (menuRow(@src(), "Blame")) {
+    if (menuIcon(@src(), dvui.entypo.eye, "Blame", false)) {
         fw.close();
         selectBlame(change.path);
     }
-    if (menuRow(@src(), "History of this file")) {
+    if (menuIcon(@src(), dvui.entypo.clock, "History of this file", false)) {
         fw.close();
         showFileHistory(change.path);
     }
-    if (menuRow(@src(), "Copy the path")) {
+    if (menuIcon(@src(), dvui.entypo.copy, "Copy the path", false)) {
         fw.close();
         dvui.clipboardTextSet(change.path);
     }
@@ -15658,14 +15728,14 @@ fn changeMenu(
     // Last, and only where there is something to lose: staged changes are
     // dropped by unstaging them first, which is the line above.
     if (!staged) {
-        if (menuRow(@src(), "Discard changes…")) {
+        if (menuIcon(@src(), dvui.entypo.trash, "Discard changes…", true)) {
             fw.close();
             ask(.discard, change.path);
         }
         // Only for a file git does not know yet: ignoring a tracked one does
         // nothing until it is removed from the index, which is a surprise.
         if (change.status == .added) {
-            if (menuRow(@src(), "Ignore this file")) {
+            if (menuIcon(@src(), dvui.entypo.eye_with_line, "Ignore this file", false)) {
                 fw.close();
                 ignorePath(change.path);
             }
@@ -16977,6 +17047,9 @@ fn resetUiGlobals() void {
     if (signing_job) |j| j.deinit(app_io);
     signing_job = null;
     sidebar_filter = .empty;
+    ws_name.deinit(gpa);
+    ws_name = .empty;
+    ws_dialog = null;
 
     clearRecent();
     recent.deinit(gpa);
@@ -18384,7 +18457,7 @@ test "a tab dragged onto another takes its place, and the one shown stays shown"
     try std.testing.expectEqualStrings("c", repo_name);
 }
 
-test "a group keeps its own tabs, and the last group cannot be closed" {
+test "workspaces keep their own tabs, and switching opens the one each was on" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
@@ -18403,33 +18476,46 @@ test "a group keeps its own tabs, and the last group cannot be closed" {
 
     var buf_a: [std.fs.max_path_bytes]u8 = undefined;
     var buf_b: [std.fs.max_path_bytes]u8 = undefined;
+    var buf_c: [std.fs.max_path_bytes]u8 = undefined;
     const a = try std.fmt.bufPrint(&buf_a, "{s}/a", .{root});
     const b = try std.fmt.bufPrint(&buf_b, "{s}/b", .{root});
+    const c = try std.fmt.bufPrint(&buf_c, "{s}/c", .{root});
     try expectGit(root, &.{ "init", "-q", "-b", "main", "a" });
     try expectGit(root, &.{ "init", "-q", "-b", "main", "b" });
+    try expectGit(root, &.{ "init", "-q", "-b", "main", "c" });
 
     loadWorkspace();
     openAndRemember(a);
-
     openAndRemember(b);
-    // Two tabs in no group to begin with.
+    // Both in the default workspace.
     try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqualStrings("", groups.items[0].name);
+    try std.testing.expectEqualStrings("Default", workspaceName(groups.items[0]));
     try std.testing.expectEqual(@as(usize, 2), groups.items[0].tabs.items.len);
 
-    // b into a group of its own, still the one open.
-    groupTab("Side", 0, 1);
+    // A new workspace starts empty, on its start page, nothing open.
+    newWorkspace("Side");
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqualStrings("Side", groups.items[1].name);
     try std.testing.expectEqual(@as(usize, 1), active_group);
+    try std.testing.expect(repo == null and new_tab_open);
+    // What is opened there is its own.
+    openAndRemember(c);
+    try std.testing.expectEqual(@as(usize, 1), groups.items[1].tabs.items.len);
+    try std.testing.expectEqualStrings("c", repo_name);
+
+    // Back to Default: the repository it was on, b, not its first tab.
+    selectGroup(0);
     try std.testing.expectEqualStrings("b", repo_name);
+    // And back again: c.
+    selectGroup(1);
+    try std.testing.expectEqualStrings("c", repo_name);
 
-    // A tab of the other group, picked straight from the strip.
-    selectTabIn(0, 0);
-    try std.testing.expectEqualStrings("a", repo_name);
+    // A tab moved over; the workspace it leaves keeps the rest.
+    selectGroup(0);
+    moveTab(0, 0, 1);
+    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), groups.items[1].tabs.items.len);
 
-    // Both groups survive the restart, with their tabs, colour and fold.
-    groups.items[1].collapsed = true;
+    // Everything survives the restart: names, colours, tabs, where each was.
     groups.items[1].color = 3;
     saveWorkspace();
     closeRepo();
@@ -18437,20 +18523,66 @@ test "a group keeps its own tabs, and the last group cannot be closed" {
     loadWorkspace();
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
     try std.testing.expectEqualStrings("Side", groups.items[1].name);
-    try std.testing.expect(groups.items[1].collapsed);
     try std.testing.expectEqual(@as(u8, 3), groups.items[1].color);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[1].tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), groups.items[1].tabs.items.len);
 
-    // Out of the group again: the group, empty, goes.
-    ungroupTab(1, 0);
+    // A workspace whose last tab closes stays, empty, on its start page.
+    selectGroup(0);
+    closeTab(0);
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqualStrings("", groups.items[1].name);
+    try std.testing.expect(repo == null and new_tab_open);
+    new_tab_open = false;
 
-    // Closing a group closes its tabs; the last one standing stays.
-    closeGroup(0);
+    // Deleting one closes its tabs; the last one standing stays.
+    closeGroup(1);
     closeGroup(0);
     try std.testing.expectEqual(@as(usize, 1), groups.items.len);
     try std.testing.expectEqual(@as(usize, 0), groups.items[0].tabs.items.len);
+}
+
+test "a workspace is named in a dialog, not a bar" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1000, .h = 700 } });
+    defer t.deinit();
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    try style.applyEmbedded(gpa, true);
+    defer resetUiGlobals();
+    loadWorkspace();
+    try dvui.testing.settle(frameArrowCursor);
+
+    try clickAt(try tagCenter("workspace:switcher"));
+    try clickAt(try tagCenter("menu:New workspace…"));
+    try std.testing.expect(ws_dialog == .new);
+    try std.testing.expect(prompt == null);
+    try ws_name.appendSlice(gpa, "Client");
+    ws_color = 4;
+    try clickAt(try tagCenter("dialog:Create"));
+    try dvui.testing.settle(frameArrowCursor);
+
+    try std.testing.expect(ws_dialog == null);
+    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+    try std.testing.expectEqualStrings("Client", groups.items[1].name);
+    try std.testing.expectEqual(@as(u8, 4), groups.items[1].color);
+    try std.testing.expectEqual(@as(usize, 1), active_group);
+}
+
+test "the ungrouped runs of an old workspace file become one Default" {
+    gpa = std.testing.allocator;
+    defer resetUiGlobals();
+    for ([_][]const u8{ "", "Work", "" }, 0..) |name, i| {
+        var group: TabGroup = .{ .name = try gpa.dupe(u8, name), .tabs = .empty };
+        try group.tabs.append(gpa, .{ .path = try std.fmt.allocPrint(gpa, "/r{d}/", .{i}) });
+        try groups.append(gpa, group);
+    }
+    active_group = 2;
+    active_tab = 0;
+    mergeDefaultWorkspaces();
+    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+    try std.testing.expectEqual(@as(usize, 2), groups.items[0].tabs.items.len);
+    try std.testing.expectEqualStrings("Work", groups.items[1].name);
+    // The tab shown is still the one shown, now in Default.
+    try std.testing.expectEqual(@as(usize, 0), active_group);
+    try std.testing.expectEqualStrings("/r2/", groups.items[0].tabs.items[active_tab].path);
 }
 
 /// Type `text` into the open prompt and answer it, the way Enter would.
@@ -21123,23 +21255,27 @@ test "a closed tab is remembered, and only forgetting removes it" {
     try std.testing.expectEqual(@as(usize, 1), active_group);
     try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
 
-    // Forgotten while it is the only tab of the active group and a tab of
-    // another one too: the group goes, and what opens is not b again.
+    // Forgotten while it is the only tab of the active workspace and a tab
+    // of another one too: gone from both, and the workspace stays, empty, on
+    // its start page — b is not opened again.
     try groups.items[0].tabs.append(gpa, .{ .path = try gpa.dupe(u8, b_path) });
     forgetRepo(b_path);
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
-    try std.testing.expectEqualStrings("a", repo_name);
-    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
-
-    // Forgotten while the only tab of a group that is not the active one: no
-    // empty group left behind.
-    openAndRemember(b);
-    groupTab("Solo", 0, 1);
-    selectTabIn(0, 0);
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), groups.items[1].tabs.items.len);
+    try std.testing.expect(repo == null and new_tab_open);
+    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
+    new_tab_open = false;
+
+    // Forgotten while a tab of a workspace not shown: that workspace keeps
+    // its place, and what is open stays open.
+    selectGroup(1);
+    openAndRemember(b);
+    selectGroup(0);
+    try std.testing.expectEqualStrings("a", repo_name);
     forgetRepo(b_path);
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
+    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+    try std.testing.expectEqual(@as(usize, 0), groups.items[1].tabs.items.len);
     try std.testing.expectEqualStrings("a", repo_name);
 }
 
