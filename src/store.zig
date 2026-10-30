@@ -18,6 +18,17 @@ pub const Group = struct {
     color: u8 = 0,
     /// Folded to its label in the strip.
     collapsed: bool = false,
+    /// Index into `File.workspaces`: the workspace the group is in.
+    workspace: usize = 0,
+};
+
+/// A set of groups, the strip showing one at a time.
+pub const Workspace = struct {
+    name: []const u8 = "",
+    color: u8 = 0,
+    /// The group and tab it was on, reopened when switched back to.
+    group: usize = 0,
+    tab: usize = 0,
 };
 
 /// The file's whole contents.
@@ -27,6 +38,9 @@ pub const Group = struct {
 /// first, so the empty workspace saved next does not overwrite it.
 pub const File = struct {
     groups: []const Group = &.{},
+    /// None in a file of before them: every group is then in one.
+    workspaces: []const Workspace = &.{},
+    active_workspace: usize = 0,
     active_group: usize = 0,
     active_repo: usize = 0,
     /// Which of the two compiled-in themes to start in.
