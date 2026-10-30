@@ -167,13 +167,15 @@ pub const graph = struct {
     /// Wider than a line needs: every node is an avatar, and two on
     /// neighbouring lanes must not touch. Closer together only when there are
     /// more lanes than room.
-    pub const lane_w: f32 = 25;
+    pub const lane_w: f32 = 28;
     /// Between the deepest node and the text, so a ring never touches a tag.
     pub const gap: f32 = 14;
     /// Thickness of a lane line.
-    pub const line_w: f32 = 2;
+    pub const line_w: f32 = 1.6;
+    /// Radius of the turn where a line leaves one lane for another.
+    pub const corner: f32 = 6;
     /// Left inset before the first lane.
-    pub const inset: f32 = 14;
+    pub const inset: f32 = 16;
 };
 
 /// The mockup's grid: a 42px title bar over the sidebar and the content,
@@ -373,7 +375,7 @@ pub fn laneWash(hue: dvui.Color, selected: bool) dvui.Color {
 /// Colour of a graph lane, by lane index.
 ///
 /// Lanes are identified by hue alone, so the ramp is picked for separability at
-/// 2px stroke width rather than for prettiness, and it wraps: past `len` two
+/// a thin stroke rather than for prettiness, and it wraps: past `len` two
 /// lanes share a colour, which is fine because they are never adjacent in
 /// practice on a real history.
 pub fn laneColor(index: usize) dvui.Color {
@@ -382,7 +384,7 @@ pub fn laneColor(index: usize) dvui.Color {
     const c = ramp[index % ramp.len];
     // Lanes are thin lines on a dark ground: nudge toward text so a saturated
     // hue does not disappear the way raw blue does.
-    return c.lerp(p.text, if (p.dark) 0.10 else 0.20);
+    return c.lerp(p.text, if (p.dark) 0.28 else 0.20);
 }
 
 pub fn fileStatusColor(status: git.Status) dvui.Color {

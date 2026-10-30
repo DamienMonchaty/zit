@@ -12394,7 +12394,7 @@ fn commitRow(
         .id_extra = row_index,
         .tag = frameTag("commit", git.oidShort(commit.id, &short)),
         .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row_index)) * rh, .w = width, .h = rh },
-        // No rule between rows: the lane bands and the hover keep them apart.
+        // No rule between rows: the hover keeps them apart.
         .background = true,
         .color_fill = .{ .color = if (selected)
             (if (hue) |c| style.laneWash(c, true) else style.rowSelected())
@@ -12415,11 +12415,12 @@ fn commitRow(
     if (hovered) rs.rectToPhysical(.{ .x = 0, .y = 0, .w = width, .h = rh - 1 })
         .fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
 
-    if (lane) |l| if (!selected) {
+    // Only under the pointer, as GitComet has it: the lines alone say which
+    // branch is which.
+    if (lane) |l| if (!selected and hovered) {
         const x0 = style.space.lg + laneX(l.lane);
         const x1 = style.space.lg + graphRuleX();
-        // Stronger under the pointer: the branch the commit is on, lit the
-        // way GitKraken lights it.
+        // The branch the commit is on, lit the way GitKraken lights it.
         rs.rectToPhysical(.{ .x = x0, .y = 0, .w = x1 - x0, .h = rh - 1 })
             .fill(.{}, .{ .color = .{ .color = style.laneWash(hue.?, hovered) }, .fade = 0 });
     };
@@ -13065,10 +13066,10 @@ fn graphColumnAuto() f32 {
     return std.math.clamp(need, 2 * style.graph.inset + style.avatar / 2, graphColumnMax());
 }
 
-/// The most the graph may take: a quarter of the list — past that the
+/// The most the graph may take: a third of the list — past that the
 /// message column is what pays — and never less than 120.
 fn graphColumnMax() f32 {
-    return @max(120, graph_scroll.viewport.w * 0.25);
+    return @max(120, graph_scroll.viewport.w * 0.35);
 }
 
 /// The distance between two lanes: the full step while they fit, closer
@@ -13077,7 +13078,7 @@ fn laneStep() f32 {
     const n = laneCount();
     if (n <= 1) return style.graph.lane_w;
     const room = (if (graph_width > 0) graphColumn() else graphColumnMax()) - 2 * style.graph.inset;
-    return @max(6, @min(style.graph.lane_w, room / @as(f32, @floatFromInt(n - 1))));
+    return @max(9, @min(style.graph.lane_w, room / @as(f32, @floatFromInt(n - 1))));
 }
 
 fn laneCount() usize {
@@ -13141,22 +13142,45 @@ fn drawLanes(
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
 
-            if (link.from == link.to) {
-                path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y }));
-                path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y_next }));
-            } else {
-                // A cubic, sampled by hand: dvui strokes polylines, and eight
-                // segments over one row height is already past the point where
-                // more would show.
-                const steps = 8;
-                for (0..steps + 1) |s| {
-                    const t = @as(f32, @floatFromInt(s)) / steps;
-                    path.addPoint(rs.pointToPhysical(.{
-                        .x = cubic(x0, x0, x1, x1, t),
-                        .y = cubic(y, y + rh * 0.5, y_next - rh * 0.5, y_next, t),
-                    }));
+            path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y }));
+            if (link.from != link.to) {
+                const sx: f32 = if (x1 > x0) 1 else -1;
+                const into_node = i + 1 < l.rows.len and link.to == l.rows[i + 1].lane;
+                const steps = 6;
+                // GitComet's elbows: a corner of `corner` radius in the half
+                // row next to the commit, a quarter circle drawn as a cubic.
+                const r = @min(style.graph.corner, @abs(x1 - x0), rh / 2);
+                const k: f32 = 0.5522847;
+                if (link.from == row.lane) {
+                    // Leaving this row's commit: across at its height, the
+                    // corner, then straight down.
+                    const turn = x1 - sx * r;
+                    path.addPoint(rs.pointToPhysical(.{ .x = turn, .y = y }));
+                    for (1..steps + 1) |s| {
+                        const t = @as(f32, @floatFromInt(s)) / steps;
+                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = turn, .y = y }, .{ .x = turn + sx * r * k, .y = y }, .{ .x = x1, .y = y + r * (1 - k) }, .{ .x = x1, .y = y + r }, t)));
+                    }
+                } else if (into_node) {
+                    // Into the next row's commit: straight down, the corner,
+                    // then across into it.
+                    path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y_next - r }));
+                    for (1..steps + 1) |s| {
+                        const t = @as(f32, @floatFromInt(s)) / steps;
+                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x0, .y = y_next - r }, .{ .x = x0, .y = y_next - r * (1 - k) }, .{ .x = x0 + sx * r * k, .y = y_next }, .{ .x = x0 + sx * r, .y = y_next }, t)));
+                    }
+                } else {
+                    // A lane sliding over as one to its left ends: a soft S
+                    // across the whole row — half an ease, half a slope, so
+                    // one slide reads as a curve and slides on row after row
+                    // as an even slope, not as stairs or as waves.
+                    for (1..steps) |s| {
+                        const t = @as(f32, @floatFromInt(s)) / steps;
+                        const e = 0.5 * t + 0.5 * t * t * (3 - 2 * t);
+                        path.addPoint(rs.pointToPhysical(.{ .x = x0 + (x1 - x0) * e, .y = y + rh * t }));
+                    }
                 }
             }
+            path.addPoint(rs.pointToPhysical(.{ .x = x1, .y = y_next }));
 
             path.build().stroke(.{
                 .thickness = style.graph.line_w * rs.s,
@@ -13165,12 +13189,37 @@ fn drawLanes(
         }
 
         // The commit's own node, drawn last so lines pass under it: its
-        // author, ringed in the lane's colour, the way GitKraken marks one.
+        // author, ringed in the lane's colour, the way GitKraken marks one. A
+        // merge is a small ring instead: on a history of merges, a picture on
+        // every one buries the commits that hold the work.
         if (history) |h| {
             if (i < h.commits.len) {
                 const commit = h.commits[i];
-                const r = style.avatar / 2;
-                avatar(@src(), row_index, commit, .{ .x = laneX(row.lane) - r, .y = y - r }, style.laneColor(row.color));
+                if (commit.parents.len > 1) {
+                    // As GitComet draws one: the node's size, ringed in the
+                    // lane's colour over a faint wash of it, the merge glyph
+                    // in the middle.
+                    const d = style.avatar;
+                    const hue = style.laneColor(row.color);
+                    var disc = dvui.box(@src(), .{}, .{
+                        .id_extra = row_index,
+                        .rect = .{ .x = laneX(row.lane) - d / 2, .y = y - d / 2, .w = d, .h = d },
+                        .background = true,
+                        .color_fill = .{ .color = hue.lerp(style.background(), 0.88) },
+                        .border = dvui.Rect.all(1.5),
+                        .color_border = .{ .color = hue },
+                        .corners = .all(d / 2),
+                    });
+                    dvui.icon(@src(), "merge_glyph", dvui.entypo.merge, .{ .fill_color = .{ .color = hue } }, .{
+                        .min_size_content = .{ .w = 10, .h = 10 },
+                        .gravity_x = 0.5,
+                        .gravity_y = 0.5,
+                    });
+                    disc.deinit();
+                } else {
+                    const r = style.avatar / 2;
+                    avatar(@src(), row_index, commit, .{ .x = laneX(row.lane) - r, .y = y - r }, style.laneColor(row.color));
+                }
             }
         }
     }
@@ -13188,9 +13237,12 @@ fn laneX(lane: u16) f32 {
     return @min(x, graphColumn() - style.graph.inset);
 }
 
-fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) f32 {
+fn bezier(p0: dvui.Point, p1: dvui.Point, p2: dvui.Point, p3: dvui.Point, t: f32) dvui.Point {
     const u = 1 - t;
-    return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
+    return .{
+        .x = u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
+        .y = u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
+    };
 }
 
 /// The C library's broken-down time: only the fields every platform has, in
