@@ -16,8 +16,11 @@ pub const Group = struct {
     repos: []const []const u8,
     /// Index into the strip's group colours.
     color: u8 = 0,
-    /// Folded to its label in the strip.
+    /// Folded to its label in the strip. Read from files of before the
+    /// workspaces, never acted on.
     collapsed: bool = false,
+    /// The tab it was on, reopened when it is switched back to.
+    last: usize = 0,
 };
 
 /// The file's whole contents.
@@ -39,6 +42,8 @@ pub const File = struct {
     auto_fetch_minutes: u32 = 10,
     /// Remote branches drawn in the graph.
     show_remote_branches: bool = true,
+    /// The graph's history mode: first parents from HEAD, or every branch.
+    first_parent: bool = false,
     /// The graph column's width as dragged; 0 is as wide as the lanes need.
     graph_width: f32 = 0,
     /// Open last run's tabs again at start, rather than the start page.

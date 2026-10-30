@@ -248,6 +248,10 @@ pub const RefFilter = struct {
     only: []const []const u8 = &.{},
     /// Remote branches walked too.
     remotes: bool = true,
+    /// GitComet's "First-parent": from HEAD — or the branches in `only` —
+    /// first parents alone, the mainline through its merges. Off, every
+    /// branch is walked: "All branches".
+    first_parent: bool = false,
 
     /// `hidden` as a set, where the caller keeps one, so each ref is one lookup.
     hidden_set: ?*const std.StringHashMapUnmanaged(void) = null,
@@ -941,9 +945,12 @@ pub const Repo = struct {
 
         // Every ref, not just HEAD: a branch that is not an ancestor of HEAD
         // still belongs on the graph, which is the whole point of drawing one.
+        // First-parent starts at HEAD alone, unless branches are picked.
         var pushed = false;
+        if (filter.first_parent) try check(c.git_revwalk_simplify_first_parent(walk));
         for (refs) |r| {
             if (!filter.walks(r)) continue;
+            if (filter.first_parent and filter.only.len == 0) continue;
             if (c.git_revwalk_push(walk, &r.target) == 0) pushed = true;
         }
         // HEAD itself too, unless branches are picked to show alone: a
