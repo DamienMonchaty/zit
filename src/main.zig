@@ -13141,22 +13141,40 @@ fn drawLanes(
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
 
-            if (link.from == link.to) {
-                path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y }));
-                path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y_next }));
-            } else {
-                // A cubic, sampled by hand: dvui strokes polylines, and eight
-                // segments over one row height is already past the point where
-                // more would show.
+            path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y }));
+            if (link.from != link.to) {
+                const sx: f32 = if (x1 > x0) 1 else -1;
+                const into_node = i + 1 < l.rows.len and link.to == l.rows[i + 1].lane;
                 const steps = 8;
-                for (0..steps + 1) |s| {
-                    const t = @as(f32, @floatFromInt(s)) / steps;
-                    path.addPoint(rs.pointToPhysical(.{
-                        .x = cubic(x0, x0, x1, x1, t),
-                        .y = cubic(y, y + rh * 0.5, y_next - rh * 0.5, y_next, t),
-                    }));
+                if (link.from == row.lane) {
+                    // Leaving this row's commit: across at its height, then
+                    // an elbow rounded over half a row, down the new lane.
+                    const r = @min(@abs(x1 - x0), rh / 2);
+                    for (0..steps + 1) |s| {
+                        const a = @as(f32, @floatFromInt(s)) / steps * std.math.pi / 2;
+                        path.addPoint(rs.pointToPhysical(.{ .x = x1 - sx * r + sx * r * @sin(a), .y = y + r - r * @cos(a) }));
+                    }
+                } else if (into_node) {
+                    // Into the next row's commit: down, then the same elbow
+                    // across into it.
+                    const r = @min(@abs(x1 - x0), rh / 2);
+                    for (0..steps + 1) |s| {
+                        const a = @as(f32, @floatFromInt(s)) / steps * std.math.pi / 2;
+                        path.addPoint(rs.pointToPhysical(.{ .x = x0 + sx * (r - r * @cos(a)), .y = y_next - r + r * @sin(a) }));
+                    }
+                } else {
+                    // A lane sliding over as one to its left ends: a soft S
+                    // across the whole row — half an ease, half a slope, so
+                    // one slide reads as a curve and slides on row after row
+                    // as an even slope, not as stairs or as waves.
+                    for (1..steps) |s| {
+                        const t = @as(f32, @floatFromInt(s)) / steps;
+                        const e = 0.5 * t + 0.5 * t * t * (3 - 2 * t);
+                        path.addPoint(rs.pointToPhysical(.{ .x = x0 + (x1 - x0) * e, .y = y + rh * t }));
+                    }
                 }
             }
+            path.addPoint(rs.pointToPhysical(.{ .x = x1, .y = y_next }));
 
             path.build().stroke(.{
                 .thickness = style.graph.line_w * rs.s,
@@ -13165,12 +13183,28 @@ fn drawLanes(
         }
 
         // The commit's own node, drawn last so lines pass under it: its
-        // author, ringed in the lane's colour, the way GitKraken marks one.
+        // author, ringed in the lane's colour, the way GitKraken marks one. A
+        // merge is a small ring instead: on a history of merges, a picture on
+        // every one buries the commits that hold the work.
         if (history) |h| {
             if (i < h.commits.len) {
                 const commit = h.commits[i];
-                const r = style.avatar / 2;
-                avatar(@src(), row_index, commit, .{ .x = laneX(row.lane) - r, .y = y - r }, style.laneColor(row.color));
+                if (commit.parents.len > 1) {
+                    const d = style.graph.merge_d;
+                    var ring = dvui.box(@src(), .{}, .{
+                        .id_extra = row_index,
+                        .rect = .{ .x = laneX(row.lane) - d / 2, .y = y - d / 2, .w = d, .h = d },
+                        .background = true,
+                        .color_fill = .{ .color = style.background() },
+                        .border = dvui.Rect.all(style.graph.line_w),
+                        .color_border = .{ .color = style.laneColor(row.color) },
+                        .corners = .all(d / 2),
+                    });
+                    ring.deinit();
+                } else {
+                    const r = style.avatar / 2;
+                    avatar(@src(), row_index, commit, .{ .x = laneX(row.lane) - r, .y = y - r }, style.laneColor(row.color));
+                }
             }
         }
     }
@@ -13186,11 +13220,6 @@ fn graphRuleX() f32 {
 fn laneX(lane: u16) f32 {
     const x = style.graph.inset + @as(f32, @floatFromInt(lane)) * laneStep();
     return @min(x, graphColumn() - style.graph.inset);
-}
-
-fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) f32 {
-    const u = 1 - t;
-    return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
 }
 
 /// The C library's broken-down time: only the fields every platform has, in
