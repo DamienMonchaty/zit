@@ -1715,6 +1715,7 @@ fn appDeinit(win: *dvui.Window) void {
     if (signing_job) |j| j.deinit(app_io);
     if (repo_config_job) |j| j.deinit(app_io);
     git_template_path.deinit(gpa);
+    commit_sent.deinit(gpa);
     clearRecent();
     recent.deinit(gpa);
     clearForget();
@@ -3794,8 +3795,14 @@ fn doCommit() void {
     // On another thread, with the status bar's pill: a commit runs the hooks
     // and the signing, which can wait on a passphrase, and on Windows even a
     // plain one held the window up.
+    commit_sent.clearRetainingCapacity();
+    commit_sent.appendSlice(gpa, text) catch {};
     startLocal("Committing", args.items, .commit);
 }
+
+/// The message of the commit out on its job. The box stays editable while it
+/// runs; when it lands, the box is emptied only if it still says this.
+var commit_sent: std.ArrayList(u8) = .empty;
 
 /// A commit's outcome, folded in: the box emptied for the next one, or the
 /// identity asked for when git said it has none.
@@ -3805,6 +3812,13 @@ fn commitLanded() void {
         if (std.mem.indexOf(u8, message, "tell me who you are") != null or std.mem.indexOf(u8, message, "user.email") != null) openIdentity();
         return;
     }
+    // Typed into while the commit ran: that is the next message, not this one.
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const now = commitMessage(arena.allocator()) catch "";
+    const unchanged = std.mem.eql(u8, now, commit_sent.items);
+    commit_sent.clearRetainingCapacity();
+    if (!unchanged) return;
     commit_summary.clearRetainingCapacity();
     commit_description.clearRetainingCapacity();
     amend = false;
@@ -16927,12 +16941,24 @@ test "stage, commit and switch branches through the real git commands" {
     // Commit.
     try commit_summary.appendSlice(gpa, "first commit");
     doCommit();
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     try std.testing.expectEqualStrings("first commit", history.?.commits[0].summary);
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
     // A successful commit clears the box it came from.
     try std.testing.expectEqual(@as(usize, 0), commit_summary.items.len);
+
+    // Typed into while the commit ran: the box keeps the new text.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "hello.txt", .data = "two\n" });
+    gitDo(&.{ "add", "-A" });
+    try commit_summary.appendSlice(gpa, "second commit");
+    doCommit();
+    try commit_summary.appendSlice(gpa, ", and more");
+    try pumpJob();
+    try std.testing.expectEqualStrings("second commit", history.?.commits[0].summary);
+    try std.testing.expectEqualStrings("second commit, and more", commit_summary.items);
+    commit_summary.clearRetainingCapacity();
 
     // Requesting must not touch the repository: the UI is still iterating the
     // snapshot at that point. This is the use-after-free rule, as a test.
@@ -17036,6 +17062,8 @@ fn resetUiGlobals() void {
     repo_config_job = null;
     git_template_path.deinit(gpa);
     git_template_path = .empty;
+    commit_sent.deinit(gpa);
+    commit_sent = .empty;
     job_after = .remote;
     action_after = .remote;
     sidebar_filter = .empty;
@@ -18574,6 +18602,7 @@ test "renames, a named stash and a forced delete go through git" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed\n" });
     askName(.stash, "");
     try answerPrompt("half a thought");
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expect(std.mem.indexOf(u8, history.?.stashes[0].message, "half a thought") != null);
@@ -18585,6 +18614,7 @@ test "renames, a named stash and a forced delete go through git" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed again\n" });
     try expectGit(dir, &.{ "stash", "push", "-m", "newer" });
     try answerConfirm();
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expect(std.mem.indexOf(u8, history.?.stashes[0].message, "newer") != null);
@@ -18596,6 +18626,7 @@ test "renames, a named stash and a forced delete go through git" {
     try expectGit(dir, &.{ "stash", "push", "-m", "newest" });
     requestStash("pop", newer);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     const popped = try tmp.dir.readFileAlloc(app_io, "a.txt", gpa, .limited(64));
     defer gpa.free(popped);
@@ -19098,6 +19129,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     reloadWork();
     try dvui.testing.settle(frameArrowCursor);
     try clickAt(try tagCenter("toolbar:Stash"));
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     {
         var short: [8]u8 = undefined;
@@ -19106,6 +19138,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
         try hoverAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
         try clickAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash_apply:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
     }
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), changeCount());
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
@@ -19953,6 +19986,7 @@ test "changes picked together are stashed or staged together, and only they" {
     requestPicked(.stash, .unstaged, work.?.unstaged);
     try std.testing.expectEqual(@as(usize, 0), picked_changes.items.len);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
     try std.testing.expectEqualStrings("b.txt", work.?.unstaged[0].path);
@@ -19961,6 +19995,7 @@ test "changes picked together are stashed or staged together, and only they" {
     // Back, then two of the three staged.
     requestStash("pop", history.?.stashes[0].id);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 3), work.?.unstaged.len);
     toggleChangePick(.unstaged, "b.txt");
     toggleChangePick(.unstaged, "c.txt");
@@ -21366,9 +21401,11 @@ test "audit: the main controls do what they say when clicked" {
 
     // Toolbar: Stash takes both changes away, Pop brings them back.
     try clickAt(try tagCenter("toolbar:Stash"));
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     try clickAt(try tagCenter("toolbar:Pop"));
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 0), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 2), work.?.unstaged.len);
 
@@ -21449,6 +21486,7 @@ test "audit: the main controls do what they say when clicked" {
     try typeText("stash ever");
     try pressFrame(.enter, .none);
     try std.testing.expect(!palette_open);
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
 
     // Settings from the menu on the face: switch to the light theme, Esc out.
