@@ -904,11 +904,6 @@ const Prompt = struct {
         new_branch,
         new_tag,
         add_remote,
-        /// A workspace for the tab `group_target` names.
-        new_group,
-        /// An empty workspace.
-        new_workspace,
-        rename_group,
         /// `arg` is the branch's current name.
         rename_branch,
         stash,
@@ -925,8 +920,6 @@ const Prompt = struct {
             .new_branch => "New branch",
             .new_tag => "New tag",
             .add_remote => "Add remote",
-            .new_group, .new_workspace => "New workspace",
-            .rename_group => "Rename this workspace",
             .rename_branch => "Rename branch",
             .stash => "Stash, as",
             .rename_remote => "Rename remote",
@@ -940,7 +933,6 @@ const Prompt = struct {
             .new_branch, .rename_branch => "branch name",
             .new_tag => "tag name",
             .add_remote => "name url",
-            .new_group, .new_workspace, .rename_group => "workspace name",
             .stash => "what this stash is",
             .rename_remote => "remote name",
             .remote_url => "url",
@@ -951,7 +943,7 @@ const Prompt = struct {
     /// The button that answers the bar.
     fn verb(kind: Kind) []const u8 {
         return switch (kind) {
-            .rename_branch, .rename_remote, .rename_group => "Rename",
+            .rename_branch, .rename_remote => "Rename",
             .stash => "Stash",
             .remote_url => "Save",
             .add_remote, .add_worktree => "Add",
@@ -1720,6 +1712,7 @@ fn appDeinit(win: *dvui.Window) void {
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     signing_key.deinit(gpa);
+    ws_name.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
     clearRecent();
     recent.deinit(gpa);
@@ -2724,6 +2717,8 @@ const TabAction = union(enum) {
     /// A repository picked out of the menu of known ones, owned — the list it
     /// came from is about to be rebuilt underneath it.
     open: []u8,
+    /// The workspace dialog answered: what it holds is applied.
+    workspace_named,
 };
 
 var tab_action: TabAction = .none;
@@ -3341,6 +3336,7 @@ fn runTabAction() void {
         },
         .tab_to => |m| moveTab(m[0], m[1], m[2]),
         .tab_at => |m| moveTabTo(m[0], m[1], m[2], m[3]),
+        .workspace_named => applyWorkspaceDialog(),
         .open => |path| {
             defer gpa.free(path);
             openAndRemember(path);
@@ -3651,19 +3647,6 @@ fn runPrompt() void {
             } else {
                 gitDo(&.{ "worktree", "add", "-b", pair[1], dest });
             }
-        },
-        // Nothing to run and nothing to fail: these only rearrange the strip.
-        .new_group => {
-            groupTab(name, group_target[0], group_target[1]);
-            return clearPrompt();
-        },
-        .new_workspace => {
-            newWorkspace(name);
-            return clearPrompt();
-        },
-        .rename_group => {
-            renameGroup(group_target[0], name);
-            return clearPrompt();
         },
     }
 
@@ -4031,6 +4014,7 @@ fn appFrame() !dvui.App.Result {
     repoDialog();
     identityDialog();
     connectDialog();
+    workspaceDialog();
     settingsDialog();
     keysDialog();
     prEditDialog();
@@ -8737,42 +8721,117 @@ fn workspaceSwitcher() void {
     _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = style.space.xs, .h = style.space.xs } });
     if (menuRow(@src(), "New workspace…")) {
         m.close();
-        askName(.new_workspace, "");
+        openWorkspaceDialog(.new);
     }
     if (menuRow(@src(), "Rename this workspace…")) {
         m.close();
-        group_target = .{ active_group, 0 };
-        askNameWith(.rename_group, "", group.name);
+        openWorkspaceDialog(.rename);
     }
-    {
-        var swatches = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
-        defer swatches.deinit();
-        for (0..GROUP_COLORS) |c| {
-            const current = group.color == c;
-            var bw: dvui.ButtonWidget = undefined;
-            bw.init(@src(), .{ .draw_focus = false }, .{
-                .id_extra = c,
-                .min_size_content = .{ .w = 16, .h = 16 },
-                .background = true,
-                .color_fill = .{ .color = groupColor(@intCast(c)) },
-                .corners = .all(8),
-                .border = dvui.Rect.all(if (current) 2 else 0),
-                .color_border = .{ .color = style.text() },
-                .margin = .{ .w = style.space.sm },
-            });
-            bw.processEvents();
-            bw.drawBackground();
-            if (bw.clicked()) {
-                m.close();
-                requestTab(.{ .group_color = .{ active_group, c } });
-            }
-            bw.deinit();
-        }
+    if (colorSwatches(@src(), group.color, .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm })) |c| {
+        m.close();
+        requestTab(.{ .group_color = .{ active_group, c } });
     }
     if (groups.items.len > 1 and menuRow(@src(), "Delete this workspace")) {
         m.close();
         requestTab(.{ .close_group = active_group });
     }
+}
+
+/// The workspace colours as round buttons, `current` ringed: the one
+/// clicked, if any.
+fn colorSwatches(src: std.builtin.SourceLocation, current: u8, pad: dvui.Rect) ?usize {
+    var swatches = dvui.box(src, .{ .dir = .horizontal }, .{ .background = false, .padding = pad });
+    defer swatches.deinit();
+    var picked: ?usize = null;
+    for (0..GROUP_COLORS) |c| {
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{ .draw_focus = false }, .{
+            .id_extra = c,
+            .min_size_content = .{ .w = 16, .h = 16 },
+            .background = true,
+            .color_fill = .{ .color = groupColor(@intCast(c)) },
+            .corners = .all(8),
+            .border = dvui.Rect.all(if (current == c) 2 else 0),
+            .color_border = .{ .color = style.text() },
+            .margin = .{ .w = style.space.sm },
+        });
+        bw.processEvents();
+        bw.drawBackground();
+        if (bw.clicked()) picked = c;
+        bw.deinit();
+    }
+    return picked;
+}
+
+/// Naming a workspace, in a dialog: a new one, a new one for the tab
+/// `group_target` names, or the one shown renamed — with its colour.
+const WorkspaceDialog = enum { new, with_tab, rename };
+var ws_dialog: ?WorkspaceDialog = null;
+var ws_rect: dvui.Rect = .{};
+var ws_name: std.ArrayList(u8) = .empty;
+var ws_color: u8 = 0;
+
+fn openWorkspaceDialog(kind: WorkspaceDialog) void {
+    ws_dialog = kind;
+    ws_rect = .{};
+    ws_name.clearRetainingCapacity();
+    ws_color = unusedColor();
+    if (kind == .rename) if (activeGroup()) |g| {
+        ws_name.appendSlice(gpa, g.name) catch {};
+        ws_color = g.color;
+    };
+}
+
+fn workspaceDialog() void {
+    const kind = ws_dialog orelse return;
+    var open = true;
+    const win = dvui.windowRect();
+    var fw = modalWindow(@src(), &ws_rect, &open, style.surface(), 400, dvui.Rect.all(0));
+    defer fw.deinit();
+    centerModal(fw.data(), win, null);
+    dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of repositories, switched to in this window", &open);
+
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
+    defer body.deinit();
+    var entered = false;
+    _ = dialogField(@src(), 0, "Name", &ws_name, "e.g. Client work", true, &entered);
+    dialogLabel(@src(), "Colour");
+    if (colorSwatches(@src(), ws_color, .{ .y = style.space.xs, .h = style.space.lg })) |c| ws_color = @intCast(c);
+
+    const named = std.mem.trim(u8, ws_name.items, " \t").len > 0;
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
+        defer line.deinit();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (dialogButton(@src(), "Cancel", false)) open = false;
+        if ((dialogButton(@src(), if (kind == .rename) "Rename" else "Create", named) or entered) and named) requestTab(.workspace_named);
+    }
+    if (escapePressed() or !open) ws_dialog = null;
+}
+
+/// What the dialog was answered with, applied between frames.
+fn applyWorkspaceDialog() void {
+    const kind = ws_dialog orelse return;
+    ws_dialog = null;
+    const name = std.mem.trim(u8, ws_name.items, " \t");
+    if (name.len == 0) return;
+    const target = switch (kind) {
+        .new => blk: {
+            newWorkspace(name);
+            break :blk groups.items.len - 1;
+        },
+        // Made right after the tab's own.
+        .with_tab => blk: {
+            groupTab(name, group_target[0], group_target[1]);
+            break :blk group_target[0] + 1;
+        },
+        .rename => blk: {
+            renameGroup(active_group, name);
+            break :blk active_group;
+        },
+    };
+    if (target < groups.items.len) groups.items[target].color = ws_color;
+    saveWorkspace();
 }
 
 /// A workspace's colour, as a dot.
@@ -8808,7 +8867,7 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     if (menuRow(@src(), "Move to a new workspace…")) {
         fw.close();
         group_target = .{ g, t };
-        askName(.new_group, "");
+        openWorkspaceDialog(.with_tab);
     }
     if (menuRow(@src(), "Close")) {
         fw.close();
@@ -16998,6 +17057,9 @@ fn resetUiGlobals() void {
     if (signing_job) |j| j.deinit(app_io);
     signing_job = null;
     sidebar_filter = .empty;
+    ws_name.deinit(gpa);
+    ws_name = .empty;
+    ws_dialog = null;
 
     clearRecent();
     recent.deinit(gpa);
@@ -18486,6 +18548,32 @@ test "workspaces keep their own tabs, and switching opens the one each was on" {
     closeGroup(0);
     try std.testing.expectEqual(@as(usize, 1), groups.items.len);
     try std.testing.expectEqual(@as(usize, 0), groups.items[0].tabs.items.len);
+}
+
+test "a workspace is named in a dialog, not a bar" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1000, .h = 700 } });
+    defer t.deinit();
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    try style.applyEmbedded(gpa, true);
+    defer resetUiGlobals();
+    loadWorkspace();
+    try dvui.testing.settle(frameArrowCursor);
+
+    try clickAt(try tagCenter("workspace:switcher"));
+    try clickAt(try tagCenter("menu:New workspace…"));
+    try std.testing.expect(ws_dialog == .new);
+    try std.testing.expect(prompt == null);
+    try ws_name.appendSlice(gpa, "Client");
+    ws_color = 4;
+    try clickAt(try tagCenter("dialog:Create"));
+    try dvui.testing.settle(frameArrowCursor);
+
+    try std.testing.expect(ws_dialog == null);
+    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+    try std.testing.expectEqualStrings("Client", groups.items[1].name);
+    try std.testing.expectEqual(@as(u8, 4), groups.items[1].color);
+    try std.testing.expectEqual(@as(usize, 1), active_group);
 }
 
 test "the ungrouped runs of an old workspace file become one Default" {
