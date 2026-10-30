@@ -13448,14 +13448,31 @@ fn drawLanes(
                         const t = @as(f32, @floatFromInt(s)) / steps;
                         path.addPoint(rs.pointToPhysical(bezier(.{ .x = x0, .y = y_next - r }, .{ .x = x0, .y = y_next - r * (1 - k) }, .{ .x = x0 + sx * r * k, .y = y_next }, .{ .x = x0 + sx * r, .y = y_next }, t)));
                     }
-                } else if (link.from == row.lane) {
-                    // Leaving this row's commit — a merge to its other
-                    // parent: across at its height, the corner, then down.
+                } else if (link.from == row.lane and x1 > x0) {
+                    // Leaving this row's commit to its right — a merge to its
+                    // other parent: across at its height, the corner, then
+                    // down: the branch reads as coming up into the merge.
                     const turn = x1 - sx * r;
                     path.addPoint(rs.pointToPhysical(.{ .x = turn, .y = y }));
                     for (1..steps + 1) |s| {
                         const t = @as(f32, @floatFromInt(s)) / steps;
                         path.addPoint(rs.pointToPhysical(bezier(.{ .x = turn, .y = y }, .{ .x = turn + sx * r * k, .y = y }, .{ .x = x1, .y = y + r * (1 - k) }, .{ .x = x1, .y = y + r }, t)));
+                    }
+                } else if (link.from == row.lane) {
+                    // To its left, onto a line already there: down its own
+                    // column first, then across just above the next row,
+                    // turning down into that line.
+                    const r2 = @min(r, @abs(x1 - x0) / 2, rh / 4);
+                    const ym = y_next - r2;
+                    path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = ym - r2 }));
+                    for (1..steps + 1) |s| {
+                        const t = @as(f32, @floatFromInt(s)) / steps;
+                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x0, .y = ym - r2 }, .{ .x = x0, .y = ym - r2 * (1 - k) }, .{ .x = x0 + sx * r2 * k, .y = ym }, .{ .x = x0 + sx * r2, .y = ym }, t)));
+                    }
+                    path.addPoint(rs.pointToPhysical(.{ .x = x1 - sx * r2, .y = ym }));
+                    for (1..steps + 1) |s| {
+                        const t = @as(f32, @floatFromInt(s)) / steps;
+                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x1 - sx * r2, .y = ym }, .{ .x = x1 - sx * r2 * (1 - k), .y = ym }, .{ .x = x1, .y = ym + r2 * k }, .{ .x = x1, .y = y_next }, t)));
                     }
                 } else {
                     // A lane sliding over as one to its left ends: a soft S
