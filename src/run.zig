@@ -33,8 +33,9 @@ const STDERR_LIMIT: usize = 8 * 1024;
 /// Run `git <args...>` inside `cwd`.
 ///
 /// Blocks until the command finishes, so callers on the UI thread should only
-/// use it for commands that return promptly. Anything that talks to a remote
-/// goes through `Job` instead, which runs it somewhere else.
+/// use it for commands that return promptly. Anything that talks to a remote,
+/// or may take a while, goes through `Job` instead, which runs it somewhere
+/// else.
 pub fn git(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -354,9 +355,10 @@ test "shell quoting survives spaces, and closes a quote someone put in a path" {
 
 /// A `git` command running somewhere other than the caller's thread.
 ///
-/// This is what keeps a `fetch` over a slow link from freezing the window.
-/// Local commands stay synchronous: they finish in milliseconds, and one code
-/// path that completes before it returns is worth more than uniformity.
+/// This is what keeps a `fetch` over a slow link from freezing the window,
+/// and the local commands that can take a while — a switch, a stash, a
+/// commit — as well. The quick ones stay synchronous: one code path that
+/// completes before it returns is worth more than uniformity.
 pub const Job = struct {
     /// Owns the copies of everything the command needs.
     arena: std.heap.ArenaAllocator,

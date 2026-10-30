@@ -1600,8 +1600,10 @@ fn appInit(win: *dvui.Window) !void {
     try openRepoFromArgs();
 
     // A machine git has never been told who is using it: every commit would
-    // fail, so say so before the first one does.
-    if (!identitySet()) openIdentity();
+    // fail, so say so before the first one does. Read once, for the avatar's
+    // menu as well.
+    loadMe();
+    if (me_name.items.len == 0 or me_email.items.len == 0) openIdentity();
 }
 
 /// The app was called Zync, and its tabs, settings and pictures live under
@@ -1711,6 +1713,9 @@ fn appDeinit(win: *dvui.Window) void {
     default_branch.deinit(gpa);
     signing_key.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
+    if (repo_config_job) |j| j.deinit(app_io);
+    git_template_path.deinit(gpa);
+    commit_sent.deinit(gpa);
     clearRecent();
     recent.deinit(gpa);
     clearForget();
@@ -1809,13 +1814,7 @@ fn openRepo(path: []const u8) void {
 
     detectLfs();
     loadGraphPrefs();
-    // Whose picture is the signed-in GitHub account's: the address this
-    // repository commits with.
-    if (run.capture(gpa, app_io, repo_path.items, &.{ "git", "config", "user.email" })) |answer| {
-        defer gpa.free(answer.out);
-        // GitHub's picture for it: not with the integrations off.
-        avatars.setSelfEmail(if (answer.ok and integrations) answer.out else "");
-    } else |_| {}
+    startRepoConfig();
     reloadWork();
     // The first read of a repository is the slow one — packfiles not yet in
     // the page cache — so it happens off the UI thread, with the loading
@@ -1901,14 +1900,18 @@ fn clearGraphPrefs() void {
     clearNames(&graph_only);
 }
 
+/// The branches hidden and pinned in this repository, from its own config.
+/// Read through libgit2, not `git config`: it happens on every tab switch,
+/// on the UI thread, and two `git` started there cost more than the rest of
+/// the switch.
 fn loadGraphPrefs() void {
     clearGraphPrefs();
-    for ([_]struct { *std.ArrayList([]u8), []const u8 }{ .{ &graph_hidden, "zit.hidden" }, .{ &graph_pinned, "zit.pinned" } }) |p| {
-        const answer = run.capture(gpa, app_io, repo_path.items, &.{ "git", "config", "--local", "--get-all", p[1] }) catch continue;
-        defer gpa.free(answer.out);
-        if (!answer.ok) continue;
-        var lines = std.mem.splitScalar(u8, answer.out, '\n');
-        while (lines.next()) |raw| {
+    const r = repo orelse return;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    for ([_]struct { *std.ArrayList([]u8), [:0]const u8 }{ .{ &graph_hidden, "zit.hidden" }, .{ &graph_pinned, "zit.pinned" } }) |p| {
+        const values = r.localConfigAll(arena.allocator(), p[1]) catch continue;
+        for (values) |raw| {
             const name = std.mem.trim(u8, raw, " \r");
             if (name.len == 0 or hasName(p[0].items, name)) continue;
             const owned = gpa.dupe(u8, name) catch continue;
@@ -2778,9 +2781,12 @@ fn runAction() bool {
 
 /// Ask for `git <args...>` on another thread once the frame is built.
 ///
-/// Only for the commands that talk to a remote. Everything local goes through
-/// `request`, which finishes before it returns — one code path that completes
-/// synchronously is worth more than making all of them look alike.
+/// For the commands that talk to a remote, and for the local ones that can
+/// take a while: switching branch, stashing, committing — which runs the
+/// hooks and the signing. Waited for on the UI thread, any of them froze the
+/// window on Windows. The quick ones go through `request`, which finishes
+/// before it returns: one code path that completes synchronously is worth
+/// more than making all of them look alike.
 fn requestNetwork(label: []const u8, args: []const []const u8) void {
     if (action != .none) return;
     // The toolbar says one is running, but a held key or a double click can
@@ -3025,15 +3031,42 @@ fn openOnGithub(comptime tail: []const u8, args: anytype) void {
 }
 
 fn startJob() void {
+    // Copied by the job, and owned here either way.
+    defer if (action_input) |bytes| {
+        gpa.free(bytes);
+        action_input = null;
+    };
+    const after = action_after;
+    action_after = .remote;
     if (repo == null or job != null) return;
-    job = run.Job.start(gpa, app_io, repo_path.items, action_argv[0..action_argc], .{}) catch {
+    job = run.Job.start(gpa, app_io, repo_path.items, action_argv[0..action_argc], .{ .input = action_input }) catch {
         setCommandError("Could not start git.");
         job_label = "";
         // Left set, the next job's failure would be swallowed as a quiet one.
         job_quiet = false;
         return;
     };
+    job_after = after;
     clearCommandError();
+}
+
+/// What a job does once its outcome is folded in.
+const JobAfter = enum {
+    /// It went to a remote or came from one: the pull requests are read again.
+    remote,
+    /// The repository's own — a stash: GitHub has nothing new to say.
+    local,
+    /// A commit: `commitLanded`.
+    commit,
+};
+/// For the job out, and for the one asked for and not yet started.
+var job_after: JobAfter = .remote;
+var action_after: JobAfter = .remote;
+
+/// As `requestNetwork`, for a command of the repository's own.
+fn requestLocal(label: []const u8, args: []const []const u8) void {
+    requestNetwork(label, args);
+    if (action == .network) action_after = .local;
 }
 
 /// Start a networked command now, from inside `runAction` — for the ones that
@@ -3045,6 +3078,14 @@ fn startNetwork(label: []const u8, args: []const []const u8) void {
     if (!setArgv(args)) return;
     job_label = label;
     startJob();
+}
+
+/// As `startNetwork`, for a command of the repository's own, with what to
+/// do once it lands.
+fn startLocal(label: []const u8, args: []const []const u8, after: JobAfter) void {
+    if (job != null) return setCommandError(BUSY);
+    action_after = after;
+    startNetwork(label, args);
 }
 
 /// Where a running clone is going, owned. Set while that job is out; it is the
@@ -3099,6 +3140,8 @@ fn collectJob() void {
     job_label = "";
     const quiet = job_quiet;
     job_quiet = false;
+    const after = job_after;
+    job_after = .remote;
 
     var outcome = running.finish(gpa, app_io);
     if (!still_current) {
@@ -3116,6 +3159,11 @@ fn collectJob() void {
 
     const succeeded = if (outcome) |o| o.ok else false;
     applyOutcome(outcome);
+    switch (after) {
+        .local => return,
+        .commit => return commitLanded(),
+        .remote => {},
+    }
     // The second half of what was asked — a request fetched, then switched
     // to — once the first went well.
     if (job_then.items.len > 0) {
@@ -3635,7 +3683,7 @@ fn runPrompt() void {
             gitDo(&.{ "remote", "add", name[0..sep], url });
         },
         .rename_branch => gitDo(&.{ "branch", "-m", p.arg, name }),
-        .stash => gitDo(&.{ "stash", "push", "-u", "-m", name }),
+        .stash => startLocal("Stashing", &.{ "stash", "push", "-u", "-m", name }, .local),
         .rename_remote => gitDo(&.{ "remote", "rename", p.arg, name }),
         .remote_url => gitDo(&.{ "remote", "set-url", p.arg, name }),
         .add_worktree => {
@@ -3744,22 +3792,40 @@ fn doCommit() void {
     args.append(gpa, "-m") catch return;
     args.append(gpa, text) catch return;
 
-    gitDo(args.items);
+    // On another thread, with the status bar's pill: a commit runs the hooks
+    // and the signing, which can wait on a passphrase, and on Windows even a
+    // plain one held the window up.
+    commit_sent.clearRetainingCapacity();
+    commit_sent.appendSlice(gpa, text) catch {};
+    startLocal("Committing", args.items, .commit);
+}
 
+/// The message of the commit out on its job. The box stays editable while it
+/// runs; when it lands, the box is emptied only if it still says this.
+var commit_sent: std.ArrayList(u8) = .empty;
+
+/// A commit's outcome, folded in: the box emptied for the next one, or the
+/// identity asked for when git said it has none.
+fn commitLanded() void {
     // git's own words for an identity it does not have.
     if (command_error) |message| {
         if (std.mem.indexOf(u8, message, "tell me who you are") != null or std.mem.indexOf(u8, message, "user.email") != null) openIdentity();
+        return;
     }
-
-    if (command_error == null) {
-        commit_summary.clearRetainingCapacity();
-        commit_description.clearRetainingCapacity();
-        amend = false;
-        commit_type = null;
-        commit_scope.clearRetainingCapacity();
-        clearCoAuthors();
-        template_due = true;
-    }
+    // Typed into while the commit ran: that is the next message, not this one.
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const now = commitMessage(arena.allocator()) catch "";
+    const unchanged = std.mem.eql(u8, now, commit_sent.items);
+    commit_sent.clearRetainingCapacity();
+    if (!unchanged) return;
+    commit_summary.clearRetainingCapacity();
+    commit_description.clearRetainingCapacity();
+    amend = false;
+    commit_type = null;
+    commit_scope.clearRetainingCapacity();
+    clearCoAuthors();
+    template_due = true;
 }
 
 // === Commit messages ===
@@ -3909,6 +3975,52 @@ fn addCoAuthor(name: []const u8, email: []const u8) void {
     co_authors.append(gpa, who) catch gpa.free(who);
 }
 
+/// What only `git` itself can say of the repository just opened — the
+/// address it commits with, wherever that is set, and its commit template —
+/// asked once, on another thread: on Windows, two `git` started on the UI
+/// thread at every tab switch held the window up.
+var repo_config_job: ?*run.Capture = null;
+/// `commit.template` as `git config --path` gives it; empty for none.
+var git_template_path: std.ArrayList(u8) = .empty;
+
+fn startRepoConfig() void {
+    if (repo_config_job) |old| old.deinit(app_io);
+    repo_config_job = null;
+    avatars.setSelfEmail("");
+    git_template_path.clearRetainingCapacity();
+    repo_config_job = run.Capture.start(gpa, app_io, repo_path.items, &.{ "git", "config", "--path", "--get-regexp", "^(user\\.email|commit\\.template)$" }) catch null;
+}
+
+/// Take in the repository's config once its `git` has answered.
+fn collectRepoConfig() void {
+    const job_now = repo_config_job orelse return;
+    if (!job_now.finished()) return;
+    repo_config_job = null;
+    defer job_now.deinit(app_io);
+    // Closed or swapped for another since: the answer is not this one's.
+    if (repo == null or !std.mem.eql(u8, job_now.cwd, repo_path.items)) return;
+    if (!job_now.ok) return;
+
+    var email: []const u8 = "";
+    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const value = std.mem.trim(u8, line[space + 1 ..], " ");
+        // Each level in the order git reads them, the repository's last: the
+        // last one said is the one that holds.
+        if (std.mem.eql(u8, line[0..space], "user.email")) {
+            email = value;
+        } else if (std.mem.eql(u8, line[0..space], "commit.template")) {
+            git_template_path.clearRetainingCapacity();
+            git_template_path.appendSlice(gpa, value) catch {};
+        }
+    }
+    // Whose picture is the signed-in GitHub account's: the address this
+    // repository commits with — not with the integrations off.
+    avatars.setSelfEmail(if (integrations) email else "");
+}
+
 /// Start an empty message from the template: git's `commit.template` when it
 /// names one, the settings' otherwise. The first line is the summary. Comment
 /// lines go — with `-m`, git would keep them.
@@ -3917,15 +4029,12 @@ fn applyTemplate() void {
 
     var from_git: ?[]u8 = null;
     defer if (from_git) |t| gpa.free(t);
-    if (run.capture(gpa, app_io, repo_path.items, &.{ "git", "config", "--path", "--get", "commit.template" })) |answer| {
-        defer gpa.free(answer.out);
-        const path = std.mem.trim(u8, answer.out, " \r\n");
-        if (answer.ok and path.len > 0) {
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const abs = if (std.fs.path.isAbsolute(path)) path else std.fmt.bufPrint(&buf, "{s}{s}", .{ repo_path.items, path }) catch path;
-            from_git = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(64 * 1024)) catch null;
-        }
-    } else |_| {}
+    const path = git_template_path.items;
+    if (path.len > 0) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = if (std.fs.path.isAbsolute(path)) path else std.fmt.bufPrint(&buf, "{s}{s}", .{ repo_path.items, path }) catch path;
+        from_git = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(64 * 1024)) catch null;
+    }
     const text = from_git orelse commit_template.items;
 
     var kept: std.ArrayList(u8) = .empty;
@@ -3956,6 +4065,7 @@ fn appFrame() !dvui.App.Result {
     // Before any widget: this rebuilds the snapshots the panels below iterate.
     collectJob();
     collectApi();
+    collectRepoConfig();
     takeFolder();
     if (collectWorkLoad()) dvui.refresh(null, @src(), null);
     if (collectHistoryLoad()) dvui.refresh(null, @src(), null);
@@ -6247,8 +6357,8 @@ fn titlebar() void {
         }
         toolbarDivider(@src(), 1);
         if (toolbarButton(@src(), "Branch", dvui.entypo.flow_branch, 0)) askName(.new_branch, "");
-        if (toolbarButton(@src(), "Stash", dvui.entypo.save, 0)) request(&.{ "stash", "push", "-u" });
-        if (toolbarButton(@src(), "Pop", dvui.entypo.archive, 0)) request(&.{ "stash", "pop" });
+        if (toolbarButton(@src(), "Stash", dvui.entypo.save, 0)) requestLocal("Stashing", &.{ "stash", "push", "-u" });
+        if (toolbarButton(@src(), "Pop", dvui.entypo.archive, 0)) requestLocal("Popping the stash", &.{ "stash", "pop" });
         toolbarDivider(@src(), 2);
         // The rest of git — and everything else — is a terminal away.
         if (toolbarButton(@src(), "Terminal", dvui.entypo.code, 0)) openTerminal();
@@ -6374,10 +6484,10 @@ fn repoContext() void {
         .padding = dvui.Rect.all(0),
     });
     defer line.deinit();
-    contextField(@src(), 0, "repository", repo_name);
-    dvui.icon(@src(), "context_sep", dvui.entypo.chevron_small_right, .{ .fill_color = .{ .color = style.textFaint() } }, .{
-        .min_size_content = .{ .w = 12, .h = 12 },
-        .gravity_y = 0.7,
+    contextField(@src(), 0, "repository", repo_name, .{
+        .name = "context_sep",
+        .icon = dvui.entypo.chevron_small_right,
+        .color = style.textFaint(),
         .margin = .{ .x = style.space.sm, .w = style.space.sm },
     });
     branchSwitcher();
@@ -6401,10 +6511,10 @@ fn branchSwitcher() void {
     {
         var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
         defer face.deinit();
-        contextField(@src(), 1, "branch", head);
-        dvui.icon(@src(), "switch_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
-            .min_size_content = .{ .w = 12, .h = 12 },
-            .gravity_y = 0.75,
+        contextField(@src(), 1, "branch", head, .{
+            .name = "switch_chevron",
+            .icon = dvui.entypo.chevron_small_down,
+            .color = style.textMuted(),
             .margin = .{ .x = style.space.xs },
         });
     }
@@ -6479,8 +6589,13 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
     return mi.activeRect() != null;
 }
 
-/// A small caption over a value, as the toolbar's left end shows them.
-fn contextField(src: std.builtin.SourceLocation, id: usize, caption: []const u8, value: []const u8) void {
+/// The chevron after a context field's value.
+const ContextMark = struct { name: []const u8, icon: []const u8, color: dvui.Color, margin: dvui.Rect };
+
+/// A small caption over a value, as the toolbar's left end shows them; `mark`
+/// after the value, on its line. There, it is centred on the value: placed
+/// beside the whole field, by eye, it sat a few pixels above it on Windows.
+fn contextField(src: std.builtin.SourceLocation, id: usize, caption: []const u8, value: []const u8, mark: ContextMark) void {
     var stack = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = id,
         .gravity_y = 0.5,
@@ -6493,11 +6608,19 @@ fn contextField(src: std.builtin.SourceLocation, id: usize, caption: []const u8,
         .color_text = .{ .color = style.textFaint() },
         .padding = dvui.Rect.all(0),
     });
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .padding = dvui.Rect.all(0) });
+    defer line.deinit();
     var buf: [MAX_SHOWN_LINE]u8 = undefined;
     dvui.label(@src(), "{s}", .{fitText(&buf, value, style.smallBold(), 200)}, .{
         .font = style.smallBold(),
         .color_text = .{ .color = style.text() },
+        .gravity_y = 0.5,
         .padding = dvui.Rect.all(0),
+    });
+    dvui.icon(@src(), mark.name, mark.icon, .{ .fill_color = .{ .color = mark.color } }, .{
+        .min_size_content = .{ .w = 12, .h = 12 },
+        .gravity_y = 0.5,
+        .margin = mark.margin,
     });
 }
 
@@ -6871,26 +6994,41 @@ var identity_name: std.ArrayList(u8) = .empty;
 var identity_email: std.ArrayList(u8) = .empty;
 var identity_note: []const u8 = "";
 
-fn globalConfig(key: []const u8, out: *std.ArrayList(u8)) bool {
-    const answer = run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get", key }) catch return false;
+/// git's global `user.name` and `user.email`, into `name` and `email`, by one
+/// `git` rather than one each: on Windows starting it is most of the wait.
+/// Through `git`, not libgit2, which would not see the global config a test
+/// hands over in `run.env_override`. True when both are set.
+fn readIdentity(name: *std.ArrayList(u8), email: *std.ArrayList(u8)) bool {
+    name.clearRetainingCapacity();
+    email.clearRetainingCapacity();
+    const answer = run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get-regexp", "^user\\.(name|email)$" }) catch return false;
     defer gpa.free(answer.out);
-    out.clearRetainingCapacity();
-    out.appendSlice(gpa, answer.out) catch return false;
-    return answer.ok and answer.out.len > 0;
+    if (!answer.ok) return false;
+    var lines = std.mem.splitScalar(u8, answer.out, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const out = if (std.mem.eql(u8, line[0..space], "user.name")) name else if (std.mem.eql(u8, line[0..space], "user.email")) email else continue;
+        // Said twice, the last one holds.
+        out.clearRetainingCapacity();
+        out.appendSlice(gpa, std.mem.trim(u8, line[space + 1 ..], " ")) catch return false;
+    }
+    return name.items.len > 0 and email.items.len > 0;
 }
 
 fn identitySet() bool {
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(gpa);
-    return globalConfig("user.name", &scratch) and globalConfig("user.email", &scratch);
+    var name: std.ArrayList(u8) = .empty;
+    defer name.deinit(gpa);
+    var email: std.ArrayList(u8) = .empty;
+    defer email.deinit(gpa);
+    return readIdentity(&name, &email);
 }
 
 fn openIdentity() void {
     identity_open = true;
     identity_rect = .{};
     identity_note = "";
-    _ = globalConfig("user.name", &identity_name);
-    _ = globalConfig("user.email", &identity_email);
+    _ = readIdentity(&identity_name, &identity_email);
 }
 
 /// Fill the fields from the signed-in GitHub account. The noreply address
@@ -7863,7 +8001,7 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Stash everything", .icon = dvui.entypo.archive, .run = struct {
         fn f() void {
-            request(&.{ "stash", "push", "-u" });
+            requestLocal("Stashing", &.{ "stash", "push", "-u" });
         }
     }.f },
     .{ .name = "Stash everything, with a message…", .icon = dvui.entypo.archive, .run = struct {
@@ -7873,7 +8011,7 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Pop the last stash", .icon = dvui.entypo.install, .run = struct {
         fn f() void {
-            request(&.{ "stash", "pop" });
+            requestLocal("Popping the stash", &.{ "stash", "pop" });
         }
     }.f },
     .{ .name = "Stage everything", .icon = dvui.entypo.squared_plus, .run = struct {
@@ -8402,8 +8540,7 @@ var me_loaded = false;
 fn loadMe() void {
     if (me_loaded) return;
     me_loaded = true;
-    _ = globalConfig("user.name", &me_name);
-    _ = globalConfig("user.email", &me_email);
+    _ = readIdentity(&me_name, &me_email);
     // The login Zit's own sign-in saved, from the disk: no request per frame.
     me_gh.clearRetainingCapacity();
     if (!integrations) return;
@@ -9746,6 +9883,9 @@ fn refsSidebar() void {
         .expand = .both,
         .background = false,
         .padding = dvui.Rect.all(0),
+        // Only the height the window leaves: dvui asks for all of its
+        // content, and every section open pushed the status bar out of it.
+        .max_size_content = .height(0),
     });
     defer scroll.deinit();
 
@@ -10157,20 +10297,17 @@ fn requestStash(verb: []const u8, id: git.Oid) void {
 /// rather than `stash@{n}`, because a stash pushed or dropped since the list
 /// was read — in a terminal, say, which no reflog of HEAD records — moves
 /// every index; `pop` and `drop` take only `stash@{n}`, so the index is looked
-/// up again now.
+/// up again now — by libgit2, with no `git` to wait for. The command itself
+/// runs as a job: applying a stash rewrites the working tree.
 fn stashDo(verb: []const u8, hex: []const u8) void {
-    const answer = run.capture(gpa, app_io, repo_path.items, &.{ "git", "stash", "list", "--format=%H" }) catch
-        return setCommandError("Could not read the stashes.");
-    defer gpa.free(answer.out);
-    var lines = std.mem.splitScalar(u8, answer.out, '\n');
-    var index: usize = 0;
-    while (lines.next()) |line| : (index += 1) {
-        if (!std.mem.eql(u8, std.mem.trim(u8, line, " \r"), hex)) continue;
-        // `stash@{n}`: the only name `pop` and `drop` take.
-        var ref_buf: [32]u8 = undefined;
-        return gitDo(&.{ "stash", verb, std.fmt.bufPrint(&ref_buf, "stash@{{{d}}}", .{index}) catch unreachable });
-    }
-    setCommandError("That stash is gone already.");
+    const r = repo orelse return;
+    const id = git.oidFromHex(hex) orelse return setCommandError("That stash is gone already.");
+    const index = r.stashIndex(id) orelse return setCommandError("That stash is gone already.");
+    // `stash@{n}`: the only name `pop` and `drop` take.
+    var ref_buf: [32]u8 = undefined;
+    const ref = std.fmt.bufPrint(&ref_buf, "stash@{{{d}}}", .{index}) catch unreachable;
+    const label = if (std.mem.eql(u8, verb, "pop")) "Popping the stash" else if (std.mem.eql(u8, verb, "drop")) "Dropping the stash" else "Applying the stash";
+    startLocal(label, &.{ "stash", verb, ref }, .local);
 }
 
 /// What a section header offers that its rows cannot: the things that create
@@ -15518,8 +15655,11 @@ fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.Chan
     switch (verb) {
         .stage => request(&.{ "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul" }),
         .unstage => request(&.{ "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul" }),
-        .stash => request(&.{ "stash", "push", "--include-untracked", "--pathspec-from-file=-", "--pathspec-file-nul" }),
+        .stash => requestLocal("Stashing", &.{ "stash", "push", "--include-untracked", "--pathspec-from-file=-", "--pathspec-file-nul" }),
     }
+    // Refused — a job running, say — the paths would wait for whatever
+    // command comes next.
+    if (action == .none) return input.deinit(gpa);
     action_input = input.toOwnedSlice(gpa) catch return input.deinit(gpa);
     clearPickedChanges();
 }
@@ -15716,7 +15856,8 @@ fn commitBox() void {
         }) and amend) fillFromHead();
     }
 
-    if (template_due and repo != null) {
+    // Once git has said whether the repository names a template of its own.
+    if (template_due and repo != null and repo_config_job == null) {
         template_due = false;
         applyTemplate();
     }
@@ -16800,12 +16941,24 @@ test "stage, commit and switch branches through the real git commands" {
     // Commit.
     try commit_summary.appendSlice(gpa, "first commit");
     doCommit();
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     try std.testing.expectEqualStrings("first commit", history.?.commits[0].summary);
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
     // A successful commit clears the box it came from.
     try std.testing.expectEqual(@as(usize, 0), commit_summary.items.len);
+
+    // Typed into while the commit ran: the box keeps the new text.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "hello.txt", .data = "two\n" });
+    gitDo(&.{ "add", "-A" });
+    try commit_summary.appendSlice(gpa, "second commit");
+    doCommit();
+    try commit_summary.appendSlice(gpa, ", and more");
+    try pumpJob();
+    try std.testing.expectEqualStrings("second commit", history.?.commits[0].summary);
+    try std.testing.expectEqualStrings("second commit, and more", commit_summary.items);
+    commit_summary.clearRetainingCapacity();
 
     // Requesting must not touch the repository: the UI is still iterating the
     // snapshot at that point. This is the use-after-free rule, as a test.
@@ -16905,6 +17058,14 @@ fn resetUiGlobals() void {
     signing_loaded = false;
     if (signing_job) |j| j.deinit(app_io);
     signing_job = null;
+    if (repo_config_job) |j| j.deinit(app_io);
+    repo_config_job = null;
+    git_template_path.deinit(gpa);
+    git_template_path = .empty;
+    commit_sent.deinit(gpa);
+    commit_sent = .empty;
+    job_after = .remote;
+    action_after = .remote;
     sidebar_filter = .empty;
 
     clearRecent();
@@ -18441,6 +18602,7 @@ test "renames, a named stash and a forced delete go through git" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed\n" });
     askName(.stash, "");
     try answerPrompt("half a thought");
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expect(std.mem.indexOf(u8, history.?.stashes[0].message, "half a thought") != null);
@@ -18452,6 +18614,7 @@ test "renames, a named stash and a forced delete go through git" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed again\n" });
     try expectGit(dir, &.{ "stash", "push", "-m", "newer" });
     try answerConfirm();
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expect(std.mem.indexOf(u8, history.?.stashes[0].message, "newer") != null);
@@ -18463,6 +18626,7 @@ test "renames, a named stash and a forced delete go through git" {
     try expectGit(dir, &.{ "stash", "push", "-m", "newest" });
     requestStash("pop", newer);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     const popped = try tmp.dir.readFileAlloc(app_io, "a.txt", gpa, .limited(64));
     defer gpa.free(popped);
@@ -18965,6 +19129,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     reloadWork();
     try dvui.testing.settle(frameArrowCursor);
     try clickAt(try tagCenter("toolbar:Stash"));
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     {
         var short: [8]u8 = undefined;
@@ -18973,6 +19138,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
         try hoverAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
         try clickAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash_apply:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
     }
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), changeCount());
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
@@ -19820,6 +19986,7 @@ test "changes picked together are stashed or staged together, and only they" {
     requestPicked(.stash, .unstaged, work.?.unstaged);
     try std.testing.expectEqual(@as(usize, 0), picked_changes.items.len);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
     try std.testing.expectEqualStrings("b.txt", work.?.unstaged[0].path);
@@ -19828,6 +19995,7 @@ test "changes picked together are stashed or staged together, and only they" {
     // Back, then two of the three staged.
     requestStash("pop", history.?.stashes[0].id);
     try std.testing.expect(runAction());
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 3), work.?.unstaged.len);
     toggleChangePick(.unstaged, "b.txt");
     toggleChangePick(.unstaged, "c.txt");
@@ -20970,10 +21138,13 @@ test "the identity dialog saves a name and email to the global config" {
     try std.testing.expect(!identity_open);
     try std.testing.expect(identitySet());
 
-    var check: std.ArrayList(u8) = .empty;
-    defer check.deinit(gpa);
-    try std.testing.expect(globalConfig("user.email", &check));
-    try std.testing.expectEqualStrings("ada@example.com", check.items);
+    var name: std.ArrayList(u8) = .empty;
+    defer name.deinit(gpa);
+    var email: std.ArrayList(u8) = .empty;
+    defer email.deinit(gpa);
+    try std.testing.expect(readIdentity(&name, &email));
+    try std.testing.expectEqualStrings("Ada Lovelace", name.items);
+    try std.testing.expectEqualStrings("ada@example.com", email.items);
 }
 
 /// An environment for git with nothing of the machine's in it but PATH: its
@@ -21230,9 +21401,11 @@ test "audit: the main controls do what they say when clicked" {
 
     // Toolbar: Stash takes both changes away, Pop brings them back.
     try clickAt(try tagCenter("toolbar:Stash"));
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     try clickAt(try tagCenter("toolbar:Pop"));
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 0), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 2), work.?.unstaged.len);
 
@@ -21313,6 +21486,7 @@ test "audit: the main controls do what they say when clicked" {
     try typeText("stash ever");
     try pressFrame(.enter, .none);
     try std.testing.expect(!palette_open);
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
 
     // Settings from the menu on the face: switch to the light theme, Esc out.

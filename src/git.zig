@@ -1520,7 +1520,58 @@ pub const Repo = struct {
         const p = c.git_repository_path(self.ptr) orelse return "";
         return std.mem.span(p);
     }
+
+    /// Every value of `key` in the repository's own config file — what
+    /// `git config --local --get-all` answers — with no `git` to start.
+    /// Copied into `arena`; empty when the key is not there.
+    ///
+    /// The file is opened afresh each time: the config libgit2 keeps for a
+    /// repository would miss what `git config` wrote since.
+    pub fn localConfigAll(self: Repo, arena: std.mem.Allocator, key: [:0]const u8) Error![]const []const u8 {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "{s}config", .{self.commondir()}, 0) catch return error.Git;
+        var cfg: ?*c.git_config = null;
+        try check(c.git_config_open_ondisk(&cfg, path.ptr));
+        defer c.git_config_free(cfg);
+
+        var iter: ?*c.git_config_iterator = null;
+        const opened = c.git_config_multivar_iterator_new(&iter, cfg, key.ptr, null);
+        if (opened == c.GIT_ENOTFOUND) return &.{};
+        try check(opened);
+        defer c.git_config_iterator_free(iter);
+
+        var values: std.ArrayList([]const u8) = .empty;
+        var entry: ?*c.git_config_entry = null;
+        while (true) {
+            const rc = c.git_config_next(&entry, iter);
+            if (rc == c.GIT_ITEROVER) break;
+            try check(rc);
+            const value = arena.dupe(u8, std.mem.span(entry.?.value)) catch return error.Git;
+            values.append(arena, value) catch return error.Git;
+        }
+        return values.toOwnedSlice(arena) catch return error.Git;
+    }
+
+    /// Where the stash whose commit is `id` is in the list now: the `n` of
+    /// `stash@{n}`, the only name `pop` and `drop` take. Read afresh, as a
+    /// stash pushed or dropped since — in a terminal, say — moves every
+    /// index. Null when it is gone.
+    pub fn stashIndex(self: Repo, id: Oid) ?usize {
+        var find: StashFind = .{ .id = id };
+        _ = c.git_stash_foreach(self.ptr, findStash, &find);
+        return find.at;
+    }
 };
+
+const StashFind = struct { id: Oid, at: ?usize = null };
+
+fn findStash(index: usize, _: [*c]const u8, stash_id: [*c]const c.git_oid, payload: ?*anyopaque) callconv(.c) c_int {
+    const find: *StashFind = @ptrCast(@alignCast(payload.?));
+    if (!oidEql(stash_id.*, find.id)) return 0;
+    find.at = index;
+    // Non-zero stops the walk.
+    return 1;
+}
 
 /// A deleted file has no `new_file.path`; fall back to the old one so the row
 /// is not blank.
