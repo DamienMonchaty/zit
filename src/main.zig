@@ -8719,11 +8719,11 @@ fn workspaceSwitcher() void {
     }
 
     _ = dvui.separator(@src(), .{ .expand = .horizontal, .margin = .{ .y = style.space.xs, .h = style.space.xs } });
-    if (menuRow(@src(), "New workspace…")) {
+    if (menuIcon(@src(), dvui.entypo.plus, "New workspace…", false)) {
         m.close();
         openWorkspaceDialog(.new);
     }
-    if (menuRow(@src(), "Rename this workspace…")) {
+    if (menuIcon(@src(), dvui.entypo.pencil, "Rename this workspace…", false)) {
         m.close();
         openWorkspaceDialog(.rename);
     }
@@ -8731,7 +8731,7 @@ fn workspaceSwitcher() void {
         m.close();
         requestTab(.{ .group_color = .{ active_group, c } });
     }
-    if (groups.items.len > 1 and menuRow(@src(), "Delete this workspace")) {
+    if (groups.items.len > 1 and menuIcon(@src(), dvui.entypo.trash, "Delete this workspace", true)) {
         m.close();
         requestTab(.{ .close_group = active_group });
     }
@@ -8859,17 +8859,17 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     for (groups.items, 0..) |other, gi| {
         if (gi == g) continue;
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to {s}", .{workspaceName(other)}) catch continue;
-        if (menuRowAt(@src(), caption, gi)) {
+        if (menuIconAt(@src(), gi, dvui.entypo.layers, caption)) {
             fw.close();
             requestTab(.{ .tab_to = .{ g, t, gi } });
         }
     }
-    if (menuRow(@src(), "Move to a new workspace…")) {
+    if (menuIcon(@src(), dvui.entypo.plus, "Move to a new workspace…", false)) {
         fw.close();
         group_target = .{ g, t };
         openWorkspaceDialog(.with_tab);
     }
-    if (menuRow(@src(), "Close")) {
+    if (menuIcon(@src(), dvui.entypo.cross, "Close", false)) {
         fw.close();
         requestTab(.{ .close_in = .{ g, t } });
     }
@@ -9553,25 +9553,28 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
 
 /// A menu row that opens a submenu beside it: the rect to hang it from,
 /// while it is open.
-fn menuSubRow(src: std.builtin.SourceLocation, caption: []const u8) ?dvui.Rect.Natural {
+fn menuSubRow(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8) ?dvui.Rect.Natural {
     var mi = dvui.menuItem(src, .{ .submenu = true }, .{
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
+        .corners = style.radius.input,
+        .padding = .{ .x = style.space.md, .y = 5, .w = style.space.md, .h = 5 },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
     defer row.deinit();
-    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.small(), .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    dvui.icon(@src(), "menu_icon", icon, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+        .min_size_content = .{ .w = 12, .h = 12 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.md },
+    });
+    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     dvui.icon(@src(), "submenu", dvui.entypo.chevron_small_right, .{ .fill_color = .{ .color = style.textFaint() } }, .{
         .min_size_content = .{ .w = 11, .h = 11 },
         .gravity_y = 0.5,
     });
     return mi.activeRect();
-}
-
-fn menuRow(src: std.builtin.SourceLocation, caption: []const u8) bool {
-    return menuRowAt(src, caption, 0);
 }
 
 /// A text entry with its caret visible and no ring. dvui draws both, while
@@ -9616,19 +9619,6 @@ fn focusOnce(id: dvui.Id) void {
 /// widget up by, built from text the widget already shows.
 fn frameTag(prefix: []const u8, name: []const u8) ?[]const u8 {
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}:{s}", .{ prefix, name }) catch null;
-}
-
-/// One line of a menu built in a loop, where `@src()` alone is the same for
-/// every row of it.
-fn menuRowAt(src: std.builtin.SourceLocation, caption: []const u8, id: usize) bool {
-    return dvui.menuItemLabel(src, caption, .{}, .{
-        .id_extra = id,
-        // One menu is open at a time and its captions differ, so the caption
-        // is unique while it is on screen.
-        .tag = frameTag("menu", caption),
-        .expand = .horizontal,
-        .font = style.small(),
-    }) != null;
 }
 
 /// The one search box: a framed field with a magnifier at the end of it.
@@ -12673,28 +12663,28 @@ fn commitMenu(
     if (history) |h| for (h.refs, 0..) |ref, i| {
         if (ref.kind != .local or ref.head or !git.oidEql(ref.target, commit.id)) continue;
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Check out {s}", .{ref.name}) catch continue;
-        if (menuRowAt(@src(), caption, i)) {
+        if (menuIconAt(@src(), i, dvui.entypo.login, caption)) {
             fw.close();
             checkout(ref);
         }
     };
-    if (menuRow(@src(), "Check out this commit (detaches HEAD)")) {
+    if (menuIcon(@src(), dvui.entypo.login, "Check out this commit (detaches HEAD)", false)) {
         fw.close();
         request(&.{ "checkout", sha });
     }
 
     menuSeparator(1);
-    if (menuRow(@src(), "New branch here")) {
+    if (menuIcon(@src(), dvui.entypo.flow_branch, "New branch here", false)) {
         fw.close();
         askName(.new_branch, sha);
     }
-    if (menuRow(@src(), "Tag this commit")) {
+    if (menuIcon(@src(), dvui.entypo.tag, "Tag this commit", false)) {
         fw.close();
         askName(.new_tag, sha);
     }
 
     menuSeparator(2);
-    if (menuRow(@src(), "Cherry-pick onto current branch")) {
+    if (menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
         fw.close();
         // A merge, like a revert of one: its change is the diff against the
         // first parent, the branch it was merged into.
@@ -12704,7 +12694,7 @@ fn commitMenu(
             request(&.{ "cherry-pick", sha });
         }
     }
-    if (menuRow(@src(), "Revert")) {
+    if (menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
         fw.close();
         // A merge has no single change to undo until one parent is named; the
         // first is the branch it was merged into, which is what "undo this
@@ -12715,14 +12705,14 @@ fn commitMenu(
             request(&.{ "revert", "--no-edit", sha });
         }
     }
-    if (menuRow(@src(), "Rebase from here, interactively")) {
+    if (menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
         fw.close();
         // The clicked commit is replayed too, so the list starts at its parent.
         beginRebase(if (commit.parents.len > 0) commit.parents[0] else null);
     }
     // The three resets, one row: they differ only in what happens to the
     // changes, which is the choice the submenu asks for.
-    if (menuSubRow(@src(), "Reset branch here")) |r| {
+    if (menuSubRow(@src(), dvui.entypo.back_in_time, "Reset branch here")) |r| {
         var sub = dvui.floatingMenu(@src(), .{ .from = r }, .{
             .background = true,
             .color_fill = .{ .color = style.surfaceRaised() },
@@ -12733,27 +12723,27 @@ fn commitMenu(
             .min_size_content = .{ .w = 220 },
         });
         defer sub.deinit();
-        if (menuRow(@src(), "Soft — keep changes staged")) {
+        if (menuIcon(@src(), dvui.entypo.back, "Soft — keep changes staged", false)) {
             fw.close();
             request(&.{ "reset", "--soft", sha });
         }
-        if (menuRow(@src(), "Mixed — keep changes unstaged")) {
+        if (menuIcon(@src(), dvui.entypo.back, "Mixed — keep changes unstaged", false)) {
             fw.close();
             request(&.{ "reset", "--mixed", sha });
         }
-        if (menuRow(@src(), "Hard — discard changes")) {
+        if (menuIcon(@src(), dvui.entypo.trash, "Hard — discard changes", true)) {
             fw.close();
             ask(.reset_hard, sha);
         }
     }
 
     menuSeparator(3);
-    if (menuRow(@src(), "Show diff")) {
+    if (menuIcon(@src(), dvui.entypo.text_document, "Show diff", false)) {
         fw.close();
         selectCommit(commit.id);
     }
     if (history) |h| if (h.head_oid) |head_oid| {
-        if (!git.oidEql(head_oid, commit.id) and menuRow(@src(), "Compare with the checked-out commit")) {
+        if (!git.oidEql(head_oid, commit.id) and menuIcon(@src(), dvui.entypo.flow_parallel, "Compare with the checked-out commit", false)) {
             fw.close();
             var a: [8]u8 = undefined;
             var name_buf: [64]u8 = undefined;
@@ -12765,12 +12755,12 @@ fn commitMenu(
     };
 
     menuSeparator(4);
-    if (menuRow(@src(), "Copy the full sha")) {
+    if (menuIcon(@src(), dvui.entypo.copy, "Copy the full sha", false)) {
         fw.close();
         var hex: [41]u8 = undefined;
         dvui.clipboardTextSet(git.oidHex(commit.id, &hex));
     }
-    if (menuRow(@src(), "Copy the message")) {
+    if (menuIcon(@src(), dvui.entypo.clipboard, "Copy the message", false)) {
         fw.close();
         dvui.clipboardTextSet(commit.summary);
     }
@@ -15707,30 +15697,30 @@ fn changeMenu(
     defer fw.deinit();
 
     if (staged) {
-        if (menuRow(@src(), "Unstage")) {
+        if (menuIcon(@src(), dvui.entypo.squared_minus, "Unstage", false)) {
             fw.close();
             requestStage(change.path, change.old_path, false);
         }
     } else {
-        if (menuRow(@src(), "Stage")) {
+        if (menuIcon(@src(), dvui.entypo.squared_plus, "Stage", false)) {
             fw.close();
             requestStage(change.path, change.old_path, true);
         }
     }
 
-    if (menuRow(@src(), "Open this file")) {
+    if (menuIcon(@src(), dvui.entypo.document, "Open this file", false)) {
         fw.close();
         openPath(change.path);
     }
-    if (menuRow(@src(), "Blame")) {
+    if (menuIcon(@src(), dvui.entypo.eye, "Blame", false)) {
         fw.close();
         selectBlame(change.path);
     }
-    if (menuRow(@src(), "History of this file")) {
+    if (menuIcon(@src(), dvui.entypo.clock, "History of this file", false)) {
         fw.close();
         showFileHistory(change.path);
     }
-    if (menuRow(@src(), "Copy the path")) {
+    if (menuIcon(@src(), dvui.entypo.copy, "Copy the path", false)) {
         fw.close();
         dvui.clipboardTextSet(change.path);
     }
@@ -15738,14 +15728,14 @@ fn changeMenu(
     // Last, and only where there is something to lose: staged changes are
     // dropped by unstaging them first, which is the line above.
     if (!staged) {
-        if (menuRow(@src(), "Discard changes…")) {
+        if (menuIcon(@src(), dvui.entypo.trash, "Discard changes…", true)) {
             fw.close();
             ask(.discard, change.path);
         }
         // Only for a file git does not know yet: ignoring a tracked one does
         // nothing until it is removed from the index, which is a surprise.
         if (change.status == .added) {
-            if (menuRow(@src(), "Ignore this file")) {
+            if (menuIcon(@src(), dvui.entypo.eye_with_line, "Ignore this file", false)) {
                 fw.close();
                 ignorePath(change.path);
             }
