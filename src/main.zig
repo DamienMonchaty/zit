@@ -10992,7 +10992,13 @@ fn colorSwatches(src: std.builtin.SourceLocation, current: u8, pad: dvui.Rect) ?
 
 /// Naming a workspace, in a dialog: a new one, a new one for the tab
 /// `group_target` names, or the one shown renamed — with its colour.
-const WorkspaceDialog = enum { new, with_tab, rename };
+const WorkspaceDialog = enum {
+    new,
+    with_tab,
+    rename,
+    /// A new tab group, for the tab `group_target` names.
+    group,
+};
 var ws_dialog: ?WorkspaceDialog = null;
 var ws_rect: dvui.Rect = .{};
 var ws_name: std.ArrayList(u8) = .empty;
@@ -11003,6 +11009,16 @@ fn openWorkspaceDialog(kind: WorkspaceDialog) void {
     ws_rect = .{};
     ws_name.clearRetainingCapacity();
     ws_color = @intCast(workspaces.items.len % GROUP_COLORS);
+    // A group: a colour no other shows yet, where there is one.
+    if (kind == .group) {
+        ws_color = 0;
+        while (ws_color < GROUP_COLORS - 1) : (ws_color += 1) {
+            const used = for (groups.items) |other| {
+                if (other.name.len > 0 and other.color == ws_color) break true;
+            } else false;
+            if (!used) break;
+        }
+    }
     if (kind == .rename and active_ws < workspaces.items.len) {
         ws_name.appendSlice(gpa, workspaces.items[active_ws].name) catch {};
         ws_color = workspaces.items[active_ws].color;
@@ -11016,12 +11032,15 @@ fn workspaceDialog() void {
     var fw = modalWindow(@src(), &ws_rect, &open, style.surface(), 400, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
-    dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of groups and tabs, switched to in this window", &open);
+    if (kind == .group)
+        dialogHeader(@src(), dvui.entypo.plus, "New group", "The tab under a coloured label, with the ones you add to it", &open)
+    else
+        dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of groups and tabs, switched to in this window", &open);
 
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
     defer body.deinit();
     var entered = false;
-    _ = dialogField(@src(), 0, "Name", &ws_name, "e.g. Client work", true, &entered);
+    _ = dialogField(@src(), 0, "Name", &ws_name, if (kind == .group) "e.g. Front" else "e.g. Client work", true, &entered);
     dialogLabel(@src(), "Colour");
     if (colorSwatches(@src(), ws_color, .{ .y = style.space.xs, .h = style.space.lg })) |c| ws_color = @intCast(c);
 
@@ -11047,6 +11066,18 @@ fn applyWorkspaceDialog() void {
         .with_tab => if (newWorkspace(name, ws_color)) |w| {
             moveTabToWorkspace(group_target[0], group_target[1], w);
             selectWorkspace(w);
+        },
+        .group => {
+            const g0 = group_target[0];
+            const t0 = group_target[1];
+            if (g0 >= groups.items.len or t0 >= groups.items[g0].tabs.items.len) return;
+            // Found again by its tab: the group it left may go, empty.
+            const tab = groups.items[g0].tabs.items[t0].path.ptr;
+            groupTab(name, g0, t0);
+            for (groups.items) |*group| for (group.tabs.items) |other| {
+                if (other.path.ptr == tab) group.color = ws_color;
+            };
+            saveWorkspace();
         },
         .rename => if (active_ws < workspaces.items.len) {
             const owned = gpa.dupe(u8, name) catch return;
@@ -11084,7 +11115,7 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     if (menuIcon(@src(), dvui.entypo.plus, "Add to a new group…", false)) {
         fw.close();
         group_target = .{ g, t };
-        askName(.new_group, "");
+        openWorkspaceDialog(.group);
     }
     for (groups.items, 0..) |other, gi| {
         if (gi == g or other.name.len == 0 or other.ws != groups.items[g].ws) continue;
@@ -23726,6 +23757,39 @@ test "workspaces hold their own groups, and switching opens the tab each was on"
     deleteWorkspace(1);
     try std.testing.expectEqual(@as(usize, 1), workspaces.items.len);
     for (groups.items) |g| try std.testing.expectEqual(@as(usize, 0), g.ws);
+}
+
+test "a group is made in a dialog, with its colour" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try useTestConfig(root);
+    try git.init();
+    defer git.shutdown();
+    defer closeRepo();
+    var buf_a: [std.fs.max_path_bytes]u8 = undefined;
+    const a = try std.fmt.bufPrint(&buf_a, "{s}/a", .{root});
+    try expectGit(root, &.{ "init", "-q", "-b", "main", "a" });
+    loadWorkspace();
+    openAndRemember(a);
+
+    group_target = .{ 0, 0 };
+    openWorkspaceDialog(.group);
+    try std.testing.expect(ws_dialog == .group);
+    try std.testing.expect(prompt == null);
+    try ws_name.appendSlice(gpa, "Front");
+    ws_color = 4;
+    applyWorkspaceDialog();
+    try std.testing.expect(ws_dialog == null);
+    // Its only tab gone, the group it came from goes too.
+    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
+    try std.testing.expectEqualStrings("Front", groups.items[0].name);
+    try std.testing.expectEqual(@as(u8, 4), groups.items[0].color);
+    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
 }
 
 test "a group keeps its own tabs, and the last group cannot be closed" {
