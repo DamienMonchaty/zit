@@ -1983,7 +1983,7 @@ const HistoryLoad = struct {
         var r = git.Repo.open(self.path) catch return;
         defer r.deinit();
         var h = r.readHistoryFiltered(gpa, self.filter) catch return;
-        const l = graph.build(gpa, h.commits) catch {
+        const l = graph.build(gpa, h.commits, h.head_oid) catch {
             h.deinit();
             return;
         };
@@ -2482,7 +2482,7 @@ fn reloadHistory() void {
         setCommandError(git.lastError());
         return;
     };
-    var next_lanes = graph.build(gpa, next_history.commits) catch {
+    var next_lanes = graph.build(gpa, next_history.commits, next_history.head_oid) catch {
         next_history.deinit();
         setCommandError("Out of memory laying out the graph.");
         return;
@@ -12455,7 +12455,7 @@ fn commitRow(
                 hidden += 1;
                 continue;
             }
-            refTag(@src(), ref, i, synced, true);
+            refTag(@src(), ref, i, synced, true, hue);
             drawn += 1;
         }
         if (hidden > 0) moreRefs(@src(), commit, hidden, row_index);
@@ -12866,14 +12866,19 @@ fn sameOnRemote(h: git.History, ref: git.Ref) bool {
 /// its colour and bold, the one picked in "Branches:" outlined and bold —
 /// the two Git Graph sets apart from the rest. `synced`, a cloud after the
 /// name: the remote branch of that name is at the same commit.
-fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool, draggable: bool) void {
+/// `lane`: the colour of the graph line the ref's commit sits on. A branch
+/// takes it, as GitKraken colours one, so a name is matched to its line at a
+/// glance; a tag keeps its own.
+fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool, draggable: bool, lane: ?dvui.Color) void {
     const color = switch (ref.kind) {
-        .local => style.accent(),
-        .remote => style.get().blue,
+        .local => lane orelse style.accent(),
+        .remote => lane orelse style.get().blue,
         .tag => style.get().yellow,
     };
     const picked = hasName(graph_only.items, ref.name);
-    const ink = if (ref.head) style.textOnAccent() else color;
+    // On a lane's colour, filled: the ground's colour reads on it in either
+    // theme, where white would wash out on the dark theme's light hues.
+    const ink = if (!ref.head) color else if (lane != null and ref.kind != .tag) style.background() else style.textOnAccent();
 
     var pill = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
@@ -13125,6 +13130,20 @@ fn drawLanes(
         return;
     }
 
+    // The branch of the commit picked: its line full strength, every other
+    // one receding, as GitKraken and GitComet show which line you are on.
+    const focus: ?u16 = switch (selection) {
+        .commit => |id| if (history) |h| if (h.indexOf(id)) |at| (if (at < l.rows.len) l.rows[at].color else null) else null else null,
+        else => null,
+    };
+    const ink = struct {
+        fn of(lane_color: u16, focused: ?u16) dvui.Color {
+            const c = style.laneColor(lane_color);
+            const f = focused orelse return c;
+            return if (f == lane_color) c else c.lerp(style.background(), 0.6);
+        }
+    }.of;
+
     for (first..last) |row_index| {
         if (row_index < extra) continue;
         const i = row_index - extra;
@@ -13135,7 +13154,7 @@ fn drawLanes(
         const y_next = y + rh;
 
         for (l.links[row.link_start..row.link_end]) |link| {
-            const color = style.laneColor(link.color_lane);
+            const color = ink(link.color_lane, focus);
             const x0 = laneX(link.from);
             const x1 = laneX(link.to);
 
@@ -13200,7 +13219,7 @@ fn drawLanes(
                     // lane's colour over a faint wash of it, the merge glyph
                     // in the middle.
                     const d = style.avatar;
-                    const hue = style.laneColor(row.color);
+                    const hue = ink(row.color, focus);
                     var disc = dvui.box(@src(), .{}, .{
                         .id_extra = row_index,
                         .rect = .{ .x = laneX(row.lane) - d / 2, .y = y - d / 2, .w = d, .h = d },
@@ -13218,7 +13237,7 @@ fn drawLanes(
                     disc.deinit();
                 } else {
                     const r = style.avatar / 2;
-                    avatar(@src(), row_index, commit, .{ .x = laneX(row.lane) - r, .y = y - r }, style.laneColor(row.color));
+                    avatar(@src(), row_index, commit, .{ .x = laneX(row.lane) - r, .y = y - r }, ink(row.color, focus));
                 }
             }
         }
@@ -14695,7 +14714,7 @@ fn commitDetail(id: git.Oid) void {
                 if (!git.oidEql(ref.target, id)) continue;
                 const synced = sameOnRemote(h, ref);
                 if (synced and ref.kind == .remote) continue;
-                refTag(@src(), ref, i, synced, false);
+                refTag(@src(), ref, i, synced, false, null);
             };
         }
 

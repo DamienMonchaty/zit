@@ -56,13 +56,36 @@ pub const Layout = struct {
 /// graph column if anyone ever has 64 concurrent branches.
 pub const MAX_LANES: u16 = 64;
 
-pub fn build(gpa: std.mem.Allocator, commits: []const git.Commit) !Layout {
+/// `trunk` is the commit HEAD is on: its first-parent line is kept straight
+/// down lane 0, the way GitKraken keeps the checked-out branch at the left
+/// edge, whatever order the other branches come in. Null for none.
+pub fn build(gpa: std.mem.Allocator, commits: []const git.Commit, trunk: ?git.Oid) !Layout {
     var out: Layout = .{ .arena = .init(gpa) };
     errdefer out.arena.deinit();
     const arena = out.arena.allocator();
 
     var rows = try arena.alloc(Row, commits.len);
     var links: std.ArrayList(Link) = .empty;
+
+    // The trunk: HEAD's commit and its first parents, as far as the list goes.
+    const on_trunk = try arena.alloc(bool, commits.len);
+    @memset(on_trunk, false);
+    if (trunk) |tip| {
+        var index: std.AutoHashMapUnmanaged(git.Oid, u32) = .empty;
+        defer index.deinit(gpa);
+        try index.ensureTotalCapacity(gpa, @intCast(commits.len));
+        for (commits, 0..) |c, k| index.putAssumeCapacity(c.id, @intCast(k));
+        var at = index.get(tip);
+        while (at) |k| {
+            on_trunk[k] = true;
+            const c = commits[k];
+            at = if (c.parents.len > 0) index.get(c.parents[0]) else null;
+        }
+    }
+    const has_trunk = std.mem.indexOfScalar(bool, on_trunk, true) != null;
+    // Lane 0 is the trunk's, from the top: no other branch takes it, even
+    // before the trunk's first commit comes.
+    const first_free: usize = if (has_trunk) 1 else 0;
 
     // The lanes at the current row, by column: what each waits for (null for
     // a gap), and its branch's colour.
@@ -71,30 +94,56 @@ pub fn build(gpa: std.mem.Allocator, commits: []const git.Commit) !Layout {
     var colors: std.ArrayList(u16) = .empty;
     defer colors.deinit(gpa);
     var next_color: u16 = 0;
+    if (has_trunk) {
+        try active.append(gpa, null);
+        try colors.append(gpa, 0);
+    }
     // Which lanes were open when the row began: those flow on through it.
     var was_open: std.ArrayList(bool) = .empty;
     defer was_open.deinit(gpa);
+    var prev_start: u32 = 0;
 
     for (commits, 0..) |commit, i| {
         const link_start: u32 = @intCast(links.items.len);
         was_open.clearRetainingCapacity();
         for (active.items) |slot| try was_open.append(gpa, slot != null);
 
-        // Its lane: the one waiting for it, or — a branch tip nothing above
-        // leads to — the first gap.
-        const my: u16 = findLane(active.items, commit.id, null) orelse try openLane(gpa, &active, &colors, &next_color, 0, commit.id);
+        // Its lane: the trunk's own for a trunk commit; otherwise the one
+        // waiting for it, or — a branch tip nothing above leads to — the
+        // first gap.
+        const my: u16 = if (on_trunk[i]) blk: {
+            if (active.items[0] == null) {
+                active.items[0] = commit.id;
+                colors.items[0] = next_color;
+                next_color +%= 1;
+            }
+            break :blk 0;
+        } else findLane(active.items, commit.id, null) orelse try openLane(gpa, &active, &colors, &next_color, first_free, commit.id);
         const my_color = colors.items[my];
+
+        // Every other lane waiting for this commit comes into it: the line
+        // drawn down it on the row above turns into this node instead.
+        for (active.items, 0..) |*slot, k| {
+            if (k == my) continue;
+            const held = slot.* orelse continue;
+            if (!git.oidEql(held, commit.id)) continue;
+            slot.* = null;
+            for (links.items[prev_start..link_start]) |*l| {
+                if (l.to == k) l.to = my;
+            }
+        }
 
         if (commit.parents.len == 0) {
             // A root commit: the lane ends here.
             active.items[my] = null;
         } else {
             const first = commit.parents[0];
-            if (findLane(active.items, first, my)) |existing| {
+            const existing = if (on_trunk[i]) null else findLane(active.items, first, my);
+            if (existing) |lane| {
                 // The first parent is already carried by another lane, so
                 // this branch rejoins it: end this lane and turn across.
                 active.items[my] = null;
-                try links.append(arena, .{ .from = my, .to = existing, .color_lane = colors.items[existing] });
+                try links.append(arena, .{ .from = my, .to = lane, .color_lane = colors.items[lane] });
             } else {
                 active.items[my] = first;
                 try links.append(arena, .{ .from = my, .to = my, .color_lane = my_color });
@@ -103,17 +152,8 @@ pub fn build(gpa: std.mem.Allocator, commits: []const git.Commit) !Layout {
             // Merge parents: the lane already waiting for one, or the first
             // gap to the right of this one — a branch forks off rightwards.
             for (commit.parents[1..]) |parent| {
-                const lane = findLane(active.items, parent, null) orelse try openLane(gpa, &active, &colors, &next_color, my + 1, parent);
+                const lane = findLane(active.items, parent, null) orelse try openLane(gpa, &active, &colors, &next_color, @max(my + 1, first_free), parent);
                 try links.append(arena, .{ .from = my, .to = lane, .color_lane = colors.items[lane] });
-            }
-        }
-
-        // Another lane waiting for this same commit — only after a fold at
-        // MAX_LANES — would wait forever: it ends here.
-        for (active.items, 0..) |*slot, k| {
-            if (k == my) continue;
-            if (slot.*) |held| {
-                if (git.oidEql(held, commit.id)) slot.* = null;
             }
         }
 
@@ -130,10 +170,11 @@ pub fn build(gpa: std.mem.Allocator, commits: []const git.Commit) !Layout {
             .link_start = link_start,
             .link_end = @intCast(links.items.len),
         };
+        prev_start = link_start;
 
         out.lane_count = @max(out.lane_count, @as(u16, @intCast(active.items.len)));
-        // Gaps at the right end are no column at all.
-        while (active.items.len > 0 and active.items[active.items.len - 1] == null) {
+        // Gaps at the right end are no column at all — save the trunk's.
+        while (active.items.len > first_free and active.items[active.items.len - 1] == null) {
             _ = active.pop();
             _ = colors.pop();
         }
@@ -205,7 +246,7 @@ test "a straight history uses one lane" {
         mkCommit(1, &.{}),
     };
 
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
 
     try std.testing.expectEqual(@as(u16, 1), layout.lane_count);
@@ -225,7 +266,7 @@ test "a merge opens a second lane and the branch rejoins it" {
         mkCommit(1, &.{}),
     };
 
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
 
     try std.testing.expectEqual(@as(u16, 2), layout.lane_count);
@@ -254,7 +295,7 @@ test "a freed lane is reused rather than the graph drifting right" {
         mkCommit(3, &.{}),
     };
 
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
 
     // 5 takes lane 0, 4 is unrelated so it takes lane 1, 3 was already claimed
@@ -277,7 +318,7 @@ test "a branch forks off to the right, into the first gap there" {
         mkCommit(3, &.{1}),
         mkCommit(1, &.{}),
     };
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
 
     // 7 is a tip on lane 0; 6, another tip, comes in at the right, lane 1.
@@ -305,7 +346,7 @@ test "a lane that ends leaves a gap, and the lanes beside it stay put" {
         mkCommit(2, &.{}),
         mkCommit(1, &.{}),
     };
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
     try std.testing.expectEqual(@as(u16, 1), layout.rows[1].lane);
     try std.testing.expectEqual(@as(u16, 1), layout.rows[3].lane);
@@ -325,7 +366,7 @@ test "a new branch takes the first gap rather than widening the graph" {
         mkCommit(6, &.{1}),
         mkCommit(1, &.{}),
     };
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
     try std.testing.expectEqual(@as(u16, 0), layout.rows[3].lane);
     try std.testing.expectEqual(@as(u16, 2), layout.lane_count);
@@ -344,7 +385,7 @@ test "a lane a branch rejoins keeps flowing through that row" {
         mkCommit(1, &.{}),
     };
 
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
 
     // Row of commit 2, on lane 1: its own curve back to lane 0 — and lane 0,
@@ -375,7 +416,7 @@ test "a merge folded into a last lane that just ended keeps that lane for its pa
     commits[64] = mkCommit(200, &.{});
     for (0..63) |k| commits[65 + k] = mkCommit(@intCast(64 + k), &.{});
 
-    var layout = try build(std.testing.allocator, &commits);
+    var layout = try build(std.testing.allocator, &commits, null);
     defer layout.deinit();
 
     // The line the merge drew to 200's lane arrives in that lane's colour:
@@ -386,4 +427,26 @@ test "a merge folded into a last lane that just ended keeps that lane for its pa
     for (layout.links[merge.link_start..merge.link_end]) |l| {
         if (l.from == merge.lane and l.to == parent.lane) break try std.testing.expectEqual(l.color_lane, parent.color);
     } else return error.NoLineToParent;
+}
+
+test "HEAD's line runs down lane 0, and a branch newer than it joins it there" {
+    // 9 is a branch tip newer than HEAD (3); both come from 2. Read first, 9
+    // would take lane 0; with HEAD at 3 it takes lane 1, and HEAD's line —
+    // 3, 2, 1 — stays on lane 0.
+    const commits = [_]git.Commit{
+        mkCommit(9, &.{2}),
+        mkCommit(3, &.{2}),
+        mkCommit(2, &.{1}),
+        mkCommit(1, &.{}),
+    };
+    var layout = try build(std.testing.allocator, &commits, oid(3));
+    defer layout.deinit();
+    try std.testing.expectEqual(@as(u16, 1), layout.rows[0].lane);
+    for (layout.rows[1..]) |row| try std.testing.expectEqual(@as(u16, 0), row.lane);
+    // 9's line comes into 2 on lane 0, turning in on the row above it.
+    var joins = false;
+    for (layout.links[layout.rows[1].link_start..layout.rows[1].link_end]) |l| {
+        if (l.from == 1 and l.to == 0) joins = true;
+    }
+    try std.testing.expect(joins);
 }
