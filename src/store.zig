@@ -16,8 +16,11 @@ pub const Group = struct {
     repos: []const []const u8,
     /// Index into the strip's group colours.
     color: u8 = 0,
-    /// Folded to its label in the strip.
+    /// Folded to its label in the strip. Read from files of before the
+    /// workspaces, never acted on.
     collapsed: bool = false,
+    /// The tab it was on, reopened when it is switched back to.
+    last: usize = 0,
 };
 
 /// The file's whole contents.
