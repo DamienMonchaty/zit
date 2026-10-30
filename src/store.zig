@@ -42,6 +42,8 @@ pub const File = struct {
     auto_fetch_minutes: u32 = 10,
     /// Remote branches drawn in the graph.
     show_remote_branches: bool = true,
+    /// The graph's history mode: first parents from HEAD, or every branch.
+    first_parent: bool = false,
     /// The graph column's width as dragged; 0 is as wide as the lanes need.
     graph_width: f32 = 0,
     /// Open last run's tabs again at start, rather than the start page.

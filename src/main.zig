@@ -289,6 +289,7 @@ fn loadWorkspace() void {
     commit_prefs = loaded.file.commit;
     auto_fetch_minutes = loaded.file.auto_fetch_minutes;
     graph_show_remote = loaded.file.show_remote_branches;
+    graph_first_parent = loaded.file.first_parent;
     graph_width = loaded.file.graph_width;
     // The file's strings die with `loaded`.
     commit_template.clearRetainingCapacity();
@@ -371,6 +372,7 @@ fn writeWorkspace() bool {
         .recent = recent.items,
         .auto_fetch_minutes = auto_fetch_minutes,
         .show_remote_branches = graph_show_remote,
+        .first_parent = graph_first_parent,
         .graph_width = graph_width,
         .remember_tabs = remember_tabs,
         .default_branch = default_branch.items,
@@ -1851,7 +1853,7 @@ var graph_pinned: std.ArrayList([]u8) = .empty;
 var graph_only: std.ArrayList([]u8) = .empty;
 
 fn graphFilter() git.RefFilter {
-    return .{ .hidden = @ptrCast(graph_hidden.items), .hidden_set = &hidden_set, .only = @ptrCast(graph_only.items), .remotes = graph_show_remote };
+    return .{ .hidden = @ptrCast(graph_hidden.items), .hidden_set = &hidden_set, .only = @ptrCast(graph_only.items), .remotes = graph_show_remote, .first_parent = graph_first_parent };
 }
 
 /// `graph_hidden` as a set, over the same strings: asked of every ref a
@@ -1876,6 +1878,9 @@ fn toggleOnly(name: []const u8) void {
 
 /// Remote branches drawn in the graph; saved with the workspace.
 var graph_show_remote: bool = true;
+/// GitComet's two history modes: "All branches" (off) or "First-parent" (on),
+/// the mainline from HEAD — or from the branches picked — through its merges.
+var graph_first_parent: bool = false;
 
 /// The graph's filter changed this frame: read the history again once the
 /// frame is drawn — reading it now would free what the rest of the frame is
@@ -1986,7 +1991,7 @@ const HistoryLoad = struct {
         var r = git.Repo.open(self.path) catch return;
         defer r.deinit();
         var h = r.readHistoryFiltered(gpa, self.filter) catch return;
-        const l = graph.build(gpa, h.commits, h.head_oid) catch {
+        const l = graph.build(gpa, h.commits, h.head_oid, h.refs) catch {
             h.deinit();
             return;
         };
@@ -2485,7 +2490,7 @@ fn reloadHistory() void {
         setCommandError(git.lastError());
         return;
     };
-    var next_lanes = graph.build(gpa, next_history.commits, next_history.head_oid) catch {
+    var next_lanes = graph.build(gpa, next_history.commits, next_history.head_oid, next_history.refs) catch {
         next_history.deinit();
         setCommandError("Out of memory laying out the graph.");
         return;
@@ -9292,7 +9297,8 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
     const button = DropButton.begin(src, .{
         .tag = "branch_selector",
         .gravity_y = 0.5,
-        .background = picked > 0,
+        // Lit while it narrows the graph: branches picked, or First-parent.
+        .background = picked > 0 or graph_first_parent,
         .color_fill = .{ .color = style.accentDim() },
         .margin = .{ .w = style.space.xs },
         .padding = .{ .x = 3, .y = 2, .w = 3, .h = 2 },
@@ -9301,7 +9307,7 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
     {
         var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
         defer face.deinit();
-        dvui.icon(@src(), "branches", dvui.entypo.flow_branch, .{ .fill_color = .{ .color = if (picked > 0) style.accent() else style.textMuted() } }, .{
+        dvui.icon(@src(), "branches", if (graph_first_parent) dvui.entypo.flow_line else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = if (picked > 0 or graph_first_parent) style.accent() else style.textMuted() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
         });
@@ -9315,15 +9321,26 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
 
     var flip_remote = false;
     var all = false;
+    var mode: ?bool = null;
     // Copied before the history it names can be read again.
     var toggled: ?[]const u8 = null;
     const menu = button.open();
     if (menu) |m| {
         focusOnce(searchField(@src(), &branch_filter, "Filter branches…", "branch_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
 
+        dropHeading(@src(), 1, "HISTORY");
+        if (menuIcon(@src(), if (!graph_first_parent) dvui.entypo.check else dvui.entypo.flow_tree, "All branches", false)) {
+            mode = false;
+            m.close();
+        }
+        if (menuIcon(@src(), if (graph_first_parent) dvui.entypo.check else dvui.entypo.flow_line, "First-parent", false)) {
+            mode = true;
+            m.close();
+        }
+        dropHeading(@src(), 2, "BRANCHES");
         var remote = graph_show_remote;
         if (dvui.checkbox(@src(), &remote, "Remote branches", .{ .font = style.small(), .margin = .{ .x = style.space.sm, .y = 2, .h = 2 } })) flip_remote = true;
-        if (menuIcon(@src(), if (picked == 0) dvui.entypo.check else dvui.entypo.flow_tree, "All branches", false)) {
+        if (menuIcon(@src(), if (picked == 0) dvui.entypo.check else dvui.entypo.flow_tree, "Every branch shown", false)) {
             all = true;
             m.close();
         }
@@ -9366,6 +9383,11 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
 
     if (toggled) |name| toggleOnly(name);
     if (all) setSolo(null);
+    if (mode) |first_parent| if (first_parent != graph_first_parent) {
+        graph_first_parent = first_parent;
+        saveWorkspace();
+        graphFilterChanged();
+    };
     if (flip_remote) {
         graph_show_remote = !graph_show_remote;
         saveWorkspace();
@@ -18564,6 +18586,38 @@ test "a workspace is named in a dialog, not a bar" {
     try std.testing.expectEqualStrings("Client", groups.items[1].name);
     try std.testing.expectEqual(@as(u8, 4), groups.items[1].color);
     try std.testing.expectEqual(@as(usize, 1), active_group);
+}
+
+test "First-parent shows the mainline through a merge, All branches the side branch too" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    defer graph_first_parent = false;
+    try git.init();
+    defer git.shutdown();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try expectGit(dir, &.{ "switch", "-q", "-c", "side" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try expectGit(dir, &.{ "add", "b.txt" });
+    try expectGit(dir, &.{ "commit", "-q", "-m", "on the side" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try expectGit(dir, &.{ "merge", "-q", "--no-ff", "-m", "merge side", "side" });
+
+    openRepo(dir);
+    defer closeRepo();
+    try std.testing.expectEqual(@as(usize, 3), history.?.commits.len);
+
+    graph_first_parent = true;
+    reloadHistory();
+    try std.testing.expectEqual(@as(usize, 2), history.?.commits.len);
+    for (history.?.commits) |c| try std.testing.expect(!std.mem.eql(u8, c.summary, "on the side"));
+    // The merge is still a merge, drawn without a line to the side.
+    try std.testing.expectEqual(@as(u16, 1), lanes.?.lane_count);
 }
 
 test "the ungrouped runs of an old workspace file become one Default" {

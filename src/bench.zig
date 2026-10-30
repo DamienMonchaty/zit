@@ -82,7 +82,7 @@ const cases = [_]Case{
     }.f },
     .{ .name = "graph", .run = struct {
         fn f(ctx: *Ctx, a: std.mem.Allocator) !void {
-            var l = try graph.build(a, ctx.history.commits, ctx.history.head_oid);
+            var l = try graph.build(a, ctx.history.commits, ctx.history.head_oid, ctx.history.refs);
             l.deinit();
         }
     }.f },
