@@ -19150,6 +19150,14 @@ fn pumpJob() !void {
     if (job != null) return error.JobNeverFinished;
 }
 
+/// As `pumpJob`, then the frames after it: what the job changed is on screen,
+/// and its tags with it, before the next click looks for them. Without them
+/// the click aims at the last frame drawn, which may be from while it ran.
+fn pumpJobFrame() !void {
+    try pumpJob();
+    try dvui.testing.settle(frameArrowCursor);
+}
+
 // Nothing about the threading is checked by the compiler: a job that never
 // completes, or one whose result is never folded in, looks exactly like one
 // that worked until you notice the refs did not move.
@@ -20311,7 +20319,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     reloadWork();
     try dvui.testing.settle(frameArrowCursor);
     try clickAt(try tagCenter("toolbar:Stash"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     {
         var short: [8]u8 = undefined;
@@ -20320,14 +20328,14 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
         try hoverAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
         try clickAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash_apply:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
     }
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), changeCount());
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
 
     // Amend ticked: the last message to start from, the button live at once.
     try clickAt(try tagCenter("link:stage_all"));
-    try pumpJob();
+    try pumpJobFrame();
     try clickAt(try tagCenter("commit:amend"));
     try std.testing.expect(amend);
     try std.testing.expectEqualStrings("first", commit_summary.items);
@@ -22860,17 +22868,17 @@ test "audit: the main controls do what they say when clicked" {
 
     // Toolbar: Stash takes both changes away, Pop brings them back.
     try clickAt(try tagCenter("toolbar:Stash"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     try clickAt(try tagCenter("toolbar:Pop"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 0), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 2), work.?.unstaged.len);
 
     // Stage all — a job — and Unstage all.
     try clickAt(try tagCenter("link:stage_all"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 2), work.?.staged.len);
     try clickAt(try tagCenter("link:unstage_all"));
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
@@ -22937,7 +22945,7 @@ test "audit: the main controls do what they say when clicked" {
 
     // Double-click a branch to check it out.
     try doubleClickAt(try tagCenter("feature"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqualStrings("feature", history.?.head.?);
 
     // The palette: Ctrl+P, a few letters, Enter.
@@ -22946,7 +22954,7 @@ test "audit: the main controls do what they say when clicked" {
     try typeText("stash ever");
     try pressFrame(.enter, .none);
     try std.testing.expect(!palette_open);
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
 
     // Settings from the menu on the face: switch to the light theme, Esc out.
