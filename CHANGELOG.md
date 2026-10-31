@@ -59,6 +59,26 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- Merges, rebases and conflicts are harder to break by accident:
+  - Staging a conflicted file that still has its conflict markers — with +,
+    a double-click, Mark resolved, Stage all or the palette — asks first.
+  - Abort and Skip ask first, saying what is lost.
+  - Undo is refused while a merge, rebase, cherry-pick or revert is under
+    way, where it used to reset under it; Amend is hidden then.
+  - A pick in a conflicted file no longer writes over the file when it was
+    edited elsewhere since it was shown.
+  - An operation that stops at a conflict is no longer shown as an error:
+    the first conflicted file opens instead.
+  - An interactive rebase git refuses to start keeps its plan on screen,
+    and its todo file is no longer left in the repository.
+  - A merge stopped on a conflict in a terminal now brings up the banner.
+- Every confirmation bar showed its buttons without its question; the
+  question is back.
+- In the pull requests: ↑ and ↓ no longer move the hidden history, Ctrl+F
+  searches the requests, a review written for one request is not carried to
+  the next, Approve and Request changes are not offered on your own request,
+  and a request GitHub has not yet checked reads "still working out whether
+  it can merge…", asked again every few seconds, rather than "Ready to merge".
 - In the Connect GitHub dialog, the loading dots no longer sit beside the
   buttons as if part of the last one: they say what is being waited on, on a
   line of their own — "Waiting for your approval on github.com" — and come

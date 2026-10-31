@@ -911,6 +911,13 @@ const Confirm = struct {
         close_request,
         /// `arg` is the GitHub login.
         sign_out,
+        /// A conflicted file — or, empty, everything — staged with conflict
+        /// markers still in it: git takes them as the resolution.
+        stage_markers,
+        /// The merge, rebase, cherry-pick or revert under way, called off.
+        abort_operation,
+        /// The commit a rebase stopped on, left out of it.
+        skip_step,
     };
 };
 
@@ -2653,6 +2660,16 @@ fn swapWork(next: git.Work) void {
     work = next;
     work_version +%= 1;
 
+    if (open_first_conflict) {
+        open_first_conflict = false;
+        for (next.unstaged) |change| {
+            if (change.status != .conflicted) continue;
+            active_view = .graph;
+            selectChange(change.path, .unstaged);
+            break;
+        }
+    }
+
     // A commit's diff cannot change, so only the working-tree side is worth
     // re-reading — and this runs on the poll timer.
     switch (selection) {
@@ -2722,7 +2739,11 @@ fn poll() void {
     else
         move_known != null;
 
-    if (moved or switched or logged) refreshHistory();
+    // A merge stopped on a conflict in a terminal moves none of the three:
+    // only the repository's state says it is under way.
+    const state_changed = if (history) |h| r.state() != h.state else false;
+
+    if (moved or switched or logged or state_changed) refreshHistory();
 }
 
 /// The quiet fetch, when it is due and nothing else is running.
@@ -3324,6 +3345,11 @@ fn applyOutcome(outcome: ?run.Outcome) void {
 
     if (result.ok) {
         clearCommandError();
+    } else if (stoppedAtConflict(result.message)) {
+        // The operation doing what it should: the banner says what is under
+        // way, and the first conflicted file opens once the changes are read.
+        clearCommandError();
+        open_first_conflict = true;
     } else {
         setCommandError(if (result.message.len > 0) result.message else "git failed.");
     }
@@ -3336,6 +3362,21 @@ fn applyOutcome(outcome: ?run.Outcome) void {
     workChanged(command_label);
     command_label = "Reading the changes";
 }
+
+/// Whether a failed command stopped a merge, rebase, cherry-pick or revert
+/// at a conflict — git's way of handing it over — rather than failing.
+fn stoppedAtConflict(message: []const u8) bool {
+    const r = repo orelse return false;
+    if (r.state() == .none) return false;
+    for ([_][]const u8{ "CONFLICT", "could not apply", "fix conflicts" }) |sign| {
+        if (std.mem.indexOf(u8, message, sign) != null) return true;
+    }
+    return false;
+}
+
+/// Set when an operation stopped at a conflict: the first conflicted file
+/// is opened as soon as the changes are read again.
+var open_first_conflict = false;
 
 /// Run a git command in the repository and fold the result back into the UI.
 fn gitDo(args: []const []const u8) void {
@@ -3476,8 +3517,13 @@ fn runRebase() void {
         gitDo(&.{ "-c", "core.editor=true", "-c", cfg, "rebase", "-i", rebase_base[0..rebase_base_len] });
     }
 
-    // It either finished or stopped on a conflict, and the banner takes it from
-    // there. Either way the composed list has done its job.
+    // git has its own copy of the list by now, if it started at all.
+    std.Io.Dir.cwd().deleteFile(app_io, todo_path) catch {};
+
+    // Refused before it began — a dirty tree, say: the plan stays on screen,
+    // to run again once that is sorted. Otherwise it finished or stopped on
+    // a conflict, the banner takes it from there, and the list is done.
+    if (command_error != null and r.state() == .none) return;
     clearSelection();
 }
 
@@ -3544,14 +3590,24 @@ fn requestResolve(index: usize, side: git.ConflictSide) void {
 fn runResolve() void {
     if (action_conflict >= conflicts.len) return;
 
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = selectedAbsPath(&path_buf) orelse return;
+
+    // The file as it is now, against the copy the regions were read from:
+    // "Open this file" invites an edit in another editor, and writing the
+    // older copy back would lose it without a word.
+    const on_disk = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch null;
+    defer if (on_disk) |d| gpa.free(d);
+    if (on_disk == null or !std.mem.eql(u8, on_disk.?, conflict_text)) {
+        diff_stale = true;
+        return setCommandError("The file changed on disk since it was shown: here it is as it is now. Pick again.");
+    }
+
     const next = git.resolveConflict(gpa, conflict_text, conflicts[action_conflict], action_side) catch {
         setCommandError("Out of memory resolving that conflict.");
         return;
     };
     defer gpa.free(next);
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs = selectedAbsPath(&path_buf) orelse return;
 
     std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = abs, .data = next }) catch {
         setCommandError("Could not write that file back.");
@@ -3568,6 +3624,9 @@ fn runResolve() void {
 /// Take back whatever last moved HEAD, as the reflog tells it.
 fn requestUndo() void {
     const h = history orelse return;
+    // Mid-rebase the reflog's last move is a step of it, and resetting there
+    // leaves the rebase replaying onto the wrong commit: Abort is the undo.
+    if (h.state != .none) return setCommandError("Finish or abort what is under way first: an undo in the middle of it would break it.");
     const move = h.last_move orelse return setCommandError("Nothing to undo yet.");
     var sha: [41]u8 = undefined;
     var argv: [4][]const u8 = undefined;
@@ -3698,8 +3757,33 @@ fn runConfirmed() void {
             requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .none);
         },
         .sign_out => signOutGithub(c.arg),
+        .stage_markers => if (c.arg.len == 0)
+            requestLocal("Staging", &.{ "add", "-A" })
+        else
+            request(&.{ "--literal-pathspecs", "add", "--", c.arg }),
+        .abort_operation => if (operationCommand()) |cmd| request(&.{ cmd, "--abort" }),
+        .skip_step => if (operationCommand()) |cmd| request(&.{ cmd, "--skip" }),
     }
     clearConfirm();
+}
+
+/// The subcommand of the operation under way — `rebase`, `merge`… — whose
+/// `--continue`, `--skip` and `--abort` apply; null with none.
+fn operationCommand() ?[]const u8 {
+    const h = history orelse return null;
+    return h.state.command();
+}
+
+/// Abort and Skip, each asked first: an abort throws away every conflict
+/// resolved so far, and a skipped commit is gone from the branch.
+fn requestAbortOperation() void {
+    if (operationCommand() == null) return;
+    ask(.abort_operation, "");
+}
+
+fn requestSkipStep() void {
+    if (operationCommand() == null) return;
+    ask(.skip_step, "");
 }
 
 fn askName(kind: Prompt.Kind, arg: []const u8) void {
@@ -4393,6 +4477,8 @@ var pr_reply_id: std.ArrayList(u8) = .empty;
 var pr_reply: std.ArrayList(u8) = .empty;
 
 fn selectRequest(number: u32) void {
+    // A review written for one request is never sent to another.
+    if (pr_selected != number) pr_comment.clearRetainingCapacity();
     pr_selected = number;
     pr_reply_id.clearRetainingCapacity();
     pr_reply.clearRetainingCapacity();
@@ -5166,6 +5252,9 @@ fn requestComposer() void {
     const text = std.mem.trim(u8, pr_comment.items, " \n\t");
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialogButton(@src(), "Comment", false) and text.len > 0) prAnswer(.comment);
+    // GitHub refuses a review of your own request: only a comment there.
+    const own = if (pr.detail) |d| me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(d.author, me_gh.items) else false;
+    if (own) return;
     if (dialogButton(@src(), "Request changes", false) and text.len > 0) prAnswer(.request_changes);
     if (dialogButton(@src(), "Approve", true)) prAnswer(.approve);
 }
@@ -5518,6 +5607,9 @@ fn mergeReadiness(d: pr.Detail) void {
         if (t.running > 0) break :blk .{ dvui.entypo.clock, style.get().orange, std.fmt.bufPrint(&buf, "{d} check{s} still running", .{ t.running, plural(t.running) }) catch "" };
         if (d.draft) break :blk .{ dvui.entypo.pencil, style.textMuted(), "A draft: mark it ready for review to merge it" };
         if (std.mem.eql(u8, d.merge_state, "BLOCKED")) break :blk .{ dvui.entypo.lock, style.get().orange, "Blocked by the branch's protection rules" };
+        // GitHub works mergeability out after a push, a while later: until
+        // then it says UNKNOWN, which is not a yes.
+        if (mergeUnknown(d)) break :blk .{ dvui.entypo.clock, style.textMuted(), "GitHub is still working out whether it can merge…" };
         break :blk .{ dvui.entypo.check, style.success(), if (t.passed > 0) std.fmt.bufPrint(&buf, "Ready to merge: {d} check{s} passed", .{ t.passed, plural(t.passed) }) catch "" else "Ready to merge" };
     };
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -5534,7 +5626,25 @@ fn mergeReadiness(d: pr.Detail) void {
     dvui.icon(@src(), "ready_icon", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 13, .h = 13 }, .gravity_y = 0.5, .margin = .{ .w = style.space.md } });
     dvui.label(@src(), "{s}", .{text}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
     if (d.auto_merge) tinyBadge(@src(), 0, "auto-merge on", style.accent());
+
+    // Asked again every few seconds while GitHub has no answer yet.
+    if (mergeUnknown(d)) {
+        if (frame_now_s - pr_recheck_s >= PR_RECHECK_S) {
+            pr_recheck_s = frame_now_s;
+            pr.loadDetail(repo_path.items, d.number);
+        }
+        dvui.timer(bar.data().id, PR_RECHECK_S * std.time.us_per_s);
+    }
 }
+
+/// Whether GitHub has yet to say if the request can merge.
+fn mergeUnknown(d: pr.Detail) bool {
+    return std.mem.eql(u8, d.mergeable, "UNKNOWN") or std.mem.eql(u8, d.merge_state, "UNKNOWN");
+}
+
+/// When the open request's mergeability was last asked for again.
+var pr_recheck_s: i64 = 0;
+const PR_RECHECK_S = 3;
 
 /// The tabs under the head: the conversation, the commits, the files, the
 /// checks, each with how many.
@@ -6154,8 +6264,9 @@ fn shortcuts() void {
 
         // Up and down walk the history the way they walk a mail list: the pane
         // on the right follows, which is the whole point of reading a diff.
-        // The only keys held down to repeat.
-        if (pressed(ke, .up, false) or pressed(ke, .down, false)) {
+        // The only keys held down to repeat. Not over the pull requests,
+        // which hide the history: there they would move it out of sight.
+        if (active_view == .graph and (pressed(ke, .up, false) or pressed(ke, .down, false))) {
             e.handled = true;
             stepCommit(if (ke.code == .up) -1 else 1);
             continue;
@@ -6246,6 +6357,12 @@ fn shortcuts() void {
             // Ctrl+F: the commit search, where the graph is up.
             if (pressed(ke, .f, true)) break :blk struct {
                 fn f() void {
+                    // The search of what is on screen: the requests' in their
+                    // view, not the hidden graph's.
+                    if (active_view == .pulls) {
+                        if (dvui.tagGet("pr_search")) |field| dvui.focusWidget(field.id, null, null);
+                        return;
+                    }
                     search_open = true;
                     if (dvui.tagGet("commit_filter")) |field| dvui.focusWidget(field.id, null, null);
                 }
@@ -8168,7 +8285,7 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Stage everything", .icon = dvui.entypo.squared_plus, .run = struct {
         fn f() void {
-            request(&.{ "add", "-A" });
+            requestStageAll();
         }
     }.f },
     .{ .name = "Unstage everything", .icon = dvui.entypo.squared_minus, .run = struct {
@@ -9452,9 +9569,9 @@ fn progressBanner() void {
         request(&.{ "-c", "core.editor=true", cmd, "--continue" });
     }
     if (h.state == .rebase) {
-        if (linkButton(@src(), "Skip", style.textMuted())) request(&.{ cmd, "--skip" });
+        if (linkButton(@src(), "Skip", style.textMuted())) requestSkipStep();
     }
-    if (linkButton(@src(), "Abort", style.danger())) request(&.{ cmd, "--abort" });
+    if (linkButton(@src(), "Abort", style.danger())) requestAbortOperation();
 }
 
 /// The shared shape of the two bars under the toolbar: a strip in a colour that
@@ -9493,24 +9610,45 @@ fn confirmBar() void {
         .merge_request => std.fmt.bufPrint(&buf, "Merge #{s}? It goes into its base branch on the server, for everyone.", .{c.arg}),
         .close_request => std.fmt.bufPrint(&buf, "Close #{s} without merging it?", .{c.arg}),
         .sign_out => std.fmt.bufPrint(&buf, "Sign out of GitHub as {s}? Pull requests and issues stop until you sign in again.", .{c.arg}),
+        .stage_markers => if (c.arg.len == 0)
+            "Stage everything? Some conflicted files still have conflict markers, and git would take them as resolved."
+        else
+            std.fmt.bufPrint(&buf, "Stage {s} with its conflict markers still in it? git would take them as the resolution.", .{c.arg}),
+        .abort_operation => abortText(&buf),
+        .skip_step => "Skip the commit the rebase stopped on? It is left out of the rebased branch.",
         .remove_worktree => std.fmt.bufPrint(&buf, "Remove the worktree at {s}, and its folder?", .{c.arg}),
         .delete_remote_branch, .delete_remote_tag => std.fmt.bufPrint(&buf, "Delete {s} on the remote, for everyone?", .{c.arg}),
         .restore_file => std.fmt.bufPrint(&buf, "Replace your copy of {s} with this commit's?", .{
             if (std.mem.indexOfScalar(u8, c.arg, ' ')) |sep| c.arg[sep + 1 ..] else c.arg,
         }),
     } catch "Are you sure? This cannot be undone.";
+    // Across what the buttons leave: no wider than that, so a long question
+    // is cut rather than pushing them off — and never narrower, or it is
+    // not there at all.
     dvui.label(@src(), "{s}", .{text}, .{
         .font = style.small(),
         .color_text = .{ .color = style.text() },
         .gravity_y = 0.5,
+        .expand = .horizontal,
         .max_size_content = .width(0),
         .padding = dvui.Rect.all(0),
     });
 
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
     if (linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
     if (linkButtonTagged(@src(), "Yes, do it", style.danger(), "confirm:yes")) requestAction(.confirmed);
+}
+
+/// "Abort the rebase? …": what an abort puts back, and what it loses.
+fn abortText(buf: []u8) []const u8 {
+    const h = history orelse return "Abort?";
+    const what: []const u8 = switch (h.state) {
+        .merge => "the merge",
+        .rebase => "the rebase",
+        .cherrypick => "the cherry-pick",
+        .revert => "the revert",
+        else => "it",
+    };
+    return std.fmt.bufPrint(buf, "Abort {s}? The branch goes back to where it was before, and the conflicts resolved so far are lost.", .{what}) catch "Abort?";
 }
 
 /// The one-field bar for the handful of commands that need a name first.
@@ -10216,9 +10354,9 @@ fn mergeSidebar() void {
                 if (dialogButton(@src(), "Continue", true)) request(&.{ "-c", "core.editor=true", cmd, "--continue" });
             }
             if (h.state == .rebase) {
-                if (dialogButton(@src(), "Skip", false)) request(&.{ cmd, "--skip" });
+                if (dialogButton(@src(), "Skip", false)) requestSkipStep();
             }
-            if (dialogButton(@src(), "Abort", false)) request(&.{ cmd, "--abort" });
+            if (dialogButton(@src(), "Abort", false)) requestAbortOperation();
         }
     }
 
@@ -14215,7 +14353,10 @@ fn diffHeader() void {
                     request(&.{ "--literal-pathspecs", "checkout", "--theirs", "--", selected_path.items });
                 }
                 if (linkButton(@src(), "Mark resolved", style.accent())) {
-                    request(&.{ "--literal-pathspecs", "add", "--", selected_path.items });
+                    if (markersLeft(selected_path.items))
+                        ask(.stage_markers, selected_path.items)
+                    else
+                        request(&.{ "--literal-pathspecs", "add", "--", selected_path.items });
                 }
                 return;
             }
@@ -16427,7 +16568,7 @@ fn changesSection(
             } else {
                 // A job: adding 11,000 new files is 13 s of git on Windows,
                 // which the window would otherwise wait out frozen.
-                if (linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) requestLocal("Staging", &.{ "add", "-A" });
+                if (linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) requestStageAll();
             }
         }
         changes_head_h = head.data().rect.h;
@@ -16684,6 +16825,35 @@ fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.Chan
     clearPickedChanges();
 }
 
+/// Stage every change — asked first when a conflicted file still has its
+/// markers in it. A job: adding 11,000 new files is 13 s of git on Windows,
+/// which the window would otherwise wait out frozen.
+fn requestStageAll() void {
+    const w = work orelse return;
+    for (w.unstaged) |change| {
+        if (change.status == .conflicted and markersLeft(change.path)) return ask(.stage_markers, "");
+    }
+    requestLocal("Staging", &.{ "add", "-A" });
+}
+
+/// Whether `path` is conflicted and its file still holds a conflict region,
+/// read off the disk now: what staging it would put in the index as the
+/// resolution. False for a file git does not count as conflicted.
+fn markersLeft(path: []const u8) bool {
+    const w = work orelse return false;
+    const conflicted = for (w.unstaged) |change| {
+        if (change.status == .conflicted and std.mem.eql(u8, change.path, path)) break true;
+    } else false;
+    if (!conflicted) return false;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = std.fmt.bufPrint(&buf, "{s}{s}", .{ repo_path.items, path }) catch return false;
+    const text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch return false;
+    defer gpa.free(text);
+    const regions = git.parseConflicts(gpa, text) catch return false;
+    defer gpa.free(regions);
+    return regions.len > 0;
+}
+
 /// Stage or unstage a whole file, both its names when it was renamed —
 /// `old` is `path` otherwise.
 ///
@@ -16692,6 +16862,7 @@ fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.Chan
 /// for the first time.
 fn requestStage(path: []const u8, old: []const u8, stage: bool) void {
     if (stage) {
+        if (markersLeft(path)) return ask(.stage_markers, path);
         request(&.{ "--literal-pathspecs", "add", "--", path, old });
     } else {
         request(&.{ "--literal-pathspecs", "reset", "-q", "--", path, old });
@@ -16862,8 +17033,12 @@ fn commitBox() void {
             saveWorkspace();
         }
         // No `color_text`: dvui draws the tick in it, and a muted one
-        // vanishes into the accent fill.
-        if (dvui.checkbox(@src(), &amend, "Amend", .{
+        // vanishes into the accent fill. Not while a merge or a rebase is
+        // under way: amending a rebase's stop folds it into the commit
+        // before, and a merge's into the branch's last.
+        if (operationCommand() != null) {
+            amend = false;
+        } else if (dvui.checkbox(@src(), &amend, "Amend", .{
             .tag = "commit:amend",
             .font = style.small(),
             .gravity_y = 0.5,
@@ -18605,11 +18780,14 @@ test "a conflicted merge is resolved and continued from the banner" {
     defer closeRepo();
     defer clearCommandError();
 
-    // Expected to fail. A conflicted merge does not move HEAD, so this also
+    // Expected to stop. A conflicted merge does not move HEAD, so this also
     // covers `gitDo` re-reading the history on its failure path — without that
-    // the banner never appears at all.
+    // the banner never appears at all. A stop is not an error: no red line,
+    // and the conflicted file is open.
     gitDo(&.{ "merge", "--no-edit", "other" });
-    try std.testing.expect(command_error != null);
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expect(selection == .change);
+    try std.testing.expectEqualStrings("lines.txt", selected_path.items);
     try std.testing.expectEqual(git.State.merge, history.?.state);
     try std.testing.expect(conflictCount() > 0);
 
@@ -18658,6 +18836,151 @@ test "a conflicted merge aborts back to a clean tree" {
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expectEqual(@as(usize, 0), conflictCount());
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
+}
+
+// What could quietly break a merge in the middle of resolving it: staging a
+// file with its markers still in, an undo that resets under the merge, an
+// abort that throws the resolutions away. Each is asked first, or refused.
+test "mid-merge, staging markers and aborting are asked first, and undo is refused" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeConflictedPair(&tmp, dir);
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+    defer clearConfirm();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+
+    // The file still has its markers: staging it, alone or with everything,
+    // waits for a yes.
+    requestStage("lines.txt", "lines.txt", true);
+    try std.testing.expect(confirm != null and confirm.?.kind == .stage_markers);
+    try std.testing.expect(conflictCount() > 0);
+    clearConfirm();
+    requestStageAll();
+    try std.testing.expect(confirm != null and confirm.?.kind == .stage_markers);
+    try std.testing.expectEqualStrings("", confirm.?.arg);
+    clearConfirm();
+
+    // Undo would reset under the merge.
+    requestUndo();
+    try std.testing.expect(command_error != null);
+    try std.testing.expectEqual(@as(Action, .none), action);
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+    clearCommandError();
+
+    // Abort: asked, then done.
+    requestAbortOperation();
+    try std.testing.expect(confirm != null and confirm.?.kind == .abort_operation);
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+    runConfirmed();
+    _ = runAction();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.none, history.?.state);
+}
+
+// "Open this file" sends the user to an editor; a pick made afterwards from
+// the copy read before must not write over what they did there.
+test "a pick refuses to write over a file changed since it was shown" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeConflictedPair(&tmp, dir);
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    selectChange("lines.txt", .unstaged);
+    loadConflicts();
+    try std.testing.expect(conflicts.len > 0);
+
+    const edited = "edited elsewhere\n";
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "lines.txt", .data = edited });
+    requestResolve(0, .ours);
+    _ = runAction();
+    try std.testing.expect(command_error != null);
+
+    const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(1024));
+    defer gpa.free(now);
+    try std.testing.expectEqualStrings(edited, now);
+}
+
+// A rebase git refuses to start — here, over uncommitted changes — leaves
+// the composed plan on screen, to run again once the tree is clean.
+test "a refused interactive rebase keeps its plan" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "second" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    const second = findCommit("second") orelse return error.CommitNotFound;
+    beginRebase(second.parents[0]);
+    try std.testing.expectEqual(@as(usize, 1), rebase_steps.items.len);
+
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed\n" });
+    rebase_steps.items[0].action = .drop;
+    runRebase();
+    try std.testing.expect(command_error != null);
+    try std.testing.expectEqual(git.State.none, history.?.state);
+    try std.testing.expect(selection == .rebase);
+    try std.testing.expectEqual(@as(usize, 1), rebase_steps.items.len);
+    // git copied its list; Zit's own is gone either way.
+    var todo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const todo = try std.fmt.bufPrint(&todo_buf, "{s}zit-rebase-todo", .{repo.?.gitdir()});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(app_io, todo, .{}));
+}
+
+test "a review written for one pull request is not carried to another" {
+    gpa = std.testing.allocator;
+    defer pr_comment.clearAndFree(gpa);
+    defer pr_selected = null;
+    pr_selected = 5;
+    try pr_comment.appendSlice(gpa, "looks good");
+    selectRequest(5);
+    try std.testing.expectEqualStrings("looks good", pr_comment.items);
+    selectRequest(7);
+    try std.testing.expectEqual(@as(usize, 0), pr_comment.items.len);
 }
 
 // The parser is unit-tested in `git.zig`; what this covers is the rest of the
