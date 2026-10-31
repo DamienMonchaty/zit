@@ -33,7 +33,7 @@ action without a key of its own is in the command palette, `Ctrl+P`.
 
 | Keys | Does |
 | --- | --- |
-| `Ctrl+Enter` | Commit what is staged |
+| `Ctrl+Enter` | Commit what is staged — or, mid-merge or rebase with every conflict resolved, continue it |
 
 ## Panels
 

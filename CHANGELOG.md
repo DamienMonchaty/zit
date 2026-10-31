@@ -15,6 +15,23 @@ Every release of Zit, newest first. Downloads are on the
   when it is not 100 % — a click there resets it.
 
 ### Changed
+- A merge, rebase, cherry-pick or revert under way has one bar, which says
+  what it is in the branches' names — "Rebasing feat onto main" — with the
+  step it is at, the commit it stopped on and how many files are left, and
+  the next thing to do as its one filled button: resolve the conflicts, go
+  to the next conflicted file, Continue (also `Ctrl Enter` and the palette),
+  or Skip a commit its resolution left empty. Abort and Skip sit beside it;
+  Skip now works for cherry-picks and reverts too. The sidebar lists the
+  conflicted files, each a click away.
+- A conflict's sides are named: "Keep main", "Keep feature/x", with what each
+  is — during a rebase, where git's "ours" is the base and "theirs" your
+  own commit, the buttons say so instead of the reverse.
+- After a rebase, Push becomes Force push (with lease), which says how many
+  commits on the remote it replaces, and Pull stops counting the old
+  commits it would merge back in.
+- Merging, rebasing, cherry-picking and reverting are not offered while
+  another one is under way; Continue and Skip run without freezing the
+  window when hooks or signing take a while.
 - Zit is roomier, towards GitComet's comfortable density: text a point
   larger throughout, taller rows in the lists, the history and the sidebar,
   wider menus with taller items, larger fields, buttons and tabs, and the

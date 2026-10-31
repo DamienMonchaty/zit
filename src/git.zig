@@ -333,6 +333,46 @@ pub const State = enum {
     }
 };
 
+/// The branch a rebase replays, from its `head-name` file:
+/// "refs/heads/feat" -> "feat". Null for a detached HEAD, which git writes
+/// as "detached HEAD".
+pub fn headName(text: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    const prefix = "refs/heads/";
+    if (!std.mem.startsWith(u8, t, prefix) or t.len == prefix.len) return null;
+    return t[prefix.len..];
+}
+
+/// What a merge brings in, from the first line of MERGE_MSG: the branch in
+/// "Merge branch 'feat'" — "into main" or "of <url>" after it — the
+/// remote's in "Merge remote-tracking branch 'origin/feat'", the commit in
+/// "Merge commit 'a1b2c3d'". Null when git wrote something else.
+pub fn mergeSource(msg: []const u8) ?[]const u8 {
+    const line = std.mem.trim(u8, msg[0 .. std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len], " \t\r");
+    for ([_][]const u8{ "Merge branch '", "Merge remote-tracking branch '", "Merge commit '", "Merge tag '" }) |prefix| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        const end = std.mem.indexOfScalar(u8, rest, '\'') orelse return null;
+        if (end == 0) return null;
+        return rest[0..end];
+    }
+    return null;
+}
+
+test "headName and mergeSource read git's own files" {
+    try std.testing.expectEqualStrings("feat/x", headName("refs/heads/feat/x\n").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), headName("detached HEAD\n"));
+    try std.testing.expectEqual(@as(?[]const u8, null), headName("refs/heads/"));
+
+    try std.testing.expectEqualStrings("feature/greeting", mergeSource("Merge branch 'feature/greeting'\n\n# Conflicts:\n").?);
+    try std.testing.expectEqualStrings("feat", mergeSource("Merge branch 'feat' into main").?);
+    try std.testing.expectEqualStrings("main", mergeSource("Merge branch 'main' of github.com:o/r").?);
+    try std.testing.expectEqualStrings("origin/feat", mergeSource("Merge remote-tracking branch 'origin/feat'").?);
+    try std.testing.expectEqualStrings("a1b2c3d", mergeSource("Merge commit 'a1b2c3d'").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), mergeSource("Merge branches 'a' and 'b'"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mergeSource(""));
+}
+
 // === Remotes ===
 
 pub const Remote = struct {

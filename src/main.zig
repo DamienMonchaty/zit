@@ -2181,6 +2181,7 @@ fn collectHistoryLoad() bool {
         load.lanes = null;
         history_seq +%= 1;
         dropStaleSelection();
+        readOpInfo();
         if (file_history.items.len > 0) markFileHistory();
         trimHeap();
     }
@@ -2641,6 +2642,7 @@ fn reloadHistory() void {
     _ = &next_lanes;
     history_seq +%= 1;
     dropStaleSelection();
+    readOpInfo();
 
     if (file_history.items.len > 0) markFileHistory();
     // The old snapshot just went: give its pages back now rather than at the
@@ -3762,7 +3764,7 @@ fn runConfirmed() void {
         else
             request(&.{ "--literal-pathspecs", "add", "--", c.arg }),
         .abort_operation => if (operationCommand()) |cmd| request(&.{ cmd, "--abort" }),
-        .skip_step => if (operationCommand()) |cmd| request(&.{ cmd, "--skip" }),
+        .skip_step => if (operationCommand()) |cmd| requestLocal("Skipping", &.{ cmd, "--skip" }),
     }
     clearConfirm();
 }
@@ -6322,6 +6324,9 @@ fn shortcuts() void {
                     requestAction(.commit);
                 }
             }.f;
+            // With nothing to commit, the same keys go on with what is under
+            // way once its conflicts are answered.
+            if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and canContinue()) break :blk requestContinue;
             if (pressed(ke, .f5, false) or pressed(ke, .r, true)) break :blk struct {
                 fn f() void {
                     requestAction(.refresh);
@@ -6606,14 +6611,22 @@ fn titlebar() void {
         if (toolbarButton(@src(), "Fetch", dvui.entypo.cw, 0)) {
             requestNetwork("Fetching", fetchAllArgs(false));
         }
-        if (toolbarButton(@src(), "Pull", dvui.entypo.download, tracking.behind)) {
+        // After a rebase the branch and its upstream have parted: a plain
+        // push is refused, and Pull would merge the old commits back in.
+        // Push says what it has to be, and Pull keeps its count quiet.
+        const rebased = rebasedSinceUpstream();
+        if (toolbarButton(@src(), "Pull", dvui.entypo.download, if (rebased) 0 else tracking.behind)) {
             requestNetwork("Pulling", &.{"pull"});
         }
         pullMenu();
-        if (toolbarButton(@src(), "Push", dvui.entypo.upload, tracking.ahead)) {
-            // A branch with no upstream yet gets one, on the default remote —
-            // otherwise the first push of every new branch is an error message.
-            requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+        if (toolbarButtonTagged(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, tracking.ahead, "toolbar:Push")) {
+            if (rebased) {
+                ask(.force_push, "");
+            } else {
+                // A branch with no upstream yet gets one, on the default remote —
+                // otherwise the first push of every new branch is an error message.
+                requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+            }
         }
         // After Push, what comes after pushing a branch: the repository's
         // pull requests, where it is on a host Zit speaks to.
@@ -6648,6 +6661,16 @@ fn titlebar() void {
         // Kept for the width it holds: the buttons stay centred over the
         // history, not over the window.
     }
+}
+
+/// The branch was rebased since it was last pushed: it and its upstream
+/// each have commits the other lacks, and the last thing to move it was a
+/// rebase.
+fn rebasedSinceUpstream() bool {
+    const h = history orelse return false;
+    if (h.state != .none or h.tracking.ahead == 0 or h.tracking.behind == 0) return false;
+    const move = h.last_move orelse return false;
+    return std.mem.startsWith(u8, move.message, "rebase") or std.mem.startsWith(u8, move.message, "pull --rebase");
 }
 
 /// The repository's pull requests, in the toolbar: how many are open on its
@@ -6766,7 +6789,9 @@ var switch_filter: std.ArrayList(u8) = .empty;
 /// every other — local first, then the remotes', a filter over them all.
 fn branchSwitcher() void {
     const detached = if (history) |h| h.head == null else false;
-    const head: []const u8 = if (history) |h| h.head orelse "detached HEAD" else "";
+    // Mid-rebase HEAD is detached, but the branch being rebased is still
+    // the one being worked on: its name, not "detached HEAD".
+    const head: []const u8 = if (history) |h| h.head orelse (if (op_info.branch.len > 0) op_info.branch else "detached HEAD") else "";
     const button = DropButton.begin(@src(), .{
         .tag = "toolbar:branch",
         .gravity_y = 0.5,
@@ -7775,6 +7800,7 @@ fn keysDialog() void {
         var card = shortcutCard(@src(), 2);
         defer card.deinit();
         shortcutRow(@src(), "Ctrl+Enter", "Commit what is staged");
+        shortcutRow(@src(), "Ctrl+Enter", "Continue a merge or rebase, its conflicts resolved");
     }
     settingsGroup(@src(), 0, "Panels");
     {
@@ -8228,9 +8254,14 @@ const Command = struct {
     keys: []const u8 = "",
     /// Hidden with no repository open, where it would do nothing.
     needs_repo: bool = true,
+    /// Shown only while this says it can run.
+    when: ?*const fn () bool = null,
 };
 
 const commands = [_]Command{
+    .{ .name = "Continue the merge or rebase", .icon = dvui.entypo.controller_play, .keys = "Ctrl+Enter", .when = canContinue, .run = requestContinue },
+    .{ .name = "Skip the commit it stopped on", .icon = dvui.entypo.controller_next, .when = canSkip, .run = requestSkipStep },
+    .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = midOperation, .run = requestAbortOperation },
     .{ .name = "Fetch all remotes", .icon = dvui.entypo.cw, .run = struct {
         fn f() void {
             requestNetwork("Fetching", fetchAllArgs(false));
@@ -8422,6 +8453,7 @@ fn palette() void {
     for (commands, 0..) |cmd, i| {
         if (n == PALETTE_ROWS) break;
         if (cmd.needs_repo and repo == null) continue;
+        if (cmd.when) |can| if (!can()) continue;
         if (!fuzzy(cmd.name, needle)) continue;
         items[n] = .{ .command = i };
         labels[n] = cmd.name;
@@ -9536,42 +9568,184 @@ fn progressBanner() void {
     var bar = noticeBar(@src(), style.get().yellow);
     defer bar.deinit();
 
-    dvui.label(@src(), "{s}", .{h.state.label()}, .{
+    var title_buf: [256]u8 = undefined;
+    dvui.label(@src(), "{s}", .{opTitle(&title_buf)}, .{
         .font = style.smallBold(),
         .color_text = .{ .color = style.text() },
         .gravity_y = 0.5,
+        .margin = .{ .w = style.space.md },
+        .padding = dvui.Rect.all(0),
+    });
+    dvui.label(@src(), "{s}", .{opDetail()}, .{
+        .font = style.small(),
+        .color_text = .{ .color = style.textMuted() },
+        .gravity_y = 0.5,
+        .expand = .horizontal,
+        .max_size_content = .width(0),
         .padding = dvui.Rect.all(0),
     });
 
-    const pending = conflictCount();
-    if (pending > 0) {
-        dvui.label(@src(), "— {d} conflicted file{s} to resolve, then stage", .{
-            pending,
-            plural(pending),
-        }, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.textMuted() },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = dvui.Rect.all(0),
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    // Bisect and `git am` have no uniform continue/abort pair; the label alone
-    // is still worth showing for those.
+    // Bisect and `git am` have no uniform continue/abort pair; the words
+    // alone are still worth showing for those.
     const cmd = h.state.command() orelse return;
 
-    // `core.editor=true` so `--continue` does not stop on an editor with
-    // nowhere to open: `true` exits 0, and git keeps the message it already has.
-    if (linkButton(@src(), "Continue", style.accent())) {
-        request(&.{ "-c", "core.editor=true", cmd, "--continue" });
+    // Abort and Skip on the left, quieter; the next thing to do last, filled.
+    const next = opNext();
+    if (linkButtonTagged(@src(), "Abort", style.danger(), "op:abort")) requestAbortOperation();
+    if (canSkip() and next != .skip) {
+        if (linkButtonTagged(@src(), "Skip", style.textMuted(), "op:skip")) requestSkipStep();
     }
-    if (h.state == .rebase) {
-        if (linkButton(@src(), "Skip", style.textMuted())) requestSkipStep();
+    switch (next) {
+        .resolve => {
+            const viewing = viewingConflict();
+            if (!viewing or conflictCount() > 1) {
+                var buf: [64]u8 = undefined;
+                const caption = if (viewing) "Next conflicted file" else std.fmt.bufPrint(&buf, "Resolve the conflicts ({d})", .{conflictCount()}) catch "Resolve the conflicts";
+                if (opButton(@src(), caption, "op:resolve")) openNextConflict();
+            }
+        },
+        // Nothing left of the commit once its conflicts were answered: git
+        // refuses to continue with it, and skipping it loses nothing.
+        .skip => if (opButton(@src(), "Skip this empty commit", "op:skip")) requestLocal("Skipping", &.{ cmd, "--skip" }),
+        .proceed => if (opButton(@src(), "Continue — Ctrl+Enter", "op:continue")) requestContinue(),
     }
-    if (linkButton(@src(), "Abort", style.danger())) requestAbortOperation();
+}
+
+/// The strip's one filled button: the next thing to do.
+fn opButton(src: std.builtin.SourceLocation, caption: []const u8, tag: []const u8) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{ .draw_focus = false }, .{
+        .tag = tag,
+        .background = true,
+        .color_fill = .{ .color = style.accent() },
+        .color_fill_hover = .{ .color = style.accentHover() },
+        .corners = style.radius.input,
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = 3, .w = style.space.md, .h = 3 },
+    });
+    defer bw.deinit();
+    bw.processEvents();
+    bw.drawBackground();
+    dvui.label(@src(), "{s}", .{caption}, .{
+        .font = style.smallBold(),
+        .color_text = .{ .color = style.textOnAccent() },
+        .padding = dvui.Rect.all(0),
+    });
+    return bw.clicked();
+}
+
+/// "Rebasing feat onto main", "Merging feature/x into main": the strip's
+/// title, in the names the branches go by.
+fn opTitle(buf: []u8) []const u8 {
+    const h = history orelse return "";
+    const o = op_info;
+    return switch (h.state) {
+        .rebase => if (o.branch.len > 0 and o.onto.len > 0)
+            std.fmt.bufPrint(buf, "Rebasing {s} onto {s}", .{ o.branch, o.onto }) catch "Rebasing"
+        else if (o.onto.len > 0)
+            std.fmt.bufPrint(buf, "Rebasing onto {s}", .{o.onto}) catch "Rebasing"
+        else
+            "Rebasing",
+        .merge => std.fmt.bufPrint(buf, "Merging {s} into {s}", .{ o.theirs, o.ours }) catch "Merging",
+        .cherrypick => if (o.commit.len > 0) std.fmt.bufPrint(buf, "Cherry-picking {s} onto {s}", .{ o.commit, o.ours }) catch "Cherry-picking" else "Cherry-picking",
+        .revert => if (o.commit.len > 0) std.fmt.bufPrint(buf, "Reverting {s} on {s}", .{ o.commit, o.ours }) catch "Reverting" else "Reverting",
+        else => h.state.label(),
+    };
+}
+
+/// After the title: how far along, which commit it stopped on, how many
+/// files wait — each where git says so. In the frame's arena.
+fn opDetail() []const u8 {
+    const h = history orelse return "";
+    const a = dvui.currentWindow().arena();
+    var out: std.ArrayList(u8) = .empty;
+    const o = op_info;
+    if (o.total > 0) out.print(a, "step {d} of {d}", .{ @min(o.step, o.total), o.total }) catch {};
+    if (h.state == .rebase and o.commit.len > 0) {
+        if (out.items.len > 0) out.appendSlice(a, "  ·  ") catch {};
+        out.print(a, "{s} {s}", .{ o.commit, o.subject }) catch {};
+    } else if ((h.state == .cherrypick or h.state == .revert) and o.subject.len > 0) {
+        if (out.items.len > 0) out.appendSlice(a, "  ·  ") catch {};
+        out.appendSlice(a, o.subject) catch {};
+    }
+    if (out.items.len > 0) out.appendSlice(a, "  ·  ") catch {};
+    const n = conflictCount();
+    if (n > 0) {
+        out.print(a, "{d} conflicted file{s}", .{ n, plural(n) }) catch {};
+    } else {
+        out.appendSlice(a, "no conflict left") catch {};
+    }
+    return out.items;
+}
+
+/// What the strip's filled button does next.
+const OpNext = enum { resolve, skip, proceed };
+
+fn opNext() OpNext {
+    if (conflictCount() > 0) return .resolve;
+    const h = history orelse return .proceed;
+    const w = work orelse return .proceed;
+    // A merge with nothing to add still makes its merge commit.
+    if (h.state != .merge and w.staged.len == 0) return .skip;
+    return .proceed;
+}
+
+/// Skip goes with the operations that replay one commit after another.
+fn canSkip() bool {
+    const h = history orelse return false;
+    return h.state == .rebase or h.state == .cherrypick or h.state == .revert;
+}
+
+/// A merge, rebase, cherry-pick or revert is under way: starting another is
+/// refused by git, and offered by nothing.
+fn midOperation() bool {
+    const h = history orelse return false;
+    return h.state.command() != null;
+}
+
+/// Continue, once every conflict is answered and there is something to go
+/// on with: the filled button, Ctrl+Enter and the palette.
+fn canContinue() bool {
+    return midOperation() and opNext() == .proceed;
+}
+
+/// `core.editor=true`: `--continue` does not stop on an editor with nowhere
+/// to open — `true` exits 0, and git keeps the message it already has. A
+/// job, as a commit is: it may run hooks and sign.
+fn requestContinue() void {
+    const cmd = operationCommand() orelse return;
+    requestLocal("Continuing", &.{ "-c", "core.editor=true", cmd, "--continue" });
+}
+
+/// Whether the file open is one of the conflicted ones.
+fn viewingConflict() bool {
+    return switch (selection) {
+        .change => |side| side == .unstaged and selectedStatus(.unstaged) == .conflicted,
+        else => false,
+    };
+}
+
+/// The conflicted file after the one open, round the end — the first when
+/// none is open.
+fn openNextConflict() void {
+    const w = work orelse return;
+    const open: []const u8 = if (viewingConflict()) selected_path.items else "";
+    var first: ?[]const u8 = null;
+    var past = open.len == 0;
+    for (w.unstaged) |change| {
+        if (change.status != .conflicted) continue;
+        if (first == null) first = change.path;
+        if (past and !std.mem.eql(u8, change.path, open)) {
+            active_view = .graph;
+            return selectChange(change.path, .unstaged);
+        }
+        if (std.mem.eql(u8, change.path, open)) past = true;
+    }
+    if (first) |p| {
+        active_view = .graph;
+        selectChange(p, .unstaged);
+    }
 }
 
 /// The shared shape of the two bars under the toolbar: a strip in a colour that
@@ -9605,7 +9779,7 @@ fn confirmBar() void {
         .reset_hard => std.fmt.bufPrint(&buf, "Reset to {s} and throw away every local change?", .{short}),
         .stash_drop => std.fmt.bufPrint(&buf, "Delete stash {s}? Nothing gets it back.", .{short}),
         .discard_hunk => "Discard this hunk from the working copy?",
-        .force_push => "Overwrite the remote branch with yours? Refused if it moved since your last fetch.",
+        .force_push => forcePushText(&buf),
         .delete_branch_force => std.fmt.bufPrint(&buf, "Delete {s}, with commits no other branch has?", .{c.arg}),
         .merge_request => std.fmt.bufPrint(&buf, "Merge #{s}? It goes into its base branch on the server, for everyone.", .{c.arg}),
         .close_request => std.fmt.bufPrint(&buf, "Close #{s} without merging it?", .{c.arg}),
@@ -9636,6 +9810,17 @@ fn confirmBar() void {
 
     if (linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
     if (linkButtonTagged(@src(), "Yes, do it", style.danger(), "confirm:yes")) requestAction(.confirmed);
+}
+
+/// What a force push replaces, in commits: after a rebase the upstream's go
+/// and the branch's own take their place.
+fn forcePushText(buf: []u8) []const u8 {
+    const plain = "Overwrite the remote branch with yours? Refused if it moved since your last fetch.";
+    const h = history orelse return plain;
+    const t = h.tracking;
+    const upstream = t.upstream orelse return plain;
+    if (t.behind == 0) return plain;
+    return std.fmt.bufPrint(buf, "Replace {s} with your branch? Its {d} commit{s} there give way to your {d}. Refused if it moved since your last fetch.", .{ upstream, t.behind, plural(t.behind), t.ahead }) catch plain;
 }
 
 /// "Abort the rebase? …": what an abort puts back, and what it loses.
@@ -10308,61 +10493,216 @@ fn refsSidebar() void {
 /// A merge or rebase under way, over the branches: what it is, how much is
 /// left, and the way on — continue, skip, or abort.
 fn mergeSidebar() void {
-    const h = history orelse return;
+    const w = work orelse return;
     const pending = conflictCount();
 
-    // What is under way, and how far along.
-    {
-        var card = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .corners = style.radius.input,
-            .padding = dvui.Rect.all(style.space.md),
-            .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
-        });
-        defer card.deinit();
-        dvui.label(@src(), "{s}{s}{s}", .{ h.state.label(), if (h.head != null) " on " else "", h.head orelse "" }, .{
+    var card = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surfaceRaised() },
+        .corners = style.radius.input,
+        .padding = dvui.Rect.all(style.space.md),
+        .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
+    });
+    defer card.deinit();
+
+    if (pending > 0) {
+        dvui.label(@src(), "{d} conflicted file{s}", .{ pending, plural(pending) }, .{
             .font = style.bodyBold(),
             .color_text = .{ .color = style.text() },
-            .expand = .horizontal,
-            .max_size_content = .width(0),
+            .padding = dvui.Rect.all(0),
+            .margin = .{ .h = style.space.xs },
+        });
+    } else {
+        dvui.label(@src(), "Every conflict is resolved", .{}, .{
+            .font = style.bodyBold(),
+            .color_text = .{ .color = style.success() },
             .padding = dvui.Rect.all(0),
         });
-        if (pending > 0) {
-            dvui.label(@src(), "{d} conflict{s} left to resolve", .{ pending, plural(pending) }, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.get().yellow },
-                .margin = .{ .y = style.space.xs },
-                .padding = dvui.Rect.all(0),
-            });
-        } else {
-            dvui.label(@src(), "Every conflict is resolved", .{}, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.success() },
-                .margin = .{ .y = style.space.xs },
-                .padding = dvui.Rect.all(0),
-            });
-        }
-
-        // Continue only once nothing is left: git would refuse anyway, and
-        // a button that cannot work is not offered.
-        if (h.state.command()) |cmd| {
-            var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
-            defer line.deinit();
-            if (pending == 0) {
-                if (dialogButton(@src(), "Continue", true)) request(&.{ "-c", "core.editor=true", cmd, "--continue" });
-            }
-            if (h.state == .rebase) {
-                if (dialogButton(@src(), "Skip", false)) requestSkipStep();
-            }
-            if (dialogButton(@src(), "Abort", false)) requestAbortOperation();
-        }
+        if (canContinue()) dvui.label(@src(), "Continue from the bar above — Ctrl+Enter", .{}, .{
+            .font = style.small(),
+            .color_text = .{ .color = style.textMuted() },
+            .margin = .{ .y = style.space.xs },
+            .padding = dvui.Rect.all(0),
+        });
     }
 
-    // The files themselves are in the changes list on the right — the
-    // conflicted ones unstaged, the resolved and clean ones staged — which is
-    // where they are opened and staged from.
+    // Each one a click away: the list the resolving goes down.
+    for (w.unstaged, 0..) |change, i| {
+        if (change.status != .conflicted) continue;
+        conflictFileRow(i, change.path);
+    }
+}
+
+/// A conflicted file in the sidebar's card: lit while it is the one open.
+fn conflictFileRow(id: usize, path: []const u8) void {
+    const open = viewingConflict() and std.mem.eql(u8, selected_path.items, path);
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{ .draw_focus = false }, .{
+        .id_extra = id,
+        .tag = frameTag("conflict_file", path),
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = if (open) style.accentDim() else style.surfaceRaised() },
+        .color_fill_hover = .{ .color = if (open) style.accentDim() else style.rowHover() },
+        .corners = style.radius.input,
+        .margin = .{ .y = 2 },
+        .padding = .{ .x = style.space.sm, .y = 5, .w = style.space.sm, .h = 5 },
+    });
+    defer bw.deinit();
+    bw.processEvents();
+    bw.drawBackground();
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer row.deinit();
+        dvui.icon(@src(), "conflict_icon", dvui.entypo.warning, .{ .fill_color = .{ .color = style.get().yellow } }, .{
+            .min_size_content = .{ .w = 11, .h = 11 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.sm },
+        });
+        var buf: [MAX_SHOWN_LINE]u8 = undefined;
+        dvui.label(@src(), "{s}", .{fitText(&buf, path, style.small(), 170)}, .{
+            .font = style.small(),
+            .color_text = .{ .color = if (open) style.accent() else style.text() },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+    }
+    if (bw.clicked()) selectChange(path, .unstaged);
+}
+
+// === An operation under way ===
+//
+// What git keeps on disk while a merge, rebase, cherry-pick or revert waits
+// on you, read into words: which branch, onto what, how far along, which
+// commit it stopped on — and a conflict's two sides by their names rather
+// than "ours" and "theirs", which a rebase turns round.
+
+const OpInfo = struct {
+    /// The branch a rebase replays, or the one a merge goes into.
+    branch: []const u8 = "",
+    /// Where a rebase replays onto: a branch's name where one points there.
+    onto: []const u8 = "",
+    /// 1-based, and how many in all; 0 where git keeps no count.
+    step: u32 = 0,
+    total: u32 = 0,
+    /// The commit being applied, picked, reverted or merged in: short sha
+    /// and subject.
+    commit: []const u8 = "",
+    subject: []const u8 = "",
+    /// A conflict's two sides, as the conflict view names them.
+    ours: []const u8 = "ours",
+    theirs: []const u8 = "theirs",
+    /// What "theirs" is mid-rebase: the commit being replayed.
+    theirs_role: []const u8 = "",
+};
+
+var op_info: OpInfo = .{};
+/// What `op_info`'s words live in; emptied each time it is read.
+var op_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+
+/// Read with the history, which every step of an operation reads again.
+fn readOpInfo() void {
+    _ = op_arena.reset(.retain_capacity);
+    op_info = .{};
+    const r = repo orelse return;
+    const h = history orelse return;
+    const a = op_arena.allocator();
+    const head = a.dupe(u8, h.head orelse "HEAD") catch "HEAD";
+    switch (h.state) {
+        .rebase => {
+            const dir: []const u8 = if (gitText(a, r, "rebase-merge/head-name") != null) "rebase-merge/" else "rebase-apply/";
+            const merge_backend = std.mem.eql(u8, dir, "rebase-merge/");
+            if (gitTextIn(a, r, dir, "head-name")) |t| op_info.branch = git.headName(t) orelse "";
+            if (gitTextIn(a, r, dir, "onto")) |t| if (git.oidFromHex(t[0..@min(40, t.len)])) |id| {
+                op_info.onto = refNameAt(a, id);
+            };
+            op_info.step = gitNumber(a, r, dir, if (merge_backend) "msgnum" else "next");
+            op_info.total = gitNumber(a, r, dir, if (merge_backend) "end" else "last");
+            if (gitText(a, r, "REBASE_HEAD") orelse gitTextIn(a, r, dir, "stopped-sha")) |t| setOpCommit(a, r, t);
+            op_info.ours = if (op_info.onto.len > 0) op_info.onto else "the base";
+            op_info.theirs = if (op_info.branch.len > 0) op_info.branch else if (op_info.commit.len > 0) op_info.commit else "your commit";
+            op_info.theirs_role = if (op_info.commit.len > 0)
+                std.fmt.allocPrint(a, "your commit {s}, replayed", .{op_info.commit}) catch "your commit, replayed"
+            else
+                "your commit, replayed";
+        },
+        .merge => {
+            op_info.branch = head;
+            if (gitText(a, r, "MERGE_HEAD")) |t| setOpCommit(a, r, t);
+            const source = if (gitText(a, r, "MERGE_MSG")) |m| git.mergeSource(m) else null;
+            op_info.ours = head;
+            op_info.theirs = source orelse if (op_info.commit.len > 0) op_info.commit else "theirs";
+        },
+        .cherrypick, .revert => {
+            op_info.branch = head;
+            if (gitText(a, r, if (h.state == .cherrypick) "CHERRY_PICK_HEAD" else "REVERT_HEAD")) |t| setOpCommit(a, r, t);
+            op_info.ours = head;
+            op_info.theirs = if (op_info.commit.len > 0) op_info.commit else "theirs";
+        },
+        else => {},
+    }
+}
+
+/// A small file git keeps under the repository's git directory, trimmed;
+/// null when it is not there.
+fn gitText(a: std.mem.Allocator, r: git.Repo, rel: []const u8) ?[]const u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const p = std.fmt.bufPrint(&buf, "{s}{s}", .{ r.gitdir(), rel }) catch return null;
+    const text = std.Io.Dir.cwd().readFileAlloc(app_io, p, a, .limited(64 * 1024)) catch return null;
+    return std.mem.trim(u8, text, " \t\r\n");
+}
+
+fn gitTextIn(a: std.mem.Allocator, r: git.Repo, dir: []const u8, name: []const u8) ?[]const u8 {
+    var buf: [128]u8 = undefined;
+    const rel = std.fmt.bufPrint(&buf, "{s}{s}", .{ dir, name }) catch return null;
+    return gitText(a, r, rel);
+}
+
+fn gitNumber(a: std.mem.Allocator, r: git.Repo, dir: []const u8, name: []const u8) u32 {
+    const t = gitTextIn(a, r, dir, name) orelse return 0;
+    return std.fmt.parseInt(u32, t, 10) catch 0;
+}
+
+/// The commit an operation is on, from the sha git wrote: short, with its
+/// subject.
+fn setOpCommit(a: std.mem.Allocator, r: git.Repo, text: []const u8) void {
+    const id = git.oidFromHex(text[0..@min(40, text.len)]) orelse return;
+    var short: [8]u8 = undefined;
+    op_info.commit = a.dupe(u8, git.oidShort(id, &short)) catch "";
+    const message = r.commitMessage(a, id);
+    op_info.subject = message[0 .. std.mem.indexOfScalar(u8, message, '\n') orelse message.len];
+}
+
+/// A branch's name where one points at `id` — a local one first — else its
+/// short sha.
+fn refNameAt(a: std.mem.Allocator, id: git.Oid) []const u8 {
+    const h = history orelse return "";
+    var remote: ?[]const u8 = null;
+    for (h.refs) |ref| {
+        if (!git.oidEql(ref.target, id)) continue;
+        if (ref.kind == .local) return a.dupe(u8, ref.name) catch "";
+        if (ref.kind == .remote and remote == null) remote = ref.name;
+    }
+    if (remote) |n| return a.dupe(u8, n) catch "";
+    var short: [8]u8 = undefined;
+    return a.dupe(u8, git.oidShort(id, &short)) catch "";
+}
+
+/// A conflict's sides as the conflict view says them: whose, and what that
+/// side is. During a rebase "ours" is the base and "theirs" your own commit,
+/// the reverse of what the words suggest.
+const SideNames = struct { ours: []const u8, theirs: []const u8, ours_role: []const u8, theirs_role: []const u8 };
+
+fn sideNames() SideNames {
+    const h = history orelse return .{ .ours = "ours", .theirs = "theirs", .ours_role = "already on this branch", .theirs_role = "coming in" };
+    return switch (h.state) {
+        .rebase => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "the base, rebased onto", .theirs_role = op_info.theirs_role },
+        .merge => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "your branch", .theirs_role = "merging in" },
+        .cherrypick => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "your branch", .theirs_role = "being picked" },
+        .revert => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "your branch", .theirs_role = "the revert" },
+        else => .{ .ours = "ours", .theirs = "theirs", .ours_role = "already on this branch", .theirs_role = "coming in" },
+    };
 }
 
 /// True when this click lands on the same widget as the previous one, soon
@@ -11695,6 +12035,10 @@ fn refArg(buf: *[512]u8, name: []const u8, kind: git.Ref.Kind) []const u8 {
 
 fn runDrop() void {
     const d = drop orelse return;
+    if (midOperation()) {
+        clearDrop();
+        return setCommandError("Finish or abort what is under way first.");
+    }
     var ref_buf: [512]u8 = undefined;
     defer clearDrop();
     switch (drop_action) {
@@ -11771,21 +12115,21 @@ fn refMenu(
         };
 
         menuSeparator(1);
-        if (menuIcon(@src(), dvui.entypo.merge, "Merge into current branch", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge into current branch", false)) {
             fw.close();
             request(&.{ "merge", "--no-edit", refArg(&ref_buf, ref.name, ref.kind) });
         }
-        if (menuIcon(@src(), dvui.entypo.merge, "Merge, always with a merge commit", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge, always with a merge commit", false)) {
             fw.close();
             request(&.{ "merge", "--no-edit", "--no-ff", refArg(&ref_buf, ref.name, ref.kind) });
         }
         // Leaves the result staged and HEAD where it was: the commit that
         // follows is yours to write, which is the point of squashing.
-        if (menuIcon(@src(), dvui.entypo.archive, "Squash into current branch, uncommitted", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.archive, "Squash into current branch, uncommitted", false)) {
             fw.close();
             request(&.{ "merge", "--squash", refArg(&ref_buf, ref.name, ref.kind) });
         }
-        if (menuIcon(@src(), dvui.entypo.level_up, "Rebase current branch onto this", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.level_up, "Rebase current branch onto this", false)) {
             fw.close();
             request(&.{ "rebase", refArg(&ref_buf, ref.name, ref.kind) });
         }
@@ -13237,7 +13581,7 @@ fn commitMenu(
     }
 
     menuSeparator(2);
-    if (menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
+    if (!midOperation() and menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
         fw.close();
         // A merge, like a revert of one: its change is the diff against the
         // first parent, the branch it was merged into.
@@ -13247,7 +13591,7 @@ fn commitMenu(
             request(&.{ "cherry-pick", sha });
         }
     }
-    if (menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
+    if (!midOperation() and menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
         fw.close();
         // A merge has no single change to undo until one parent is named; the
         // first is the branch it was merged into, which is what "undo this
@@ -13258,7 +13602,7 @@ fn commitMenu(
             request(&.{ "revert", "--no-edit", sha });
         }
     }
-    if (menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
+    if (!midOperation() and menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
         fw.close();
         // The clicked commit is replayed too, so the list starts at its parent.
         beginRebase(if (commit.parents.len > 0) commit.parents[0] else null);
@@ -14346,10 +14690,13 @@ fn diffHeader() void {
                 // The answers for a conflict nobody needs to read. `checkout`
                 // rewrites the file; the index stays conflicted until it is
                 // staged, which is what "resolved" means to git.
-                if (linkButton(@src(), "All ours", style.success())) {
+                const names = sideNames();
+                var ours_buf: [96]u8 = undefined;
+                var theirs_buf: [96]u8 = undefined;
+                if (linkButton(@src(), allCaption(&ours_buf, names.ours), style.success())) {
                     request(&.{ "--literal-pathspecs", "checkout", "--ours", "--", selected_path.items });
                 }
-                if (linkButton(@src(), "All theirs", style.get().blue)) {
+                if (linkButton(@src(), allCaption(&theirs_buf, names.theirs), style.get().blue)) {
                     request(&.{ "--literal-pathspecs", "checkout", "--theirs", "--", selected_path.items });
                 }
                 if (linkButton(@src(), "Mark resolved", style.accent())) {
@@ -14890,8 +15237,11 @@ fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: u
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
-        if (linkButton(@src(), "Keep ours", style.success())) requestResolve(index, .ours);
-        if (linkButton(@src(), "Keep theirs", style.get().blue)) requestResolve(index, .theirs);
+        const names = sideNames();
+        var ours_buf: [96]u8 = undefined;
+        var theirs_buf: [96]u8 = undefined;
+        if (linkButton(@src(), keepCaption(&ours_buf, names.ours), style.success())) requestResolve(index, .ours);
+        if (linkButton(@src(), keepCaption(&theirs_buf, names.theirs), style.get().blue)) requestResolve(index, .theirs);
         if (linkButton(@src(), "Keep both", style.textMuted())) requestResolve(index, .both);
     }
 
@@ -14906,8 +15256,23 @@ fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: u
         .background = false,
     });
     defer sides.deinit();
-    conflictSide(@src(), 1, "ours — already on this branch", region.ours, style.diffAddedFill(), .{ index, .ours });
-    conflictSide(@src(), 2, "theirs — coming in", region.theirs, style.get().blue.lerp(style.background(), 0.86), .{ index, .theirs });
+    const names = sideNames();
+    var ours_buf: [160]u8 = undefined;
+    var theirs_buf: [160]u8 = undefined;
+    conflictSide(@src(), 1, std.fmt.bufPrint(&ours_buf, "{s} — {s}", .{ names.ours, names.ours_role }) catch "ours", region.ours, style.diffAddedFill(), .{ index, .ours });
+    conflictSide(@src(), 2, std.fmt.bufPrint(&theirs_buf, "{s} — {s}", .{ names.theirs, names.theirs_role }) catch "theirs", region.theirs, style.get().blue.lerp(style.background(), 0.86), .{ index, .theirs });
+}
+
+/// "All of main": the whole file as one side has it.
+fn allCaption(buf: []u8, name: []const u8) []const u8 {
+    var fit: [MAX_SHOWN_LINE]u8 = undefined;
+    return std.fmt.bufPrint(buf, "All of {s}", .{fitText(&fit, name, style.small(), 120)}) catch "All";
+}
+
+/// "Keep main": a side's button, its name cut to fit.
+fn keepCaption(buf: []u8, name: []const u8) []const u8 {
+    var fit: [MAX_SHOWN_LINE]u8 = undefined;
+    return std.fmt.bufPrint(buf, "Keep {s}", .{fitText(&fit, name, style.small(), 140)}) catch "Keep";
 }
 
 /// One side of a region: a caption, then its lines in a tint that says which
@@ -18969,6 +19334,158 @@ test "a refused interactive rebase keeps its plan" {
     var todo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const todo = try std.fmt.bufPrint(&todo_buf, "{s}zit-rebase-todo", .{repo.?.gitdir()});
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(app_io, todo, .{}));
+}
+
+// The strip reads what git keeps for a rebase: the branch, where it goes,
+// the step it stopped on and its commit — and the conflict's sides by name,
+// "ours" being the base there. Continue goes on from it once resolved.
+test "a rebase stopped on a conflict says where it is, and continues" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+
+    try makeTestRepo(&tmp, dir, "f.txt", "base\n");
+    try expectGit(dir, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "feat\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "feat changes f" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "g.txt", .data = "g\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "feat adds g" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "main\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "main changes f" });
+    try expectGit(dir, &.{ "switch", "-q", "feat" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "rebase", "main" });
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.rebase, history.?.state);
+    try std.testing.expectEqualStrings("feat", op_info.branch);
+    try std.testing.expectEqualStrings("main", op_info.onto);
+    try std.testing.expectEqual(@as(u32, 1), op_info.step);
+    try std.testing.expectEqual(@as(u32, 2), op_info.total);
+    try std.testing.expectEqualStrings("feat changes f", op_info.subject);
+    var title_buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Rebasing feat onto main", opTitle(&title_buf));
+    try std.testing.expectEqualStrings("main", sideNames().ours);
+    try std.testing.expectEqualStrings("feat", sideNames().theirs);
+    try std.testing.expect(std.mem.indexOf(u8, sideNames().theirs_role, op_info.commit) != null);
+    try std.testing.expect(opNext() == .resolve);
+    try std.testing.expect(!canContinue());
+
+    // Answered and staged: Continue, which replays the second commit too.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "both\n" });
+    gitDo(&.{ "add", "--", "f.txt" });
+    try std.testing.expect(opNext() == .proceed);
+    try std.testing.expect(canContinue());
+    requestContinue();
+    _ = runAction();
+    try pumpJob();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.none, history.?.state);
+    try std.testing.expectEqualStrings("feat adds g", history.?.commits[0].summary);
+    try std.testing.expectEqualStrings("feat changes f", history.?.commits[1].summary);
+    try std.testing.expectEqualStrings("main changes f", history.?.commits[2].summary);
+}
+
+// Resolved to what the base already had, a commit is left with nothing to
+// apply: git refuses to continue with it, and the strip offers Skip instead.
+test "a rebase step left empty by its resolution is skipped, not continued" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+
+    try makeTestRepo(&tmp, dir, "f.txt", "base\n");
+    try expectGit(dir, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "feat\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "feat changes f" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "main\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "main changes f" });
+    try expectGit(dir, &.{ "switch", "-q", "feat" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "rebase", "main" });
+    try std.testing.expectEqual(git.State.rebase, history.?.state);
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "main\n" });
+    gitDo(&.{ "add", "--", "f.txt" });
+    try std.testing.expect(opNext() == .skip);
+    try std.testing.expect(!canContinue());
+}
+
+// After a rebase the branch and its upstream have parted ways: Push turns
+// into a force push, which says what it replaces.
+test "after a rebase, Push is a force push that says what it replaces" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var up_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const up = try std.fmt.bufPrint(&up_buf, "{s}/up.git", .{root});
+    var down_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const down = try std.fmt.bufPrint(&down_buf, "{s}/down", .{root});
+
+    try git.init();
+    defer git.shutdown();
+
+    try expectGit(root, &.{ "init", "-q", "--bare", "-b", "main", "up.git" });
+    try tmp.dir.createDirPath(app_io, "down");
+    try makeTestRepo(&tmp, down, "down/a.txt", "a\n");
+    var origin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try expectGit(down, &.{ "remote", "add", "origin", try absPath(&origin_buf, up) });
+    try expectGit(down, &.{ "push", "-q", "-u", "origin", "main" });
+    try expectGit(down, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/f.txt", .data = "f\n" });
+    try expectGit(down, &.{ "add", "-A" });
+    try expectGit(down, &.{ "commit", "-qm", "feat" });
+    try expectGit(down, &.{ "push", "-q", "-u", "origin", "feat" });
+    try expectGit(down, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/b.txt", .data = "b\n" });
+    try expectGit(down, &.{ "add", "-A" });
+    try expectGit(down, &.{ "commit", "-qm", "main moves" });
+    try expectGit(down, &.{ "switch", "-q", "feat" });
+
+    openRepo(down);
+    defer closeRepo();
+    defer clearCommandError();
+    try std.testing.expect(!rebasedSinceUpstream());
+
+    gitDo(&.{ "rebase", "main" });
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expect(rebasedSinceUpstream());
+    var buf: [512]u8 = undefined;
+    const text = forcePushText(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "origin/feat") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "1 commit there") != null);
 }
 
 test "a review written for one pull request is not carried to another" {
