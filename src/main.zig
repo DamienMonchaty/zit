@@ -6412,10 +6412,6 @@ fn titlebar() void {
         defer middle.deinit();
         // What Pull and Push would move, straight from the upstream comparison.
         const tracking: git.Tracking = if (history) |h| h.tracking else .{};
-        // Captions while they fit over the history; icons alone, their
-        // captions in tooltips, when they would not — as GitComet's action
-        // bar drops its labels at its breakpoints rather than be cut off.
-        toolbar_labels = toolbarWidth(true, tracking) <= middle.data().contentRect().w - 2 * style.space.sm;
 
         var tools = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .background = false,
@@ -6438,30 +6434,10 @@ fn titlebar() void {
         if (toolbarButton(@src(), "Fetch", dvui.entypo.cw, 0)) {
             requestNetwork("Fetching", fetchAllArgs(false));
         }
-        // Pull and the ways of pulling, one split button: a frame round both,
-        // a rule between them.
-        {
-            var split = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .gravity_y = 0.5,
-                .background = true,
-                .color_fill = .{ .color = style.surface() },
-                .border = dvui.Rect.all(1),
-                .color_border = .{ .color = style.border() },
-                .corners = style.radius.input,
-                .margin = .{ .w = style.space.xs },
-                .padding = dvui.Rect.all(0),
-            });
-            defer split.deinit();
-            if (toolButton(@src(), "Pull", dvui.entypo.download, tracking.behind, false)) {
-                requestNetwork("Pulling", &.{"pull"});
-            }
-            _ = dvui.separator(@src(), .{
-                .min_size_content = .{ .w = 1, .h = TOOL_H - 8 },
-                .gravity_y = 0.5,
-                .color_fill = .{ .color = style.border() },
-            });
-            pullMenu();
+        if (toolbarButton(@src(), "Pull", dvui.entypo.download, tracking.behind)) {
+            requestNetwork("Pulling", &.{"pull"});
         }
+        pullMenu();
         if (toolbarButton(@src(), "Push", dvui.entypo.upload, tracking.ahead)) {
             // A branch with no upstream yet gets one, on the default remote —
             // otherwise the first push of every new branch is an error message.
@@ -6512,10 +6488,15 @@ fn toolbarZones() struct { left: f32, right: f32 } {
     };
 }
 
-/// The room between two groups of toolbar buttons: a gap, as GitComet's
-/// action bar has, rather than a rule between framed buttons.
+/// A thin upright rule between groups of toolbar buttons.
 fn toolbarDivider(src: std.builtin.SourceLocation, id: usize) void {
-    _ = dvui.spacer(src, .{ .id_extra = id, .min_size_content = .{ .w = style.space.md } });
+    _ = dvui.separator(src, .{
+        .id_extra = id,
+        .min_size_content = .{ .w = 1, .h = 26 },
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm, .w = style.space.sm },
+        .color_fill = .{ .color = style.border() },
+    });
 }
 
 /// A button whose menu drops below it. dvui's dropdown opens over its own
@@ -6557,18 +6538,15 @@ const DropButton = struct {
 fn pullMenu() void {
     const button = DropButton.begin(@src(), .{
         .tag = "toolbar:pull_menu",
-        .gravity_y = 0.5,
+        .gravity_y = 0.35,
         .background = false,
-        .color_fill_hover = .{ .color = style.rowHover() },
-        .min_size_content = .{ .h = TOOL_H - 2 },
-        .margin = dvui.Rect.all(0),
-        .padding = .{ .x = style.space.xs, .w = style.space.xs },
+        .margin = .{ .x = -4, .w = 2 },
+        .padding = dvui.Rect.all(2),
         .corners = style.radius.input,
     });
     const enabled = repo != null;
     dvui.icon(@src(), "pull_menu", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = if (enabled) style.textMuted() else style.textFaint() } }, .{
         .min_size_content = .{ .w = 12, .h = 12 },
-        .gravity_y = 0.5,
     });
     const menu = button.open();
     defer button.end(menu);
@@ -9718,54 +9696,15 @@ fn dropChoice(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8, hint
 /// `badge` is drawn beside the caption when it is not zero — how many commits
 /// Pull or Push would actually move.
 fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize) bool {
-    return toolButton(src, caption, icon, badge, true);
-}
-
-/// How high a toolbar button is: GitComet's control height, and a little.
-const TOOL_H: f32 = 26;
-const TOOL_ICON: f32 = 13;
-const TOOL_ICON_GAP: f32 = style.space.xs + 2;
-
-/// The toolbar's buttons show their captions this frame.
-var toolbar_labels = true;
-
-/// The toolbar's buttons, by caption: what `titlebar` lays out, measured
-/// before it does, to know whether their captions fit.
-const TOOL_CAPTIONS = [_][]const u8{ "Search", "Undo", "Fetch", "Pull", "Push", "Branch", "Stash", "Pop", "Terminal" };
-
-/// How wide the toolbar's row is, with captions or without.
-fn toolbarWidth(labels: bool, tracking: git.Tracking) f32 {
-    var w: f32 = 0;
-    for (TOOL_CAPTIONS) |caption| {
-        // The frame, its padding and the icon; the caption and its gap.
-        w += 2 + 2 * style.space.sm + TOOL_ICON + style.space.xs;
-        if (labels) w += TOOL_ICON_GAP + style.small().textSize(caption).w;
-        const badge: usize = if (std.mem.eql(u8, caption, "Pull")) tracking.behind else if (std.mem.eql(u8, caption, "Push")) tracking.ahead else 0;
-        if (badge > 0) {
-            var buf: [24]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{d}", .{badge}) catch "";
-            w += style.space.sm + @max(COUNT_PILL_H, style.tinyBold().textSize(text).w + 10);
-        }
-    }
-    // Pull's chevron and the rule before it; the gaps between the groups.
-    w += 1 + 12 + 2 * style.space.xs + 3 * style.space.md;
-    if (uses_lfs) w += 2 + 2 * style.space.sm + TOOL_ICON + style.space.xs + (if (labels) TOOL_ICON_GAP + style.small().textSize("LFS").w else 0);
-    return w;
-}
-
-/// A toolbar button as GitComet draws its action bar's: the icon and the
-/// caption side by side, on a frame of its own that lights under the pointer,
-/// and what Pull or Push would move on a pill after. `framed` false inside a
-/// split button, whose frame is round both halves.
-fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, framed: bool) bool {
     const enabled = repo != null;
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = frameTag("toolbar", caption),
+        .min_size_content = .{ .w = 46, .h = 34 },
         .gravity_y = 0.5,
         .background = false,
-        .margin = if (framed) .{ .w = style.space.xs } else dvui.Rect.all(0),
+        .margin = .{ .w = 2 },
         .padding = dvui.Rect.all(0),
         .corners = style.radius.input,
     });
@@ -9774,55 +9713,50 @@ fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []cons
 
     const hovered = enabled and bw.hovered();
     const color = if (!enabled) style.textFaint() else if (hovered) style.text() else style.textMuted();
-    // Without its caption, the caption says itself on hover.
-    if (!toolbar_labels and bw.hovered()) {
-        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 500_000 }, "{s}", .{caption}, .{ .font = style.small() });
-    }
 
-    // Its own ground under the frame, never none: dvui paints a border by
-    // filling the whole box in its colour first.
-    var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .background = true,
-        .color_fill = .{ .color = if (hovered) style.rowHover() else style.surface() },
-        .border = dvui.Rect.all(if (framed) 1 else 0),
-        .color_border = .{ .color = style.border() },
-        .corners = style.radius.input,
-        // Two short of the button, for the frame: framed alone or in a split one.
-        .min_size_content = .{ .h = TOOL_H - 2 },
-        .padding = .{ .x = style.space.sm, .w = style.space.sm },
-    });
-    defer cell.deinit();
-
-    dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
-        .min_size_content = .{ .w = TOOL_ICON, .h = TOOL_ICON },
-        .gravity_y = 0.5,
-        .margin = .{ .w = if (toolbar_labels) TOOL_ICON_GAP else 0 },
-    });
-    if (toolbar_labels) dvui.label(@src(), "{s}", .{caption}, .{
-        .font = style.small(),
-        .color_text = .{ .color = color },
-        .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
-    });
-    if (badge > 0 and enabled) {
-        var pill = dvui.box(@src(), .{}, .{
-            .background = true,
-            .color_fill = .{ .color = style.accentDim() },
-            .corners = .all(COUNT_PILL_H / 2),
-            .min_size_content = .{ .w = COUNT_PILL_H - 10, .h = COUNT_PILL_H },
-            .max_size_content = .height(COUNT_PILL_H),
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = .{ .x = 5, .w = 5 },
+    {
+        var cell = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .expand = .both,
+            .background = hovered,
+            .color_fill = .{ .color = style.rowHover() },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
         });
-        defer pill.deinit();
-        dvui.label(@src(), "{d}", .{badge}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = style.accent() },
+        defer cell.deinit();
+
+        dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
+            .min_size_content = .{ .w = 15, .h = 15 },
             .gravity_x = 0.5,
-            .gravity_y = 0.5,
+            .margin = .{ .h = 3 },
+        });
+
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_x = 0.5,
+            .background = false,
             .padding = dvui.Rect.all(0),
         });
+        defer line.deinit();
+
+        dvui.label(@src(), "{s}", .{caption}, .{
+            .font = style.tiny(),
+            .color_text = .{ .color = color },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+            .margin = dvui.Rect.all(0),
+        });
+
+        if (badge > 0 and enabled) {
+            dvui.label(@src(), "{d}", .{badge}, .{
+                .font = style.tiny(),
+                .color_text = .{ .color = style.accent() },
+                .background = true,
+                .color_fill = .{ .color = style.accentDim() },
+                .corners = style.radius.tag,
+                .gravity_y = 0.5,
+                .margin = .{ .x = style.space.xs },
+                .padding = .{ .x = style.space.xs, .w = style.space.xs },
+            });
+        }
     }
 
     return enabled and bw.clicked();
@@ -20027,9 +19961,7 @@ test "fetch, and each pull the menu offers, through the toolbar" {
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.tracking.behind);
 
-    // Fast-forward only, from behind. Drawn first: Pull's count, new since
-    // the fetch, widens it and moves the chevron right.
-    try dvui.testing.settle(frameArrowCursor);
+    // Fast-forward only, from behind.
     try clickAt(try tagCenter("toolbar:pull_menu"));
     try clickAt(try tagCenter("menu:Pull, fast-forward only"));
     try pumpJob();
