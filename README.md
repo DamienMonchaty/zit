@@ -110,7 +110,7 @@ nothing. Every number here can be measured again with `zig build bench --
 
 **Workspace**
 - Tabs and tab groups, restored at start
-- Command palette — `Ctrl+P`; focus mode — `Ctrl+Shift+F`
+- Command palette — `Ctrl+P`
 - Dark and light themes
 
 </td>
@@ -169,7 +169,6 @@ requests, issues and checks everywhere, and Zit sends nothing to GitHub.
 | `Ctrl+T` / `Ctrl+W` | New tab / close tab |
 | `Ctrl+F` | Search the commits |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last commit, checkout, merge… |
-| `Ctrl+Shift+F` | Focus mode |
 | `Ctrl+,` | Settings |
 
 Every shortcut is listed in the app, under the keyboard button in the status bar.

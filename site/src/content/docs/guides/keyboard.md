@@ -41,5 +41,4 @@ action without a key of its own is in the command palette, `Ctrl+P`.
 | --- | --- |
 | `Ctrl+B` | Show or hide the branches panel |
 | `Ctrl+J` | Show or hide the changes panel |
-| `Ctrl+Shift+F` | Focus mode: the graph alone (`Esc` leaves) |
 | `Ctrl+Shift+PgUp` / `PgDn` | Move this tab left / right |

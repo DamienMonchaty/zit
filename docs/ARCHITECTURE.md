@@ -82,10 +82,8 @@ label before its tabs, underlined in its colour; a click on the label folds
 the group to it, a right-click renames, recolours, ungroups or closes it.
 A tab dragged onto another takes its place, in its group or another one;
 `Ctrl+Shift+PgUp`/`PgDn` moves the one shown without the mouse.
-`Ctrl+W` closes a tab, `Ctrl+B`
-and `Ctrl+J` hide the branches and changes panels, and `Ctrl+Shift+F` is
-**focus mode** — the graph and its diff alone, no tabs, toolbar or panels,
-until `Esc` or the key again puts them back as they were. A click on a branch,
+`Ctrl+W` closes a tab, and `Ctrl+B`
+and `Ctrl+J` hide the branches and changes panels. A click on a branch,
 remote branch, tag, worktree or stash in the sidebar brings its commit up in
 the graph (a stash's: the one it was made on); a double-click still checks
 out. The commit's summary and the lines of a diff are text you can select

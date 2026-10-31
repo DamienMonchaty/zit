@@ -28,7 +28,30 @@ Every release of Zit, newest first. Downloads are on the
   adding 11,000 new files is 13 s of `git` on Windows, which the window used
   to wait out frozen.
 
+### Changed
+- The right-hand panel is headed as the sidebar is: Changed files, Unstaged,
+  Staged, Commit and a commit's sections in title case and semi-bold, with
+  the sidebar's icons and hairlines, a count on a pill that reads at a
+  glance. Unstaged and Staged fold under their title, as a sidebar section
+  does.
+
+### Removed
+- Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
+
 ### Fixed
+- In the Connect GitHub dialog, the loading dots no longer sit beside the
+  buttons as if part of the last one: they say what is being waited on, on a
+  line of their own — "Waiting for your approval on github.com" — and come
+  with "Asking GitHub for a code…" too.
+- With thousands of changed files, staging no longer stops the window: the
+  status is read again off its thread after every command, as it already was
+  on the timer. With 11,000 files a file's + froze it for half a second and
+  the end of Stage all for 385 ms; now neither for more than 45 ms. While a
+  command changes them, the lists of changes wait under a veil that says so —
+  the three dots and "Staging…", "Committing…" — beside the status bar's pill.
+- The uncommitted changes' node sits on the line of HEAD's commit, in its
+  colour, with a dotted line down to it, rather than ten pixels left of the
+  first line whatever HEAD was on.
 - Hiding a branch from the graph takes it out: its name leaves the branch
   column, and so do the commits only it reaches — the remote branch it tracks
   is hidden with it, which kept them up before. A hidden tag's name goes too.
