@@ -59,6 +59,13 @@ Every release of Zit, newest first. Downloads are on the
   the checked-out branch's request is the one open to begin with.
 - The create and edit pull request dialogs keep a form's width, however long
   the template and the commits filled into the description are.
+- A new pull request is filled in from lists, as on GitHub: the branch it
+  goes into and the one it comes from, the reviewers and the assignees from
+  the people who can be asked on the repository, its labels with their
+  colours, and whether it opens ready for review or as a draft — each list
+  with a field to narrow it. Reviewers, assignees and labels are set on it
+  as soon as GitHub has made it. A branch not on the remote yet is pushed
+  from the dialog.
 - A conflict's sides are named: "Keep main", "Keep feature/x", with what each
   is — during a rebase, where git's "ours" is the base and "theirs" your
   own commit, the buttons say so instead of the reverse.

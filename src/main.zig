@@ -1810,6 +1810,8 @@ fn appDeinit(win: *dvui.Window) void {
     clearApiQueue();
     api_queue.deinit(gpa);
     api_reviewers.deinit(gpa);
+    api_assignees.deinit(gpa);
+    api_labels.deinit(gpa);
     repo_slug.deinit(gpa);
     clearJobSteps();
     job_steps.deinit(gpa);
@@ -3088,8 +3090,11 @@ var api_label: []const u8 = "";
 var api_then: ApiThen = .none;
 /// The calls waiting behind the one out.
 var api_queue: std.ArrayList(ApiCall) = .empty;
-/// For `.ask_reviewers`: the JSON list, owned.
+/// For `.ask_reviewers`: the JSON lists, owned — whom to ask, whom to
+/// assign, which labels.
 var api_reviewers: std.ArrayList(u8) = .empty;
+var api_assignees: std.ArrayList(u8) = .empty;
+var api_labels: std.ArrayList(u8) = .empty;
 /// Fetch once the run succeeds: it moved branches on the remote.
 var api_fetch_after = false;
 
@@ -3192,17 +3197,32 @@ fn collectApi() void {
     }
 }
 
-/// After a request was created: its reviewers, by the number GitHub gave it.
+/// After a request was created: its reviewers, assignees and labels, by the
+/// number GitHub gave it.
 fn askReviewers(body: []const u8) void {
-    if (api_reviewers.items.len == 0) return;
-    defer api_reviewers.clearRetainingCapacity();
+    defer {
+        api_reviewers.clearRetainingCapacity();
+        api_assignees.clearRetainingCapacity();
+        api_labels.clearRetainingCapacity();
+    }
+    if (api_reviewers.items.len + api_assignees.items.len + api_labels.items.len == 0) return;
     var a: std.heap.ArenaAllocator = .init(gpa);
     defer a.deinit();
     const made = std.json.parseFromSliceLeaky(struct { number: u32 = 0 }, a.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
     if (made.number == 0) return;
     var path: [512]u8 = undefined;
-    const reviewers = std.fmt.allocPrint(a.allocator(), "{{\"reviewers\":{s}}}", .{api_reviewers.items}) catch return;
-    requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{made.number}), reviewers, .none);
+    if (api_reviewers.items.len > 0) {
+        const reviewers = std.fmt.allocPrint(a.allocator(), "{{\"reviewers\":{s}}}", .{api_reviewers.items}) catch return;
+        requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{made.number}), reviewers, .none);
+    }
+    if (api_assignees.items.len > 0) {
+        const assignees = std.fmt.allocPrint(a.allocator(), "{{\"assignees\":{s}}}", .{api_assignees.items}) catch return;
+        requestApi("Assigning", "POST", apiPath(&path, "/issues/{d}/assignees", .{made.number}), assignees, .none);
+    }
+    if (api_labels.items.len > 0) {
+        const labels = std.fmt.allocPrint(a.allocator(), "{{\"labels\":{s}}}", .{api_labels.items}) catch return;
+        requestApi("Labelling", "POST", apiPath(&path, "/issues/{d}/labels", .{made.number}), labels, .none);
+    }
 }
 
 /// `{"k":"v",…}` from pairs of strings; into `a`.
@@ -4557,6 +4577,7 @@ fn appFrame() !dvui.App.Result {
     if (avatars.pump()) dvui.refresh(null, @src(), null);
     if (pr.pump()) dvui.refresh(null, @src(), null);
     if (pr.pumpIssues()) dvui.refresh(null, @src(), null);
+    if (pr.pumpMeta()) dvui.refresh(null, @src(), null);
     if (pr.pumpDetail()) dvui.refresh(null, @src(), null);
     if (pr.ciPump()) dvui.refresh(null, @src(), null);
     askCi();
@@ -7236,9 +7257,13 @@ fn toolbarDivider(src: std.builtin.SourceLocation, id: usize) void {
 const DropButton = struct {
     bar: *dvui.MenuWidget,
     item: *dvui.MenuItemWidget,
+    /// The menu's least width: a picker's is its field's.
+    min_w: f32 = 0,
 
     fn begin(src: std.builtin.SourceLocation, opts: dvui.Options) DropButton {
-        const bar = dvui.menu(src, .horizontal, .{ .background = false, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = dvui.Rect.all(0) });
+        // Centred on the line, unless told otherwise: in a column, under a
+        // caption, a centred one would sit over it.
+        const bar = dvui.menu(src, .horizontal, .{ .background = false, .gravity_y = opts.gravity_y orelse 0.5, .expand = opts.expand, .padding = dvui.Rect.all(0), .margin = dvui.Rect.all(0) });
         return .{ .bar = bar, .item = dvui.menuItem(@src(), .{ .submenu = true }, opts) };
     }
 
@@ -7254,6 +7279,7 @@ const DropButton = struct {
             .color_border = .{ .color = style.border() },
             .corners = style.radius.popover,
             .padding = dvui.Rect.all(style.space.xs),
+            .min_size_content = .{ .w = self.min_w },
         });
     }
 
@@ -11817,6 +11843,15 @@ var pr_new_body: std.ArrayList(u8) = .empty;
 var pr_new_base: std.ArrayList(u8) = .empty;
 var pr_new_reviewers: std.ArrayList(u8) = .empty;
 var pr_new_draft = false;
+/// The branch it comes from: the one checked out, unless another is picked.
+var pr_new_head: std.ArrayList(u8) = .empty;
+/// Who it is assigned to, and its labels: comma-separated, as picked.
+var pr_new_assignees: std.ArrayList(u8) = .empty;
+var pr_new_labels: std.ArrayList(u8) = .empty;
+/// What is typed over the list of the picker open, and which one that is:
+/// another opening starts with nothing typed.
+var pick_filter: std.ArrayList(u8) = .empty;
+var pick_open: ?usize = null;
 
 fn openPrCreate() void {
     const h = history orelse return;
@@ -11824,7 +11859,10 @@ fn openPrCreate() void {
     pr_new_open = true;
     pr_new_rect = .{};
     pr_new_draft = false;
-    for ([_]*std.ArrayList(u8){ &pr_new_title, &pr_new_body, &pr_new_base, &pr_new_reviewers }) |t| t.clearRetainingCapacity();
+    for ([_]*std.ArrayList(u8){ &pr_new_title, &pr_new_body, &pr_new_base, &pr_new_reviewers, &pr_new_head, &pr_new_assignees, &pr_new_labels }) |t| t.clearRetainingCapacity();
+    pr_new_head.appendSlice(gpa, branch) catch {};
+    // Who can be asked, the labels: read while the form is filled in.
+    pr.loadMeta(repo_path.items);
 
     // The base: what the remote calls its HEAD, "origin/main" -> "main".
     const remote = defaultRemote() orelse "origin";
@@ -11921,7 +11959,7 @@ fn prCreateDialog() void {
 
     // A fixed width: the description comes filled in with the template and
     // the commits, and its longest line would otherwise set the dialog's.
-    const width = @min(PR_DIALOG_W, win.w - 80);
+    const width = @min(PR_CREATE_W, win.w - 80);
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = width },
         .max_size_content = .width(width),
@@ -11930,40 +11968,42 @@ fn prCreateDialog() void {
     });
     defer body.deinit();
 
+    // The two branches, as GitHub's compare bar has them: into, from.
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        branchPicker(0, "Into", &pr_new_base, .remote);
+        branchPicker(1, "From", &pr_new_head, .local);
+    }
+
     // Pushed first: the host can only open one on a branch it has.
-    const pushed = h.tracking.upstream != null and h.tracking.ahead == 0;
-    if (!pushed) {
+    const head = std.mem.trim(u8, pr_new_head.items, " ");
+    const on_head = if (h.head) |name| std.mem.eql(u8, name, head) else false;
+    const pushed = if (on_head)
+        h.tracking.upstream != null and h.tracking.ahead == 0
+    else
+        remoteHas(head);
+    if (!pushed and head.len > 0) {
         var note = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = true,
             .color_fill = .{ .color = style.tint(style.get().orange) },
-            .border = .{ .x = 3 },
-            .color_border = .{ .color = style.get().orange },
             .corners = style.radius.input,
             .margin = .{ .h = style.space.lg },
             .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
         });
         defer note.deinit();
-        dvui.label(@src(), "{s}", .{if (h.tracking.upstream == null) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first."}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
-        if (dialogButton(@src(), "Push", true)) requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+        const missing = !on_head or h.tracking.upstream == null;
+        dvui.label(@src(), "{s}", .{if (missing) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first."}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
+        if (dialogButton(@src(), "Push", true)) {
+            if (on_head) {
+                requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+            } else if (defaultRemote()) |remote| requestNetwork("Pushing", &.{ "push", "-u", remote, head });
+        }
     }
 
     var entered = false;
     _ = dialogField(@src(), 0, "Title", &pr_new_title, "What it does", true, &entered);
-    {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-        defer line.deinit();
-        {
-            var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .w = style.space.md } });
-            defer cell.deinit();
-            _ = dialogField(@src(), 1, "Into", &pr_new_base, "main", false, &entered);
-        }
-        {
-            var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
-            defer cell.deinit();
-            _ = dialogField(@src(), 2, "Reviewers", &pr_new_reviewers, "logins, separated by commas", false, &entered);
-        }
-    }
     dialogLabel(@src(), "Description");
     {
         const te = textField(@src(), .{
@@ -11971,26 +12011,340 @@ fn prCreateDialog() void {
             .multiline = true,
             .break_lines = true,
             .placeholder = "Why, and how to try it",
-        }, settingsInput().override(.{ .tag = "pr_new:body", .min_size_content = .{ .h = 180 }, .max_size_content = .size(.{ .w = 0, .h = 280 }), .margin = .{ .h = style.space.lg } }));
+        }, settingsInput().override(.{ .tag = "pr_new:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
         te.deinit();
     }
+
+    // Who, and what it is about: GitHub's sidebar, as three pickers.
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        peoplePicker(2, "Reviewers", &pr_new_reviewers, "Ask for reviews", true);
+        peoplePicker(3, "Assignees", &pr_new_assignees, "Assign someone", false);
+        labelPicker(4, &pr_new_labels);
+    }
+
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
-        _ = dvui.checkbox(@src(), &pr_new_draft, "Open it as a draft", .{ .tag = "pr_new:draft", .font = style.small(), .gravity_y = 0.5 });
+        typePicker(5);
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) pr_new_open = false;
-        if (pushed and dialogButton(@src(), "Create", true)) createRequest();
+        if (pushed and dialogButton(@src(), if (pr_new_draft) "Create draft" else "Create pull request", true)) createRequest();
     }
-    if (escapePressed()) pr_new_open = false;
+    if (escapePressed() and pick_open == null) pr_new_open = false;
+}
+
+/// The create dialog's width: two branches side by side, three pickers.
+const PR_CREATE_W: f32 = 620;
+
+/// Whether the default remote has a branch of that name, as last fetched.
+fn remoteHas(branch: []const u8) bool {
+    const h = history orelse return false;
+    const remote = defaultRemote() orelse return false;
+    for (h.refs) |ref| {
+        if (ref.kind != .remote) continue;
+        const split = splitRemoteRef(ref.name);
+        if (std.mem.eql(u8, split.remote, remote) and std.mem.eql(u8, split.branch, branch)) return true;
+    }
+    return false;
+}
+
+/// A field that drops a list to pick from: what is picked on its face, or
+/// what to do when nothing is. `end` closes it.
+const Picker = struct {
+    button: DropButton,
+    menu: ?*dvui.FloatingMenuWidget,
+    id: usize,
+
+    fn end(self: Picker) void {
+        self.button.end(self.menu);
+    }
+};
+
+fn picker(id: usize, face: []const u8, placeholder: []const u8, tag: []const u8) Picker {
+    var button = DropButton.begin(@src(), .{
+        .id_extra = id,
+        .tag = tag,
+        .expand = .horizontal,
+        .gravity_y = 0,
+        .background = false,
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .corners = style.radius.input,
+        .padding = dvui.Rect.all(0),
+    });
+    const field_w = button.item.data().rect.w;
+    button.min_w = @max(field_w, 240);
+    {
+        const lit = button.item.show_active or button.item.mouse_over;
+        var box = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+        });
+        defer box.deinit();
+        var buf: [MAX_SHOWN_LINE]u8 = undefined;
+        const text = if (face.len > 0) face else placeholder;
+        dvui.label(@src(), "{s}", .{fitText(&buf, text, style.small(), @max(40, field_w - 48))}, .{
+            .font = style.small(),
+            .color_text = .{ .color = if (face.len > 0) style.text() else style.textFaint() },
+            .gravity_y = 0.5,
+            .expand = .horizontal,
+            .max_size_content = .width(0),
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.icon(@src(), "pick_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.xs },
+        });
+    }
+    const menu = button.open();
+    // Opened afresh: nothing typed over its list yet.
+    if (menu != null and pick_open != id) {
+        pick_open = id;
+        pick_filter.clearRetainingCapacity();
+    } else if (menu == null and pick_open == id) pick_open = null;
+    return .{ .button = button, .menu = menu, .id = id };
+}
+
+/// The field typed over a picker's list, and whether `text` gets through it.
+fn pickSearch(placeholder: []const u8) void {
+    focusOnce(searchField(@src(), &pick_filter, placeholder, "pick_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
+}
+
+fn pickShown(text: []const u8, also: []const u8) bool {
+    const needle = std.mem.trim(u8, pick_filter.items, " ");
+    if (needle.len == 0) return true;
+    return std.ascii.indexOfIgnoreCase(text, needle) != null or std.ascii.indexOfIgnoreCase(also, needle) != null;
+}
+
+/// The scrolling list under a picker's search: as tall as it needs, up to
+/// a bound.
+fn pickList() *dvui.ScrollAreaWidget {
+    return dvui.scrollArea(@src(), .{}, .{
+        .expand = .horizontal,
+        .max_size_content = .height(@min(300, dvui.windowRect().h * 0.5)),
+        .background = false,
+    });
+}
+
+/// One row of a picker's list: a tick when picked, a colour where it has
+/// one, its name, what more there is to say of it.
+fn pickRow(id: usize, text: []const u8, sub: []const u8, picked: bool, hue: ?dvui.Color) bool {
+    var mi = dvui.menuItem(@src(), .{}, .{
+        .id_extra = id,
+        .tag = frameTag("pick", text),
+        .expand = .horizontal,
+        .corners = style.radius.input,
+        .color_fill_hover = .{ .color = style.accentDim() },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
+    });
+    defer mi.deinit();
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+    defer row.deinit();
+    dvui.icon(@src(), "pick_tick", dvui.entypo.check, .{ .fill_color = .{ .color = if (picked) style.accent() else dvui.Color.transparent } }, .{
+        .min_size_content = .{ .w = 12, .h = 12 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    if (hue) |c| {
+        var dot = dvui.box(@src(), .{}, .{
+            .background = true,
+            .color_fill = .{ .color = c },
+            .corners = .all(5),
+            .min_size_content = .{ .w = 10, .h = 10 },
+            .max_size_content = .size(.{ .w = 10, .h = 10 }),
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.sm },
+        });
+        dot.deinit();
+    }
+    dvui.label(@src(), "{s}", .{text}, .{
+        .font = if (picked) style.smallBold() else style.small(),
+        .color_text = .{ .color = style.text() },
+        .gravity_y = 0.5,
+        .padding = dvui.Rect.all(0),
+    });
+    if (sub.len > 0) dvui.label(@src(), "{s}", .{sub}, .{
+        .font = style.tiny(),
+        .color_text = .{ .color = style.textFaint() },
+        .gravity_y = 0.5,
+        .expand = .horizontal,
+        .max_size_content = .width(0),
+        .margin = .{ .x = style.space.sm },
+        .padding = dvui.Rect.all(0),
+    });
+    return mi.activeRect() != null;
+}
+
+const BranchSide = enum { remote, local };
+
+/// A branch to pick: the remote's for where it goes, yours for where it
+/// comes from.
+fn branchPicker(id: usize, caption: []const u8, value: *std.ArrayList(u8), side: BranchSide) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .w = if (side == .remote) style.space.md else 0 } });
+    defer cell.deinit();
+    dialogLabel(@src(), caption);
+    const p = picker(id, value.items, "Pick a branch", if (side == .remote) "pr_new:base" else "pr_new:head");
+    defer p.end();
+    const m = p.menu orelse return;
+    const h = history orelse return;
+    pickSearch("Find a branch…");
+    var list = pickList();
+    defer list.deinit();
+    const remote = defaultRemote() orelse "origin";
+    var shown: usize = 0;
+    for (h.refs, 0..) |ref, i| {
+        const name = switch (side) {
+            .remote => blk: {
+                if (ref.kind != .remote) continue;
+                const split = splitRemoteRef(ref.name);
+                if (!std.mem.eql(u8, split.remote, remote) or std.mem.eql(u8, split.branch, "HEAD")) continue;
+                break :blk split.branch;
+            },
+            .local => if (ref.kind == .local) ref.name else continue,
+        };
+        if (!pickShown(name, "")) continue;
+        if (shown >= MAX_BRANCH_CHOICES) break;
+        shown += 1;
+        if (pickRow(i, name, if (side == .local and !remoteHas(name)) "not pushed" else "", std.mem.eql(u8, value.items, name), null)) {
+            value.clearRetainingCapacity();
+            value.appendSlice(gpa, name) catch {};
+            m.close();
+        }
+    }
+    if (shown == 0) dropHeading(@src(), 20, "NO BRANCH BY THAT NAME");
+}
+
+/// People to pick, from those who can be asked on the host: reviewers or
+/// assignees. You are not among the reviewers of your own request.
+fn peoplePicker(id: usize, caption: []const u8, list: *std.ArrayList(u8), placeholder: []const u8, reviewers: bool) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .w = style.space.md } });
+    defer cell.deinit();
+    dialogLabel(@src(), caption);
+    const p = picker(id, list.items, placeholder, if (reviewers) "pr_new:reviewers" else "pr_new:assignees");
+    defer p.end();
+    _ = p.menu orelse return;
+    switch (pr.meta_status) {
+        .idle, .loading => return dropHeading(@src(), 0, "LOADING…"),
+        .failed => return dropHeading(@src(), 0, "COULD NOT READ WHO CAN BE ASKED"),
+        .ready => {},
+    }
+    pickSearch("Find someone…");
+    var rows = pickList();
+    defer rows.deinit();
+    var shown: usize = 0;
+    for (pr.meta.people, 0..) |person, i| {
+        if (reviewers and me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(person.login, me_gh.items)) continue;
+        if (!pickShown(person.login, person.name)) continue;
+        shown += 1;
+        if (pickRow(i, person.login, person.name, listHas(list.items, person.login), null)) listToggle(list, person.login);
+    }
+    if (shown == 0) dropHeading(@src(), 1, "NOBODY BY THAT NAME");
+}
+
+/// The repository's labels, each with its colour and what it is for.
+fn labelPicker(id: usize, list: *std.ArrayList(u8)) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false });
+    defer cell.deinit();
+    dialogLabel(@src(), "Labels");
+    const p = picker(id, list.items, "Add labels", "pr_new:labels");
+    defer p.end();
+    _ = p.menu orelse return;
+    switch (pr.meta_status) {
+        .idle, .loading => return dropHeading(@src(), 0, "LOADING…"),
+        .failed => return dropHeading(@src(), 0, "COULD NOT READ THE LABELS"),
+        .ready => {},
+    }
+    pickSearch("Find a label…");
+    var rows = pickList();
+    defer rows.deinit();
+    var shown: usize = 0;
+    for (pr.meta.labels, 0..) |label, i| {
+        if (!pickShown(label.name, label.description)) continue;
+        shown += 1;
+        if (pickRow(i, label.name, label.description, listHas(list.items, label.name), labelColor(label.color))) listToggle(list, label.name);
+    }
+    if (shown == 0) dropHeading(@src(), 1, if (pr.meta.labels.len == 0) "THE REPOSITORY HAS NO LABELS" else "NO LABEL BY THAT NAME");
+}
+
+/// Ready for review, or a draft: what it is opened as.
+fn typePicker(id: usize) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .min_size_content = .{ .w = 200 }, .background = false, .gravity_y = 0.5 });
+    defer cell.deinit();
+    const p = picker(id, if (pr_new_draft) "Draft" else "Ready for review", "", "pr_new:type");
+    defer p.end();
+    const m = p.menu orelse return;
+    if (pickRow(0, "Ready for review", "reviewers are told", !pr_new_draft, null)) {
+        pr_new_draft = false;
+        m.close();
+    }
+    if (pickRow(1, "Draft", "nobody is asked yet", pr_new_draft, null)) {
+        pr_new_draft = true;
+        m.close();
+    }
+}
+
+/// Whether `item` is in the comma-separated `list`.
+fn listHas(list: []const u8, item: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |raw| if (std.mem.eql(u8, std.mem.trim(u8, raw, " "), item)) return true;
+    return false;
+}
+
+/// `item` added to the comma-separated `list`, or taken out of it.
+fn listToggle(list: *std.ArrayList(u8), item: []const u8) void {
+    var next: std.ArrayList(u8) = .empty;
+    defer next.deinit(gpa);
+    var found = false;
+    var it = std.mem.splitScalar(u8, list.items, ',');
+    while (it.next()) |raw| {
+        const x = std.mem.trim(u8, raw, " ");
+        if (x.len == 0) continue;
+        if (std.mem.eql(u8, x, item)) {
+            found = true;
+            continue;
+        }
+        if (next.items.len > 0) next.appendSlice(gpa, ", ") catch return;
+        next.appendSlice(gpa, x) catch return;
+    }
+    if (!found) {
+        if (next.items.len > 0) next.appendSlice(gpa, ", ") catch return;
+        next.appendSlice(gpa, item) catch return;
+    }
+    list.clearRetainingCapacity();
+    list.appendSlice(gpa, next.items) catch {};
+}
+
+/// The comma-separated `text` as a JSON list of strings, in `a`: names
+/// with spaces in them — a label's — kept whole.
+fn jsonCommaList(a: std.mem.Allocator, text: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.append(a, '[') catch return "[]";
+    var it = std.mem.splitScalar(u8, text, ',');
+    var first = true;
+    while (it.next()) |raw| {
+        const word = std.mem.trim(u8, raw, " \t\n");
+        if (word.len == 0) continue;
+        if (!first) out.append(a, ',') catch return "[]";
+        first = false;
+        github.jsonString(a, &out, word) catch return "[]";
+    }
+    out.append(a, ']') catch return "[]";
+    return out.items;
 }
 
 fn createRequest() void {
     const title = std.mem.trim(u8, pr_new_title.items, " \n\t");
     const base = std.mem.trim(u8, pr_new_base.items, " ");
     if (title.len == 0 or base.len == 0) return setCommandError("A title and a branch to merge into are needed.");
-    const h = history orelse return;
-    const head = h.head orelse return setCommandError("Check out a branch first: a request is made from one.");
+    const head = std.mem.trim(u8, pr_new_head.items, " ");
+    if (head.len == 0) return setCommandError("Pick the branch it comes from.");
     const a = dvui.currentWindow().arena();
     var body: std.ArrayList(u8) = .empty;
     body.appendSlice(a, jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_new_body.items }, .{ "head", head }, .{ "base", base } })) catch return;
@@ -11999,9 +12353,16 @@ fn createRequest() void {
         _ = body.pop();
         body.appendSlice(a, ",\"draft\":true}") catch return;
     }
+    // Asked for, assigned and labelled once GitHub has given it a number.
     api_reviewers.clearRetainingCapacity();
     const reviewers = jsonList(a, pr_new_reviewers.items);
     if (reviewers.len > 2) api_reviewers.appendSlice(gpa, reviewers) catch {};
+    api_assignees.clearRetainingCapacity();
+    const assignees = jsonList(a, pr_new_assignees.items);
+    if (assignees.len > 2) api_assignees.appendSlice(gpa, assignees) catch {};
+    api_labels.clearRetainingCapacity();
+    const labels = jsonCommaList(a, pr_new_labels.items);
+    if (labels.len > 2) api_labels.appendSlice(gpa, labels) catch {};
     var path: [512]u8 = undefined;
     requestApi("Creating", "POST", apiPath(&path, "/pulls", .{}), body.items, .ask_reviewers);
     pr_new_open = false;
@@ -19353,6 +19714,11 @@ fn resetUiGlobals() void {
     resolve_undo.deinit(gpa);
     resolve_undo = .empty;
     pr_cards.deinit(gpa);
+    inline for (.{ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter }) |l| {
+        l.deinit(gpa);
+        l.* = .empty;
+    }
+    pick_open = null;
     clearJobSteps();
     job_steps.deinit(gpa);
     job_steps = .empty;
@@ -22367,6 +22733,75 @@ test "a comment's inline marks come off, and plain text is left as it is" {
 // The request pane draws in full — head, tabs, the conversation's timeline
 // with a folded run of reviews, threads, the answer and the merge — and each
 // other tab, without a widget left open.
+test "a picker's list toggles, and a label with spaces in it stays whole" {
+    gpa = std.testing.allocator;
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    listToggle(&list, "ann");
+    listToggle(&list, "good first issue");
+    try std.testing.expectEqualStrings("ann, good first issue", list.items);
+    try std.testing.expect(listHas(list.items, "good first issue"));
+    try std.testing.expect(!listHas(list.items, "good"));
+    listToggle(&list, "ann");
+    try std.testing.expectEqualStrings("good first issue", list.items);
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("[\"good first issue\",\"bug\"]", jsonCommaList(arena.allocator(), "good first issue, bug,"));
+}
+
+// The create dialog as GitHub's page has it: the people and the labels
+// picked from lists the host gave, the type from a list of two.
+test "a new pull request's reviewers, labels and type are picked from lists" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try expectGit(dir, &.{ "switch", "-qc", "feat/login-form" });
+    openRepo(dir);
+    defer closeRepo();
+    pr.host = .github;
+    defer pr.host = .none;
+    me_loaded = true;
+    pr.meta = .{
+        .people = &.{ .{ .login = "ann", .name = "Ann Lee" }, .{ .login = "bo" } },
+        .labels = &.{ .{ .name = "bug", .color = "d73a4a" }, .{ .name = "good first issue", .color = "7057ff" } },
+    };
+    pr.meta_status = .ready;
+    defer {
+        pr.meta = .{};
+        pr.meta_status = .idle;
+    }
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1400, .h = 860 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    openPrCreate();
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqualStrings("feat/login-form", pr_new_head.items);
+
+    try clickAt(try tagCenter("pr_new:labels"));
+    try clickAt(try tagCenter("pick:good first issue"));
+    try std.testing.expectEqualStrings("good first issue", pr_new_labels.items);
+    try pressFrame(.escape, .none);
+
+    try clickAt(try tagCenter("pr_new:reviewers"));
+    try clickAt(try tagCenter("pick:bo"));
+    try std.testing.expectEqualStrings("bo", pr_new_reviewers.items);
+    try pressFrame(.escape, .none);
+
+    try clickAt(try tagCenter("pr_new:type"));
+    try clickAt(try tagCenter("pick:Draft"));
+    try std.testing.expect(pr_new_draft);
+    try std.testing.expect(pr_new_open);
+}
+
 test "a request's pane draws every tab" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
