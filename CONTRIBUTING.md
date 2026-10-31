@@ -35,6 +35,21 @@ your change.
 If your change touches memory or speed, measure it as described in
 [docs/PERF.md](docs/PERF.md).
 
+## The website
+
+The site at [damienmonchaty.github.io/zit](https://damienmonchaty.github.io/zit/)
+is in `site/`, built with Astro Starlight; it needs Node 22.23 or later.
+
+```sh
+cd site && npm install
+npm run dev   # http://localhost:4321/zit/
+```
+
+Its pages are in `site/src/content/docs/`. The changelog, this guide and the
+privacy and security policies are shown there as they are written here, so
+they are edited in one place. The site is published from `main`, with each
+release.
+
 ## Branches and pull requests
 
 - `develop` is where work happens. Branch from it, and open your pull request

@@ -1,0 +1,68 @@
+/* Zit's own palette, from src/theme/zit_{dark,light}.json: the logo's violet
+   as the accent, on a violet-tinted charcoal ground. Set in Inter and
+   JetBrains Mono, as the app is. */
+
+:root {
+	--sl-font: 'Inter Variable', system-ui, sans-serif;
+	--sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+	--sl-color-accent-low: hsl(264, 45%, 22%);
+	--sl-color-accent: hsl(264, 100%, 71%);
+	--sl-color-accent-high: hsl(264, 100%, 88%);
+
+	--sl-color-white: hsl(0, 0%, 100%);
+	--sl-color-gray-1: hsl(247, 22%, 93%);
+	--sl-color-gray-2: hsl(248, 10%, 78%);
+	--sl-color-gray-3: hsl(248, 10%, 59%);
+	--sl-color-gray-4: hsl(248, 9%, 38%);
+	--sl-color-gray-5: hsl(248, 12%, 24%);
+	--sl-color-gray-6: hsl(245, 14%, 16%);
+	--sl-color-black: hsl(248, 14%, 12%);
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: hsl(262, 90%, 93%);
+	--sl-color-accent: hsl(262, 83%, 58%);
+	--sl-color-accent-high: hsl(265, 70%, 32%);
+
+	--sl-color-white: hsl(246, 25%, 11%);
+	--sl-color-gray-1: hsl(248, 14%, 17%);
+	--sl-color-gray-2: hsl(248, 10%, 25%);
+	--sl-color-gray-3: hsl(248, 8%, 38%);
+	--sl-color-gray-4: hsl(248, 7%, 56%);
+	--sl-color-gray-5: hsl(248, 8%, 77%);
+	--sl-color-gray-6: hsl(250, 22%, 94%);
+	--sl-color-gray-7: hsl(250, 30%, 97%);
+	--sl-color-black: hsl(0, 0%, 100%);
+}
+
+/* The logo's gradient on the home page's title. */
+[data-has-hero] .hero h1 {
+	background: linear-gradient(100deg, #ffaa3e, #ff6269 45%, #c34fff 75%, #8b7aff);
+	background-clip: text;
+	-webkit-background-clip: text;
+	color: transparent;
+}
+
+/* The app's window, wider than the text around it. */
+.screenshot {
+	--width: min(72rem, 100vw - 2 * var(--sl-content-pad-x, 1rem));
+	width: var(--width);
+	margin-inline: calc((100% - var(--width)) / 2);
+}
+
+/* No `display` here: it would beat Starlight's `light:sl-hidden`, which sits
+   in a cascade layer, and show both themes' pictures. */
+.screenshot img {
+	vertical-align: middle;
+	width: 100%;
+	height: auto;
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.75rem;
+	box-shadow: 0 1.5rem 4rem -1rem hsl(264 60% 10% / 0.45);
+}
+
+:root[data-theme='light'] .screenshot img {
+	border-color: var(--sl-color-gray-5);
+	box-shadow: 0 1.5rem 4rem -1.5rem hsl(264 50% 30% / 0.3);
+}
