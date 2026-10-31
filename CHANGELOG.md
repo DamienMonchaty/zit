@@ -5,6 +5,11 @@ Every release of Zit, newest first. Downloads are on the
 
 ## Unreleased
 
+### Added
+- A website, [damienmonchaty.github.io/zit](https://damienmonchaty.github.io/zit/):
+  installing, connecting GitHub, every feature, the search syntax and the
+  keyboard shortcuts.
+
 ## [0.1.2] — 2026-10-29
 
 ### Fixed
