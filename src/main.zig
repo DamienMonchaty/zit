@@ -8495,6 +8495,8 @@ fn tabList() void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false });
     defer row.deinit();
     const width = TAB_W;
+    // No rule before the first tab.
+    tab_prev_active = true;
 
     // Only recorded here, run after the frame: selecting or closing one
     // rebuilds the snapshots the rest of this frame is drawn from. The
@@ -9126,23 +9128,41 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     var hit: TabHit = .none;
     const lit = if (look.slot) |s| (if (tab_drop_over) |o| o[0] == s[0] and o[1] == s[1] else false) else false;
 
-    // Square and the strip's full height, a hairline between: the active tab
-    // is the one on the toolbar's ground, joined to the bar below it.
+    // Browser tabs, as GitComet's: the active one raised on the toolbar's
+    // ground, its top corners round, outlined on top and on its sides and
+    // open below — one piece with the bar under it. The others lie flat on
+    // the strip, a short rule between two, lit under the pointer.
+    const prev_active = tab_prev_active;
+    tab_prev_active = active;
     var face = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
         .expand = .vertical,
         .background = true,
         .color_fill = .{ .color = if (lit) style.accentDim() else if (active) style.surface() else style.background() },
-        .border = .{ .w = 1 },
+        .border = if (active) .{ .x = 1, .y = 1, .w = 1 } else dvui.Rect.all(0),
         .color_border = .{ .color = style.border() },
-        .margin = dvui.Rect.all(0),
+        .corners = if (active) .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr } else dvui.CornerRect.all(0),
+        .margin = .{ .x = TAB_GAP / 2, .y = TAB_TOP, .w = TAB_GAP / 2 },
         .padding = .{ .w = style.space.xs },
     });
     defer face.deinit();
     const face_rs = face.data().borderRectScale();
+    const s = face_rs.s;
     rect_out.* = face_rs.r;
-    // The hairline below it, less the 1 px edge on its right.
-    if (active) active_tab_foot = .{ .x = face_rs.r.x, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - face_rs.s, .h = face_rs.s };
+    // The strip's hairline is rubbed out under it, between its side edges.
+    if (active) active_tab_foot = .{ .x = face_rs.r.x + s, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - 2 * s, .h = s };
+    if (!active and !lit) {
+        // Under the pointer, a plate a little in from the tab's edges.
+        if (face_rs.r.contains(dvui.currentWindow().mouse_pt)) {
+            (dvui.Rect.Physical{ .x = face_rs.r.x, .y = face_rs.r.y + 2 * s, .w = face_rs.r.w, .h = face_rs.r.h - 6 * s })
+                .fill(dvui.CornerRect.Physical.all(5 * s), .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
+        }
+        // The rule from the tab before, unless either of them is the raised one.
+        if (!prev_active) {
+            (dvui.Rect.Physical{ .x = face_rs.r.x - (TAB_GAP / 2) * s - s / 2, .y = face_rs.r.y + (face_rs.r.h - 16 * s) / 2 - 2 * s, .w = s, .h = 16 * s })
+                .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
+        }
+    }
 
     var bw: dvui.ButtonWidget = undefined;
     var id_buf: [16]u8 = undefined;
@@ -9159,12 +9179,13 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     bw.processEvents();
     if (look.slot) |slot| tabDragStart(bw.data(), slot);
 
-    const font = if (active) style.tabBold() else style.tab();
+    const font = style.tab();
     // A button lays its children over each other: the icon and the name go
     // in a row of their own.
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
-    // A repository's branch, or the new-tab page's plus: what kind of tab.
-    dvui.icon(@src(), "tab_icon", look.icon, .{ .fill_color = .{ .color = if (active) style.accent() else style.textMuted() } }, .{
+    // A repository's initials on a badge, as GitComet marks its tabs —
+    // the accent's on the active one; the new-tab page's plus.
+    if (look.slot != null) tabBadge(name, active) else dvui.icon(@src(), "tab_icon", look.icon, .{ .fill_color = .{ .color = if (active) style.accent() else style.textMuted() } }, .{
         .min_size_content = .{ .w = 14, .h = 14 },
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.sm },
@@ -9188,8 +9209,39 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     if (bw.clicked()) hit = .select;
     bw.deinit();
 
-    if (iconButton(@src(), "tab_close", "Close this tab — Ctrl+W", dvui.entypo.cross, style.textFaint())) hit = .close;
+    // The × on the active tab and the one under the pointer; on the others its
+    // room is kept, so a tab does not change width as the pointer crosses it.
+    const show_close = active or face_rs.r.contains(dvui.currentWindow().mouse_pt);
+    if (iconButton(@src(), "tab_close", "Close this tab — Ctrl+W", dvui.entypo.cross, if (show_close) style.textFaint() else dvui.Color.transparent)) hit = .close;
     return hit;
+}
+
+/// Where the tab before this one was the raised one, for the rule between.
+var tab_prev_active = true;
+/// The strip shows above a tab, and between two.
+const TAB_TOP: f32 = 4;
+const TAB_GAP: f32 = 4;
+
+/// A repository's initials on a rounded square, before its name in a tab.
+fn tabBadge(name: []const u8, active: bool) void {
+    var badge = dvui.box(@src(), .{}, .{
+        .background = true,
+        .color_fill = .{ .color = if (active) style.accentDim() else style.border() },
+        .corners = dvui.CornerRect.all(4),
+        .min_size_content = .{ .w = 18, .h = 18 },
+        .max_size_content = .size(.{ .w = 18, .h = 18 }),
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    defer badge.deinit();
+    var buf: [8]u8 = undefined;
+    dvui.label(@src(), "{s}", .{initials(&buf, name)}, .{
+        .font = style.tinyBold(),
+        .color_text = .{ .color = if (active) style.accent() else style.textMuted() },
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+        .padding = dvui.Rect.all(0),
+    });
 }
 
 /// The open repository's pull requests, at the strip's right end before
