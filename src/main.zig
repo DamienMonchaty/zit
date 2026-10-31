@@ -3176,6 +3176,9 @@ fn collectApi() void {
     if (failed) |why| {
         clearApiQueue();
         setCommandError(why);
+        // The dialog stays, with what went wrong, to try again.
+        pr_creating = false;
+        pr_created = 0;
         return;
     }
     switch (api_then) {
@@ -3188,6 +3191,19 @@ fn collectApi() void {
         .ask_reviewers => askReviewers(github.split(w.out).body),
     }
     if (api_queue.items.len > 0) return startNextApi();
+    // A request just made, its reviewers and labels set: open it, in the
+    // list read again with it.
+    if (pr_created != 0) {
+        const n = pr_created;
+        pr_created = 0;
+        pr_creating = false;
+        pr_new_open = false;
+        new_tab_open = false;
+        pr_filter = .open;
+        active_view = .pulls;
+        refreshRequests();
+        return selectRequest(n);
+    }
     refreshRequests();
     if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
     if (api_fetch_after) {
@@ -3205,11 +3221,13 @@ fn askReviewers(body: []const u8) void {
         api_assignees.clearRetainingCapacity();
         api_labels.clearRetainingCapacity();
     }
-    if (api_reviewers.items.len + api_assignees.items.len + api_labels.items.len == 0) return;
     var a: std.heap.ArenaAllocator = .init(gpa);
     defer a.deinit();
     const made = std.json.parseFromSliceLeaky(struct { number: u32 = 0 }, a.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
     if (made.number == 0) return;
+    // Opened once the calls below are done, with what they set on it.
+    pr_created = made.number;
+    if (api_reviewers.items.len + api_assignees.items.len + api_labels.items.len == 0) return;
     var path: [512]u8 = undefined;
     if (api_reviewers.items.len > 0) {
         const reviewers = std.fmt.allocPrint(a.allocator(), "{{\"reviewers\":{s}}}", .{api_reviewers.items}) catch return;
@@ -4854,31 +4872,6 @@ fn requestList() void {
             if (chipButton(@src(), dvui.entypo.chevron_left, "History — Esc", false)) closePulls();
             dvui.label(@src(), "Pull requests", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
         }
-        // The filters, each with how many it holds.
-        {
-            var tabs = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
-            defer tabs.deinit();
-            var drafts: usize = 0;
-            var mine: usize = 0;
-            for (pr.list) |e| {
-                drafts += @intFromBool(e.draft);
-                mine += @intFromBool(me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(e.author, me_gh.items));
-            }
-            const items = [_]struct { PrFilter, []const u8, ?usize }{
-                .{ .open, "Open", pr.list.len },
-                .{ .review, "To review", requestsToReview() },
-                .{ .mine, "Mine", mine },
-                .{ .drafts, "Drafts", drafts },
-                .{ .merged, "Merged", null },
-                .{ .closed, "Closed", null },
-            };
-            for (items, 0..) |it, i| {
-                if (filterChip(i, it[1], it[2], pr_filter == it[0], it[0] == .review)) {
-                    pr_filter = it[0];
-                    if (it[0] == .merged or it[0] == .closed) pr.refreshPast(repo_path.items, if (it[0] == .merged) .merged else .closed);
-                }
-            }
-        }
         // The search, the order, and the two buttons.
         {
             var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.xs } });
@@ -4888,6 +4881,7 @@ fn requestList() void {
                 defer cell.deinit();
                 _ = searchField(@src(), &pr_search, "Search title, #, author, branch…", "pr_search", dvui.Rect.all(0));
             }
+            prFilterMenu();
             prSortMenu();
             if (iconButton(@src(), "pr_new", "Create one for this branch", dvui.entypo.plus, style.textMuted())) requestCreateRequest();
             if (iconButton(@src(), "pr_refresh", "Refresh", dvui.entypo.ccw, style.textMuted())) {
@@ -4906,7 +4900,10 @@ fn requestList() void {
         .failed => if (pr_filter == .merged or pr_filter == .closed) sidebarNote(@src(), "Could not list them.") else requestsError(),
         .ready, .idle => {},
     }
-    const order = shownRequests(dvui.currentWindow().arena());
+    // From the same list as `source`, read once: a filter clicked further
+    // up this function switches `requestSource()` to the merged or closed
+    // ones, and indexes from one list read out of the other ran past its end.
+    const order = shownRequests(dvui.currentWindow().arena(), source);
     // None picked yet: the checked-out branch's own, else the first.
     if (pr_selected == null and order.len > 0) {
         const head = if (history) |h| h.head orelse "" else "";
@@ -4927,9 +4924,8 @@ fn requestList() void {
 }
 
 /// The list the filter, the search and the sort leave, as indexes into
-/// `requestSource()`, in `a`: what is drawn, and what ↑ and ↓ walk.
-fn shownRequests(a: std.mem.Allocator) []u32 {
-    const source = requestSource();
+/// `source`, in `a`: what is drawn, and what ↑ and ↓ walk.
+fn shownRequests(a: std.mem.Allocator, source: []const pr.Request) []u32 {
     var order: std.ArrayList(u32) = .empty;
     for (source, 0..) |entry, i| if (requestShown(entry)) order.append(a, @intCast(i)) catch break;
     const Cmp = struct {
@@ -4959,7 +4955,7 @@ fn requestSource() []const pr.Request {
 /// The request `delta` along the list from the one picked: ↑ and ↓.
 fn stepRequest(delta: i2) void {
     const source = requestSource();
-    const order = shownRequests(dvui.currentWindow().arena());
+    const order = shownRequests(dvui.currentWindow().arena(), source);
     if (order.len == 0) return;
     var at: ?usize = null;
     if (pr_selected) |n| for (order, 0..) |i, k| if (source[i].number == n) {
@@ -4973,36 +4969,66 @@ fn stepRequest(delta: i2) void {
     selectRequest(source[order[next]].number);
 }
 
-/// One of the list's filters: its name and count, lit while picked. `urgent`
-/// colours a count that is waiting on you.
-fn filterChip(id: usize, caption: []const u8, count: ?usize, on: bool, urgent: bool) bool {
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{ .draw_focus = false }, .{
-        .id_extra = id,
-        .tag = frameTag("prfilter", caption),
-        .background = true,
-        .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
-        .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = if (on) style.accent().opacity(0.4) else style.border() },
-        .corners = .all(100),
-        .margin = .{ .w = style.space.xs, .y = 2, .h = 2 },
-        .padding = .{ .x = style.space.md, .y = 2, .w = style.space.md, .h = 2 },
-    });
-    bw.processEvents();
-    bw.drawBackground();
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-        defer row.deinit();
-        dvui.label(@src(), "{s}", .{caption}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = if (on) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        if (count) |n| if (n > 0) {
-            const hue = if (urgent) style.get().orange else style.accent();
-            dvui.label(@src(), "{d}", .{n}, .{ .font = style.tinyBold(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs }, .padding = dvui.Rect.all(0) });
-        };
+/// Which requests the list shows, as a select beside the search: open,
+/// waiting on your review, yours, drafts, merged, closed — each with how
+/// many it holds, where that is known without asking.
+fn prFilterMenu() void {
+    var drafts: usize = 0;
+    var mine: usize = 0;
+    for (pr.list) |e| {
+        drafts += @intFromBool(e.draft);
+        mine += @intFromBool(me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(e.author, me_gh.items));
     }
-    const clicked = bw.clicked();
-    bw.deinit();
-    return clicked;
+    const items = [_]struct { PrFilter, []const u8, ?usize }{
+        .{ .open, "Open", pr.list.len },
+        .{ .review, "To review", requestsToReview() },
+        .{ .mine, "Mine", mine },
+        .{ .drafts, "Drafts", drafts },
+        .{ .merged, "Merged", null },
+        .{ .closed, "Closed", null },
+    };
+    const current = for (items) |it| {
+        if (it[0] == pr_filter) break it;
+    } else items[0];
+
+    const button = DropButton.begin(@src(), .{
+        .tag = "pr:filter",
+        .gravity_y = 0.5,
+        .background = false,
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .corners = style.radius.input,
+        .margin = .{ .x = style.space.xs },
+        .padding = dvui.Rect.all(0),
+    });
+    {
+        const lit = button.item.show_active or button.item.mouse_over;
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.md, .y = 5, .w = style.space.sm, .h = 5 },
+        });
+        defer face.deinit();
+        dvui.label(@src(), "{s}", .{current[1]}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        if (current[2]) |n| countPill(n);
+        dvui.icon(@src(), "filter_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs } });
+    }
+    const menu = button.open();
+    defer button.end(menu);
+    const m = menu orelse return;
+    for (items, 0..) |it, i| {
+        var count_buf: [16]u8 = undefined;
+        const count = if (it[2]) |n| std.fmt.bufPrint(&count_buf, "{d}", .{n}) catch "" else "";
+        if (pickRow(i, it[1], count, pr_filter == it[0], null)) {
+            pr_filter = it[0];
+            if (it[0] == .merged or it[0] == .closed) pr.refreshPast(repo_path.items, if (it[0] == .merged) .merged else .closed);
+            m.close();
+            // The keys back to the list: the closed menu would keep ↑ and ↓.
+            dvui.focusWidget(null, dvui.currentWindow().data().id, null);
+        }
+    }
 }
 
 /// The list's order, as a menu.
@@ -5217,38 +5243,49 @@ fn requestDetail() void {
         } else dvui.timer(panel.data().id, PR_REREAD_S * std.time.us_per_s);
     }
 
-    // A column of reading width, centred, as the host's own page has it:
-    // a comment stretched across a wide screen is a line too long to read.
-    const width = @min(PR_READ_W, @max(320, panel.data().contentRect().w - 2 * style.space.xl));
+    // The whole pane, and where there is the room GitHub's sidebar on its
+    // right: who reviews, who it is assigned to, its labels.
+    const total = @max(320, panel.data().contentRect().w - 2 * style.space.xl);
+    const side = total >= PR_SIDE_FROM;
+    const main_w = if (side) total - PR_SIDE_W - style.space.xl else total;
     {
         var head = dvui.box(@src(), .{ .dir = .vertical }, .{
             .gravity_x = 0.5,
-            .min_size_content = .{ .w = width },
-            .max_size_content = .width(width),
+            .min_size_content = .{ .w = total },
+            .max_size_content = .width(total),
             .background = false,
         });
         defer head.deinit();
-        requestHeader(d, &reload);
+        requestHeader(d, &reload, !side);
         requestTabs(d);
     }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     {
-        var body = dvui.box(@src(), .{ .dir = .vertical }, .{
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_x = 0.5,
-            .min_size_content = .{ .w = width },
-            .max_size_content = .width(width),
+            .min_size_content = .{ .w = total },
+            .max_size_content = .width(total),
             .background = false,
             .padding = .{ .y = style.space.xl, .h = style.space.xl },
         });
-        defer body.deinit();
+        defer row.deinit();
+        {
+            var body = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .min_size_content = .{ .w = main_w },
+                .max_size_content = .width(main_w),
+                .background = false,
+            });
+            defer body.deinit();
 
-        switch (pr_tab) {
-            .conversation => requestConversation(d),
-            .commits => requestCommits(d),
-            .files => requestFiles(d),
-            .checks => requestChecks(d),
+            switch (pr_tab) {
+                .conversation => requestConversation(d),
+                .commits => requestCommits(d),
+                .files => requestFiles(d),
+                .checks => requestChecks(d),
+            }
         }
+        if (side) requestSidebar(d);
     }
     scroll.deinit();
 }
@@ -5348,8 +5385,167 @@ fn requestConversation(d: pr.Detail) void {
 var pr_cards: std.AutoHashMapUnmanaged(usize, bool) = .empty;
 var pr_cards_all: ?bool = null;
 const CARDS_OPEN_AT_END = 3;
-/// The width a request is read at.
-const PR_READ_W: f32 = 800;
+/// The sidebar beside it, and the width of pane it needs to be there.
+const PR_SIDE_W: f32 = 220;
+const PR_SIDE_FROM: f32 = 700;
+
+/// GitHub's sidebar: who is asked to review and where each stands, who it
+/// is assigned to, its labels — each head dropping the list to change it.
+fn requestSidebar(d: pr.Detail) void {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .min_size_content = .{ .w = PR_SIDE_W },
+        .max_size_content = .width(PR_SIDE_W),
+        .background = false,
+        .margin = .{ .x = style.space.xl },
+    });
+    defer col.deinit();
+
+    sideHeading(.reviewers, d);
+    if (d.reviewers.len == 0) sideNone(0, "No reviews yet");
+    for (d.reviewers, 0..) |r, i| sideReviewer(i, r);
+    sideRule(0);
+
+    sideHeading(.assignees, d);
+    if (d.assignees.len == 0) sideNone(1, "No one assigned");
+    for (d.assignees, 0..) |login, i| {
+        // Numbered past the reviewers, on the same column.
+        var line = sidePerson(100 + i, login);
+        line.deinit();
+    }
+    sideRule(1);
+
+    sideHeading(.labels, d);
+    if (d.labels.len == 0) sideNone(2, "None yet");
+    if (d.labels.len > 0) {
+        var wrap = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
+        defer wrap.deinit();
+        for (d.labels, 0..) |l, i| {
+            var cell = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false, .margin = .{ .y = 2, .h = 2 } });
+            defer cell.deinit();
+            tinyBadge(@src(), 0, l.name, labelColor(l.color));
+        }
+    }
+}
+
+const SideKind = enum { reviewers, assignees, labels };
+
+/// The list a sidebar section's picker works on while it is open: who, or
+/// which labels, as on the request when it opened, each click since.
+var side_list: std.ArrayList(u8) = .empty;
+
+/// A sidebar section's head, GitHub's way: its name and a gear, the whole
+/// line a button that drops the section's list. Each tick goes to GitHub at
+/// once; the request is read again after.
+fn sideHeading(kind: SideKind, d: pr.Detail) void {
+    const id: usize = 10 + @as(usize, @intFromEnum(kind));
+    const caption: []const u8 = switch (kind) {
+        .reviewers => "Reviewers",
+        .assignees => "Assignees",
+        .labels => "Labels",
+    };
+    const editable = requestOpen(d);
+    var button = DropButton.begin(@src(), .{
+        .id_extra = id,
+        .tag = frameTag("side", caption),
+        .expand = .horizontal,
+        .gravity_y = 0,
+        .background = false,
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .corners = style.radius.input,
+        .margin = .{ .h = style.space.xs },
+        .padding = .{ .x = 4, .y = 3, .w = 4, .h = 3 },
+    });
+    button.min_w = 260;
+    {
+        const lit = editable and (button.item.show_active or button.item.mouse_over);
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer line.deinit();
+        dvui.label(@src(), "{s}", .{caption}, .{ .font = style.smallBold(), .color_text = .{ .color = if (lit) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (editable) dvui.icon(@src(), "side_gear", dvui.entypo.cog, .{ .fill_color = .{ .color = if (lit) style.accent() else style.textFaint() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5 });
+    }
+    const menu = button.open();
+    defer button.end(menu);
+    const m = menu orelse {
+        if (pick_open == id) pick_open = null;
+        return;
+    };
+    if (!editable) return m.close();
+    // Opened: the list as the request has it, and who can be asked read.
+    if (pick_open != id) {
+        pick_open = id;
+        pick_filter.clearRetainingCapacity();
+        side_list.clearRetainingCapacity();
+        switch (kind) {
+            .reviewers => for (d.reviewers) |r| listToggle(&side_list, r.login),
+            .assignees => for (d.assignees) |login| listToggle(&side_list, login),
+            .labels => for (d.labels) |l| listToggle(&side_list, l.name),
+        }
+        pr.loadMeta(repo_path.items);
+    }
+
+    const a = dvui.currentWindow().arena();
+    var path: [512]u8 = undefined;
+    switch (kind) {
+        .reviewers => if (peopleRows(&side_list, true)) |login| {
+            const body = std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, login)}) catch return;
+            if (listHas(side_list.items, login))
+                requestApi("Asking for a review", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none)
+            else
+                requestApi("Withdrawing a review", "DELETE", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none);
+        },
+        .assignees => if (peopleRows(&side_list, false)) |_| {
+            const body = std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{jsonList(a, side_list.items)}) catch return;
+            requestApi("Assigning", "PATCH", apiPath(&path, "/issues/{d}", .{d.number}), body, .none);
+        },
+        .labels => if (labelRows(&side_list)) |_| {
+            const body = std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{jsonCommaList(a, side_list.items)}) catch return;
+            requestApi("Labelling", "PUT", apiPath(&path, "/issues/{d}/labels", .{d.number}), body, .none);
+        },
+    }
+}
+
+fn sideNone(id: usize, text: []const u8) void {
+    dvui.label(@src(), "{s}", .{text}, .{ .id_extra = id, .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2, .h = style.space.xs } });
+}
+
+fn sideRule(id: usize) void {
+    var line = dvui.box(@src(), .{}, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .min_size_content = .{ .h = 1 },
+        .max_size_content = .height(1),
+        .background = true,
+        .color_fill = .{ .color = style.border() },
+        .margin = .{ .y = style.space.md, .h = style.space.md },
+    });
+    line.deinit();
+}
+
+/// A reviewer: who, and where they stand, as an icon of its colour.
+fn sideReviewer(id: usize, r: pr.Reviewer) void {
+    const icon: []const u8, const hue: dvui.Color = if (std.mem.eql(u8, r.state, "APPROVED"))
+        .{ dvui.entypo.check, style.success() }
+    else if (std.mem.eql(u8, r.state, "CHANGES_REQUESTED"))
+        .{ dvui.entypo.cross, style.danger() }
+    else if (std.mem.eql(u8, r.state, "COMMENTED"))
+        .{ dvui.entypo.chat, style.textMuted() }
+    else
+        .{ dvui.entypo.dot_single, style.get().orange };
+    var line = sidePerson(id, r.login);
+    defer line.deinit();
+    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+    dvui.icon(@src(), "review_state", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5 });
+}
+
+/// A person on a line of the sidebar: their picture and login. The line
+/// is left open for what follows on it.
+fn sidePerson(id: usize, login: []const u8) *dvui.BoxWidget {
+    const line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .y = 3, .h = 3 } });
+    avatarSized(@src(), 0, requestAuthor(login), null, null, 20);
+    dvui.label(@src(), "{s}", .{login}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    return line;
+}
 
 fn cardOpen(id: usize, default: bool) bool {
     return pr_cards.get(id) orelse pr_cards_all orelse default;
@@ -5398,8 +5594,12 @@ const TimelineRow = struct {
 };
 
 fn railAvatar(login: []const u8) void {
-    avatarSized(@src(), 0, requestAuthor(login), null, null, 28);
+    avatarSized(@src(), 0, requestAuthor(login), null, null, RAIL_DOT);
 }
+
+/// What sits on the timeline's rail — a picture, an icon on a disc — all
+/// one size, so the rail reads as one line of marks.
+const RAIL_DOT: f32 = 24;
 
 /// An icon on a disc of `hue`'s tint, for an event with no words.
 const RailIcon = struct { icon: []const u8, hue: dvui.Color };
@@ -5411,9 +5611,9 @@ fn railIcon(arg: RailIcon) void {
         .color_fill = .{ .color = style.tint(arg.hue) },
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = arg.hue.opacity(0.5) },
-        .corners = .all(12),
-        .min_size_content = .{ .w = 24, .h = 24 },
-        .max_size_content = .size(.{ .w = 24, .h = 24 }),
+        .corners = .all(RAIL_DOT / 2),
+        .min_size_content = .{ .w = RAIL_DOT, .h = RAIL_DOT },
+        .max_size_content = .size(.{ .w = RAIL_DOT, .h = RAIL_DOT }),
         .padding = dvui.Rect.all(0),
     });
     defer disc.deinit();
@@ -5710,7 +5910,7 @@ var pr_tab: PrTab = .conversation;
 /// The request's head, above its tabs: where it stands as a pill, its title,
 /// who wants what merged where, who reviews it, its labels, and a line on
 /// what still stands between it and a merge.
-fn requestHeader(d: pr.Detail, reload: *bool) void {
+fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool) void {
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .background = true,
@@ -5767,8 +5967,8 @@ fn requestHeader(d: pr.Detail, reload: *bool) void {
         sizeMarks(d.additions, d.deletions);
         dvui.label(@src(), "{d} file{s}", .{ d.files, plural(d.files) }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
     }
-    // Reviewers, assignees, labels.
-    if (d.reviewers.len + d.assignees.len + d.labels.len > 0) {
+    // Reviewers, assignees, labels — here only where the sidebar has no room.
+    if (people_inline and d.reviewers.len + d.assignees.len + d.labels.len > 0) {
         var line = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .margin = .{ .h = style.space.sm } });
         defer line.deinit();
         for (d.reviewers, 0..) |r, i| reviewerChip(i, r);
@@ -5810,18 +6010,33 @@ var pr_edit_title: std.ArrayList(u8) = .empty;
 var pr_edit_body: std.ArrayList(u8) = .empty;
 var pr_edit_reviewers: std.ArrayList(u8) = .empty;
 var pr_edit_labels: std.ArrayList(u8) = .empty;
+var pr_edit_assignees: std.ArrayList(u8) = .empty;
+var pr_edit_base: std.ArrayList(u8) = .empty;
+var pr_edit_draft = false;
 
+/// The edit dialog, filled in with the request as it is: what it says,
+/// where it goes, who reviews, who it is assigned to, its labels, its type.
 fn openPrEdit(d: pr.Detail) void {
     pr_edit_open = true;
     pr_edit_rect = .{};
-    for ([_]*std.ArrayList(u8){ &pr_edit_title, &pr_edit_body, &pr_edit_reviewers, &pr_edit_labels }) |t| t.clearRetainingCapacity();
+    for (prEditLists()) |t| t.clearRetainingCapacity();
     pr_edit_title.appendSlice(gpa, d.title) catch {};
     pr_edit_body.appendSlice(gpa, d.body) catch {};
+    pr_edit_base.appendSlice(gpa, d.base) catch {};
+    for (d.reviewers) |r| listToggle(&pr_edit_reviewers, r.login);
+    for (d.assignees) |login| listToggle(&pr_edit_assignees, login);
+    for (d.labels) |l| listToggle(&pr_edit_labels, l.name);
+    pr_edit_draft = d.draft;
+    pr.loadMeta(repo_path.items);
+}
+
+fn prEditLists() [6]*std.ArrayList(u8) {
+    return .{ &pr_edit_title, &pr_edit_body, &pr_edit_reviewers, &pr_edit_labels, &pr_edit_assignees, &pr_edit_base };
 }
 
 fn clearPrEdit() void {
     pr_edit_open = false;
-    for ([_]*std.ArrayList(u8){ &pr_edit_title, &pr_edit_body, &pr_edit_reviewers, &pr_edit_labels }) |t| {
+    for (prEditLists()) |t| {
         t.deinit(gpa);
         t.* = .empty;
     }
@@ -5838,7 +6053,7 @@ fn prEditDialog() void {
     var title_buf: [48]u8 = undefined;
     dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
 
-    const width = @min(PR_DIALOG_W, win.w - 80);
+    const width = @min(PR_CREATE_W, win.w - 80);
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = width },
         .max_size_content = .width(width),
@@ -5846,6 +6061,15 @@ fn prEditDialog() void {
         .padding = dvui.Rect.all(style.space.xl),
     });
     defer body.deinit();
+
+    // As the create dialog has it: where it goes — where it comes from is
+    // fixed once it is made — its words, who and what, its type.
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        branchPicker(0, "Into", &pr_edit_base, .remote);
+        fixedField(1, "From", if (pr.detail) |d| d.head else "");
+    }
     var entered = false;
     _ = dialogField(@src(), 0, "Title", &pr_edit_title, "What it does", false, &entered);
     dialogLabel(@src(), "Description");
@@ -5858,35 +6082,92 @@ fn prEditDialog() void {
         }, settingsInput().override(.{ .tag = "pr_edit:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
         te.deinit();
     }
-    _ = dialogField(@src(), 1, "Add reviewers", &pr_edit_reviewers, "logins, separated by commas", false, &entered);
-    _ = dialogField(@src(), 2, "Add labels", &pr_edit_labels, "bug, enhancement…", false, &entered);
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        peoplePicker(2, "Reviewers", &pr_edit_reviewers, "Ask for reviews", true, "pr_edit:reviewers");
+        peoplePicker(3, "Assignees", &pr_edit_assignees, "Assign someone", false, "pr_edit:assignees");
+        labelPicker(4, &pr_edit_labels, "pr_edit:labels");
+    }
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
+        typePicker(5, &pr_edit_draft, "pr_edit:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) pr_edit_open = false;
         if (dialogButton(@src(), "Save", true)) savePrEdit();
     }
-    if (escapePressed()) pr_edit_open = false;
+    if (escapePressed() and pick_open == null) pr_edit_open = false;
 }
-
-/// The pull request dialogs' width: a form, not a page.
-const PR_DIALOG_W: f32 = 560;
 
 fn savePrEdit() void {
     const title = std.mem.trim(u8, pr_edit_title.items, " \n\t");
     if (title.len == 0) return setCommandError("A request needs a title.");
+    const d = pr.detail orelse return;
     const a = dvui.currentWindow().arena();
-    const number = pr_selected orelse return;
+    const number = d.number;
     var path: [512]u8 = undefined;
-    // Title and description, then whoever is asked to review, then labels:
-    // three calls, the later ones only after the one before went through.
-    requestApi("Saving", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_edit_body.items } }), .none);
-    const reviewers = jsonList(a, pr_edit_reviewers.items);
-    if (reviewers.len > 2) requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{reviewers}) catch return, .none);
-    const labels = jsonList(a, pr_edit_labels.items);
-    if (labels.len > 2) requestApi("Labelling", "POST", apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{labels}) catch return, .none);
+
+    // Its words, and where it goes.
+    const base = std.mem.trim(u8, pr_edit_base.items, " ");
+    requestApi("Saving", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_edit_body.items }, .{ "base", if (base.len > 0) base else d.base } }), .none);
+
+    // Reviewers newly asked, and those asked no longer — only one who has
+    // not answered can be: a review given stays given.
+    var added: std.ArrayList(u8) = .empty;
+    var removed: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, pr_edit_reviewers.items, ',');
+    while (it.next()) |raw| {
+        const login = std.mem.trim(u8, raw, " ");
+        if (login.len == 0) continue;
+        const known = for (d.reviewers) |r| {
+            if (std.ascii.eqlIgnoreCase(r.login, login)) break true;
+        } else false;
+        if (!known) listAppend(a, &added, login);
+    }
+    for (d.reviewers) |r| {
+        if (std.mem.eql(u8, r.state, "REQUESTED") and !listHas(pr_edit_reviewers.items, r.login)) listAppend(a, &removed, r.login);
+    }
+    if (added.items.len > 0) requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, added.items)}) catch return, .none);
+    if (removed.items.len > 0) requestApi("Withdrawing reviews", "DELETE", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, removed.items)}) catch return, .none);
+
+    // Assignees and labels as picked, the whole of each, where they changed.
+    if (!sameNames(pr_edit_assignees.items, d.assignees)) {
+        requestApi("Assigning", "PATCH", apiPath(&path, "/issues/{d}", .{number}), std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{jsonList(a, pr_edit_assignees.items)}) catch return, .none);
+    }
+    var label_names: std.ArrayList([]const u8) = .empty;
+    for (d.labels) |l| label_names.append(a, l.name) catch {};
+    if (!sameNames(pr_edit_labels.items, label_names.items)) {
+        requestApi("Labelling", "PUT", apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{jsonCommaList(a, pr_edit_labels.items)}) catch return, .none);
+    }
+
+    // Ready for review, or back to a draft.
+    if (pr_edit_draft != d.draft) {
+        if (pr_edit_draft) requestOnRequest("Making a draft", "convertPullRequestToDraft", d.id) else requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
+    }
     pr_edit_open = false;
+}
+
+/// `item` after the comma-separated `list`, in `a`.
+fn listAppend(a: std.mem.Allocator, list: *std.ArrayList(u8), item: []const u8) void {
+    if (list.items.len > 0) list.appendSlice(a, ", ") catch return;
+    list.appendSlice(a, item) catch {};
+}
+
+/// Whether the comma-separated `list` names exactly `names`, in any order.
+fn sameNames(list: []const u8, names: []const []const u8) bool {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |raw| {
+        const x = std.mem.trim(u8, raw, " ");
+        if (x.len == 0) continue;
+        n += 1;
+        const known = for (names) |name| {
+            if (std.mem.eql(u8, name, x)) break true;
+        } else false;
+        if (!known) return false;
+    }
+    return n == names.len;
 }
 
 /// A request's state, on a pill of its colour.
@@ -7263,7 +7544,7 @@ const DropButton = struct {
     fn begin(src: std.builtin.SourceLocation, opts: dvui.Options) DropButton {
         // Centred on the line, unless told otherwise: in a column, under a
         // caption, a centred one would sit over it.
-        const bar = dvui.menu(src, .horizontal, .{ .background = false, .gravity_y = opts.gravity_y orelse 0.5, .expand = opts.expand, .padding = dvui.Rect.all(0), .margin = dvui.Rect.all(0) });
+        const bar = dvui.menu(src, .horizontal, .{ .id_extra = opts.id_extra, .background = false, .gravity_y = opts.gravity_y orelse 0.5, .expand = opts.expand, .padding = dvui.Rect.all(0), .margin = dvui.Rect.all(0) });
         return .{ .bar = bar, .item = dvui.menuItem(@src(), .{ .submenu = true }, opts) };
     }
 
@@ -11852,6 +12133,11 @@ var pr_new_labels: std.ArrayList(u8) = .empty;
 /// another opening starts with nothing typed.
 var pick_filter: std.ArrayList(u8) = .empty;
 var pick_open: ?usize = null;
+/// The request is being made: the dialog waits on it, then gives way to it.
+var pr_creating = false;
+/// The number GitHub gave the one just made, until the calls after it —
+/// its reviewers, assignees, labels — are done and it can be opened.
+var pr_created: u32 = 0;
 
 fn openPrCreate() void {
     const h = history orelse return;
@@ -12019,20 +12305,32 @@ fn prCreateDialog() void {
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
         defer line.deinit();
-        peoplePicker(2, "Reviewers", &pr_new_reviewers, "Ask for reviews", true);
-        peoplePicker(3, "Assignees", &pr_new_assignees, "Assign someone", false);
-        labelPicker(4, &pr_new_labels);
+        peoplePicker(2, "Reviewers", &pr_new_reviewers, "Ask for reviews", true, "pr_new:reviewers");
+        peoplePicker(3, "Assignees", &pr_new_assignees, "Assign someone", false, "pr_new:assignees");
+        labelPicker(4, &pr_new_labels, "pr_new:labels");
     }
 
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
-        typePicker(5);
+        typePicker(5, &pr_new_draft, "pr_new:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (dialogButton(@src(), "Cancel", false)) pr_new_open = false;
-        if (pushed and dialogButton(@src(), if (pr_new_draft) "Create draft" else "Create pull request", true)) createRequest();
+        if (pr_creating) {
+            // Waiting on GitHub: what for, and nothing to click twice.
+            loadingSpinner(@src());
+            dvui.label(@src(), "Creating the pull request…", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        } else {
+            if (dialogButton(@src(), "Cancel", false)) pr_new_open = false;
+            if (pushed and dialogButton(@src(), if (pr_new_draft) "Create draft" else "Create pull request", true)) createRequest();
+        }
     }
-    if (escapePressed() and pick_open == null) pr_new_open = false;
+    // What GitHub refused, where it was asked.
+    if (!pr_creating) if (command_error) |why| {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.md } });
+        tl.addText(firstLine(why), .{ .font = style.small(), .color_text = .{ .color = style.danger() } });
+        tl.deinit();
+    };
+    if (escapePressed() and pick_open == null and !pr_creating) pr_new_open = false;
 }
 
 /// The create dialog's width: two branches side by side, three pickers.
@@ -12222,72 +12520,125 @@ fn branchPicker(id: usize, caption: []const u8, value: *std.ArrayList(u8), side:
 }
 
 /// People to pick, from those who can be asked on the host: reviewers or
-/// assignees. You are not among the reviewers of your own request.
-fn peoplePicker(id: usize, caption: []const u8, list: *std.ArrayList(u8), placeholder: []const u8, reviewers: bool) void {
+/// assignees.
+fn peoplePicker(id: usize, caption: []const u8, list: *std.ArrayList(u8), placeholder: []const u8, reviewers: bool, tag: []const u8) void {
     var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .w = style.space.md } });
     defer cell.deinit();
     dialogLabel(@src(), caption);
-    const p = picker(id, list.items, placeholder, if (reviewers) "pr_new:reviewers" else "pr_new:assignees");
+    const p = picker(id, list.items, placeholder, tag);
     defer p.end();
     _ = p.menu orelse return;
+    _ = peopleRows(list, reviewers);
+}
+
+/// A people picker's list: a field to narrow it, then everyone who can be
+/// asked, ticked where they are in `list` — you are not among the
+/// reviewers of your own request. The login a click toggled, if one did.
+fn peopleRows(list: *std.ArrayList(u8), reviewers: bool) ?[]const u8 {
     switch (pr.meta_status) {
-        .idle, .loading => return dropHeading(@src(), 0, "LOADING…"),
-        .failed => return dropHeading(@src(), 0, "COULD NOT READ WHO CAN BE ASKED"),
+        .idle, .loading => {
+            dropHeading(@src(), 0, "LOADING…");
+            return null;
+        },
+        .failed => {
+            dropHeading(@src(), 0, "COULD NOT READ WHO CAN BE ASKED");
+            return null;
+        },
         .ready => {},
     }
     pickSearch("Find someone…");
     var rows = pickList();
     defer rows.deinit();
     var shown: usize = 0;
+    var toggled: ?[]const u8 = null;
     for (pr.meta.people, 0..) |person, i| {
         if (reviewers and me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(person.login, me_gh.items)) continue;
         if (!pickShown(person.login, person.name)) continue;
         shown += 1;
-        if (pickRow(i, person.login, person.name, listHas(list.items, person.login), null)) listToggle(list, person.login);
+        if (pickRow(i, person.login, person.name, listHas(list.items, person.login), null)) {
+            listToggle(list, person.login);
+            toggled = person.login;
+        }
     }
     if (shown == 0) dropHeading(@src(), 1, "NOBODY BY THAT NAME");
+    return toggled;
 }
 
 /// The repository's labels, each with its colour and what it is for.
-fn labelPicker(id: usize, list: *std.ArrayList(u8)) void {
+fn labelPicker(id: usize, list: *std.ArrayList(u8), tag: []const u8) void {
     var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false });
     defer cell.deinit();
     dialogLabel(@src(), "Labels");
-    const p = picker(id, list.items, "Add labels", "pr_new:labels");
+    const p = picker(id, list.items, "Add labels", tag);
     defer p.end();
     _ = p.menu orelse return;
+    _ = labelRows(list);
+}
+
+/// A label picker's list; the label a click toggled, if one did.
+fn labelRows(list: *std.ArrayList(u8)) ?[]const u8 {
     switch (pr.meta_status) {
-        .idle, .loading => return dropHeading(@src(), 0, "LOADING…"),
-        .failed => return dropHeading(@src(), 0, "COULD NOT READ THE LABELS"),
+        .idle, .loading => {
+            dropHeading(@src(), 0, "LOADING…");
+            return null;
+        },
+        .failed => {
+            dropHeading(@src(), 0, "COULD NOT READ THE LABELS");
+            return null;
+        },
         .ready => {},
     }
     pickSearch("Find a label…");
     var rows = pickList();
     defer rows.deinit();
     var shown: usize = 0;
+    var toggled: ?[]const u8 = null;
     for (pr.meta.labels, 0..) |label, i| {
         if (!pickShown(label.name, label.description)) continue;
         shown += 1;
-        if (pickRow(i, label.name, label.description, listHas(list.items, label.name), labelColor(label.color))) listToggle(list, label.name);
+        if (pickRow(i, label.name, label.description, listHas(list.items, label.name), labelColor(label.color))) {
+            listToggle(list, label.name);
+            toggled = label.name;
+        }
     }
     if (shown == 0) dropHeading(@src(), 1, if (pr.meta.labels.len == 0) "THE REPOSITORY HAS NO LABELS" else "NO LABEL BY THAT NAME");
+    return toggled;
 }
 
-/// Ready for review, or a draft: what it is opened as.
-fn typePicker(id: usize) void {
+/// Ready for review, or a draft.
+fn typePicker(id: usize, draft: *bool, tag: []const u8) void {
     var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .min_size_content = .{ .w = 200 }, .background = false, .gravity_y = 0.5 });
     defer cell.deinit();
-    const p = picker(id, if (pr_new_draft) "Draft" else "Ready for review", "", "pr_new:type");
+    const p = picker(id, if (draft.*) "Draft" else "Ready for review", "", tag);
     defer p.end();
     const m = p.menu orelse return;
-    if (pickRow(0, "Ready for review", "reviewers are told", !pr_new_draft, null)) {
-        pr_new_draft = false;
+    if (pickRow(0, "Ready for review", "reviewers are told", !draft.*, null)) {
+        draft.* = false;
         m.close();
     }
-    if (pickRow(1, "Draft", "nobody is asked yet", pr_new_draft, null)) {
-        pr_new_draft = true;
+    if (pickRow(1, "Draft", "nobody is asked yet", draft.*, null)) {
+        draft.* = true;
         m.close();
     }
+}
+
+/// A field that shows what cannot be picked here: the branch a request
+/// comes from, once it is made.
+fn fixedField(id: usize, caption: []const u8, value: []const u8) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false });
+    defer cell.deinit();
+    dialogLabel(@src(), caption);
+    var box = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = style.border() },
+        .corners = style.radius.input,
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+    });
+    defer box.deinit();
+    dvui.label(@src(), "{s}", .{value}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
 }
 
 /// Whether `item` is in the comma-separated `list`.
@@ -12365,7 +12716,9 @@ fn createRequest() void {
     if (labels.len > 2) api_labels.appendSlice(gpa, labels) catch {};
     var path: [512]u8 = undefined;
     requestApi("Creating", "POST", apiPath(&path, "/pulls", .{}), body.items, .ask_reviewers);
-    pr_new_open = false;
+    // Open until it is made: then it closes, and the request opens.
+    pr_creating = api_job != null or api_queue.items.len > 0;
+    if (!pr_creating) pr_new_open = false;
 }
 
 /// One open request: its number and title, and the two things to do with one
@@ -19714,7 +20067,7 @@ fn resetUiGlobals() void {
     resolve_undo.deinit(gpa);
     resolve_undo = .empty;
     pr_cards.deinit(gpa);
-    inline for (.{ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter }) |l| {
+    inline for (.{ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
         l.deinit(gpa);
         l.* = .empty;
     }
@@ -22802,6 +23155,65 @@ test "a new pull request's reviewers, labels and type are picked from lists" {
     try std.testing.expect(pr_new_open);
 }
 
+// GitHub's sidebar: a section's head drops its list, and a tick there is
+// sent at once — refused here, with no one signed in, which is the point:
+// it was sent, and the list kept the tick.
+test "the request's sidebar picks its labels from a list, sent at once" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+    pr.detail = .{
+        .number = 42,
+        .title = "Login form",
+        .author = "damien",
+        .state = "OPEN",
+        .head = "feat/login-form",
+        .base = "main",
+        .reviewers = &.{.{ .login = "ann", .state = "APPROVED" }},
+        .labels = &.{.{ .name = "enhancement", .color = "a2eeef" }},
+    };
+    defer pr.detail = null;
+    pr.meta = .{ .labels = &.{ .{ .name = "bug", .color = "d73a4a" }, .{ .name = "enhancement", .color = "a2eeef" } } };
+    pr.meta_status = .ready;
+    defer {
+        pr.meta = .{};
+        pr.meta_status = .idle;
+    }
+    pr_selected = 42;
+    active_view = .pulls;
+    pr.host = .github;
+    defer pr.host = .none;
+    me_loaded = true;
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1600, .h = 800 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    try clickAt(try tagCenter("side:Labels"));
+    try clickAt(try tagCenter("pick:bug"));
+    try std.testing.expect(listHas(side_list.items, "bug"));
+    try std.testing.expect(listHas(side_list.items, "enhancement"));
+    try std.testing.expect(command_error != null);
+
+    // The edit dialog opens on the request as it is.
+    openPrEdit(pr.detail.?);
+    defer clearPrEdit();
+    try std.testing.expectEqualStrings("main", pr_edit_base.items);
+    try std.testing.expect(sameNames(pr_edit_reviewers.items, &.{"ann"}));
+    try std.testing.expect(sameNames(pr_edit_labels.items, &.{"enhancement"}));
+    try std.testing.expect(!sameNames(pr_edit_labels.items, &.{ "enhancement", "bug" }));
+}
+
 test "a request's pane draws every tab" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -22910,6 +23322,22 @@ test "the requests are walked from the keys, starting at the checked-out branch'
     try std.testing.expectEqual(@as(?u32, 1), pr_selected);
     try pressFrame(.four, .none);
     try std.testing.expect(pr_tab == .checks);
+
+    // A filter clicked switches the list to the merged ones, shorter than the
+    // open: drawn from the one list, not the other's indexes. This crashed.
+    var past = [_]pr.Request{.{ .number = 9, .title = "merged", .branch = "old", .author = "ann", .draft = false, .updated = 5 }};
+    pr.past = &past;
+    defer pr.past = &.{};
+    try clickAt(try tagCenter("pr:filter"));
+    try clickAt(try tagCenter("pick:Merged"));
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(pr_filter == .merged);
+    try pressFrame(.down, .none);
+    try std.testing.expectEqual(@as(?u32, 9), pr_selected);
+    try clickAt(try tagCenter("pr:filter"));
+    try clickAt(try tagCenter("pick:Open"));
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(pr_filter == .open);
 }
 
 // A clone starts with no repository at all, and opens the one it makes. (A new

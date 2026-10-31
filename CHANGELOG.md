@@ -39,8 +39,13 @@ Every release of Zit, newest first. Downloads are on the
   open the next one; Undo pick and Start over take a file back. A file
   deleted on one side asks plainly — keep it, or delete it — and a binary
   file offers one side's version or the other's, instead of a page of noise.
-- A pull request reads in a column of reading width, centred, as on
-  GitHub. Its comments and reviews fold like an accordion: a click on one's
+- A pull request takes the whole pane, with GitHub's sidebar on its right:
+  who reviews and where each stands, who it is assigned to, its labels.
+  Each section's head drops the list to change it — the people who can be
+  asked, the repository's labels with their colours — and each tick is sent
+  at once. The pictures and the icons down its timeline are one size. Its
+  list's filters — open, to review, mine, drafts, merged, closed — are a
+  select beside the search, each with how many it holds. Its comments and reviews fold like an accordion: a click on one's
   head folds or opens it, a folded one keeps its first line; a long
   conversation opens on the description and the last three, with Expand all
   and Collapse all. Its actions are icons on its title's line — check out,
@@ -65,7 +70,9 @@ Every release of Zit, newest first. Downloads are on the
   colours, and whether it opens ready for review or as a draft — each list
   with a field to narrow it. Reviewers, assignees and labels are set on it
   as soon as GitHub has made it. A branch not on the remote yet is pushed
-  from the dialog.
+  from the dialog. The dialog waits while GitHub makes it, then gives way to
+  the new request, open in the list. The edit dialog is the same form,
+  filled in with the request as it is.
 - A conflict's sides are named: "Keep main", "Keep feature/x", with what each
   is — during a rebase, where git's "ours" is the base and "theirs" your
   own commit, the buttons say so instead of the reverse.
