@@ -30,6 +30,10 @@ Every release of Zit, newest first. Downloads are on the
   the sidebar's icons and hairlines, a count on a pill that reads at a
   glance. Unstaged and Staged fold under their title, as a sidebar section
   does.
+- The toolbar's buttons are drawn as GitComet's action bar's: the icon and
+  its caption side by side on a frame that lights under the pointer, what
+  Pull or Push would move on a pill, Pull and its ways of pulling one split
+  button, and the groups apart by a gap rather than a rule.
 
 ### Removed
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
