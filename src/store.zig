@@ -46,6 +46,8 @@ pub const File = struct {
     first_parent: bool = false,
     /// The graph column's width as dragged; 0 is as wide as the lanes need.
     graph_width: f32 = 0,
+    /// The branch column's width as dragged; 0 is its default.
+    branch_width: f32 = 0,
     /// Open last run's tabs again at start, rather than the start page.
     remember_tabs: bool = true,
     /// The first branch of a repository made from the new-repository dialog.

@@ -5,6 +5,12 @@ Every release of Zit, newest first. Downloads are on the
 
 ## Unreleased
 
+### Changed
+- The history's branch names have a column of their own, **BRANCH / TAG**,
+  before the graph, as in GitKraken: read from its left, joined to their commit
+  by a line of the branch's colour, and cut only where the column ends. Drag
+  its edge to widen it; the width is kept.
+
 ## [0.1.2] — 2026-10-29
 
 ### Fixed
