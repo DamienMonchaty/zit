@@ -39,6 +39,26 @@ Every release of Zit, newest first. Downloads are on the
   open the next one; Undo pick and Start over take a file back. A file
   deleted on one side asks plainly — keep it, or delete it — and a binary
   file offers one side's version or the other's, instead of a page of noise.
+- A pull request reads in a column of reading width, centred, as on
+  GitHub. Its comments and reviews fold like an accordion: a click on one's
+  head folds or opens it, a folded one keeps its first line; a long
+  conversation opens on the description and the last three, with Expand all
+  and Collapse all. Its actions are icons on its title's line — check out,
+  open on GitHub, edit, back to draft, read again — and its readiness line
+  ends with the one thing to do next: rebase it onto its base here (or merge
+  the base in) when it conflicts, Update branch when it is behind, the
+  failing checks, Ready for review for a draft, or Merge.
+- Checking out a pull request works as `gh pr checkout`: its branch tracks
+  the remote's, and a branch already here is brought up to date rather than
+  left behind. A fork's request goes on `pr/N`, never onto a branch of yours
+  of the same name. Update branch and Merge name the commit they were shown
+  at, so GitHub refuses rather than act on a branch that moved; the request
+  is read again once GitHub has updated it.
+- In the pull requests, `↑` `↓` (or `K` `J`) walk the list in its order, `1`
+  to `4` open its tabs, `Ctrl Enter` sends the review box as a comment, and
+  the checked-out branch's request is the one open to begin with.
+- The create and edit pull request dialogs keep a form's width, however long
+  the template and the commits filled into the description are.
 - A conflict's sides are named: "Keep main", "Keep feature/x", with what each
   is — during a rebase, where git's "ours" is the base and "theirs" your
   own commit, the buttons say so instead of the reverse.

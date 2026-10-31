@@ -47,6 +47,15 @@ In a conflicted file, outside a text field:
 | `Enter` | Stage a file with nothing left to resolve, and open the next |
 | `F4` | Next conflicted file |
 
+## Pull requests
+
+| Keys | Does |
+| --- | --- |
+| `↑` `↓`, `K` `J` | Previous / next request in the list |
+| `1` `2` `3` `4` | Conversation, commits, files, checks |
+| `Ctrl+F` | Search the requests |
+| `Ctrl+Enter` | Send what is in the review box, as a comment |
+
 ## Panels
 
 | Keys | Does |
