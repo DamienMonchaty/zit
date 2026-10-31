@@ -9,6 +9,10 @@ Every release of Zit, newest first. Downloads are on the
 - A website, [damienmonchaty.github.io/zit](https://damienmonchaty.github.io/zit/):
   installing, connecting GitHub, every feature, the search syntax and the
   keyboard shortcuts.
+- A zoom for the whole window, as a browser's: `Ctrl =` and `Ctrl -` (the
+  keypad's too) a tenth at a time from 70 to 200 %, `Ctrl 0` back to 100 %,
+  also in the command palette. It is remembered, and shown in the status bar
+  when it is not 100 % — a click there resets it.
 
 ### Changed
 - Zit is roomier, towards GitComet's comfortable density: text a point

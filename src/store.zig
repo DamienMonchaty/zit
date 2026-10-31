@@ -57,6 +57,8 @@ pub const File = struct {
     /// GitHub, through Zit's own sign-in: pull requests, issues, checks, the
     /// account. Off, Zit is a git client and nothing more.
     integrations: bool = true,
+    /// The whole window's zoom, over the system's own scale: 1 is 100 %.
+    zoom: f32 = 1.0,
 };
 
 /// How a commit message is put together. Global rather than per repository:
@@ -206,6 +208,7 @@ test "a workspace survives a round trip through the file" {
         },
         .active_group = 1,
         .active_repo = 0,
+        .zoom = 1.3,
     };
     try std.testing.expect(save(gpa, io, dir, written));
 
@@ -218,6 +221,7 @@ test "a workspace survives a round trip through the file" {
     try std.testing.expectEqualStrings("Odd \"one\"", read.file.groups[1].name);
     try std.testing.expectEqualStrings("/home/me/it's here/", read.file.groups[1].repos[0]);
     try std.testing.expectEqual(@as(usize, 1), read.file.active_group);
+    try std.testing.expectEqual(@as(f32, 1.3), read.file.zoom);
 }
 
 test "a missing or corrupt workspace reads as an empty one" {

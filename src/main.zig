@@ -292,6 +292,7 @@ fn loadWorkspace() void {
     graph_first_parent = loaded.file.first_parent;
     graph_width = loaded.file.graph_width;
     branch_width = loaded.file.branch_width;
+    zoom = zoomStep(loaded.file.zoom);
     // The file's strings die with `loaded`.
     commit_template.clearRetainingCapacity();
     commit_template.appendSlice(gpa, commit_prefs.template) catch {};
@@ -380,12 +381,46 @@ fn writeWorkspace() bool {
         .default_branch = default_branch.items,
         .prune = prune_on_fetch,
         .integrations = integrations,
+        .zoom = zoom,
         .commit = prefs: {
             var prefs = commit_prefs;
             prefs.template = commit_template.items;
             break :prefs prefs;
         },
     });
+}
+
+/// The whole window's zoom, over the system's own scale, as a browser's:
+/// Ctrl+= and Ctrl+- a tenth at a time, Ctrl+0 back to 100 %. Remembered.
+var zoom: f32 = 1.0;
+const ZOOM_MIN: f32 = 0.7;
+const ZOOM_MAX: f32 = 2.0;
+
+/// `to` on the tenths and within the bounds: dvui's own steps add 0.1 to a
+/// float, which drifts, and a file edited by hand can say anything.
+fn zoomStep(to: f32) f32 {
+    if (!std.math.isFinite(to)) return 1.0;
+    return std.math.clamp(@round(to * 10) / 10, ZOOM_MIN, ZOOM_MAX);
+}
+
+/// Within a frame: the next one is laid out at the new size.
+fn setZoom(to: f32) void {
+    const z = zoomStep(to);
+    dvui.currentWindow().content_scale = z;
+    dvui.refresh(null, @src(), null);
+    if (z == zoom) return;
+    zoom = z;
+    saveWorkspace();
+}
+
+/// What a key asks of the zoom: the step, or back to 100 %. The keypad's as
+/// well as the main row's; Cmd on a Mac, through dvui's own binds.
+fn zoomKey(ke: dvui.Event.Key) ?f32 {
+    const mod = ke.mod.control() and !ke.mod.alt();
+    if ((mod and (ke.code == .equal or ke.code == .kp_add)) or ke.matchBind("zoom_in")) return zoom + 0.1;
+    if ((mod and (ke.code == .minus or ke.code == .kp_subtract)) or ke.matchBind("zoom_out")) return zoom - 0.1;
+    if (mod and !ke.mod.shift() and (ke.code == .zero or ke.code == .kp_0)) return 1.0;
+    return null;
 }
 
 /// The General settings: what is saved with the workspace beside the tabs.
@@ -1615,6 +1650,7 @@ fn appInit(win: *dvui.Window) !void {
     // Before the theme, which is one of the things it remembers.
     loadWorkspace();
     applyTheme();
+    win.content_scale = zoom;
     try openRepoFromArgs();
 
     // A machine git has never been told who is using it: every commit would
@@ -4160,6 +4196,9 @@ fn appFrame() !dvui.App.Result {
     if (collectWorkLoad()) dvui.refresh(null, @src(), null);
     if (collectHistoryLoad()) dvui.refresh(null, @src(), null);
     updateWindowTitle();
+    // A zoom key that reached dvui rather than `shortcuts` — under a modal,
+    // say: bounded and remembered all the same.
+    if (dvui.currentWindow().content_scale != zoom) setZoom(dvui.currentWindow().content_scale);
     no_split = 0;
     all_split = 1;
 
@@ -6121,6 +6160,14 @@ fn shortcuts() void {
             stepCommit(if (ke.code == .up) -1 else 1);
             continue;
         }
+        // Taken before dvui's own zoom keys, which are not bounded and not
+        // remembered; held down, they repeat, as a browser's do. In a text
+        // field too: they mean nothing there.
+        if (zoomKey(ke)) |to| {
+            e.handled = true;
+            setZoom(to);
+            continue;
+        }
         // Everything else once per press: a held Ctrl+Z must not undo the
         // history away one repeat at a time.
         if (ke.action != .down) continue;
@@ -7603,6 +7650,8 @@ fn keysDialog() void {
         shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
         shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
         shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
+        shortcutRow(@src(), "Ctrl+= / Ctrl+-", "Zoom in / out, from 70 to 200 %");
+        shortcutRow(@src(), "Ctrl+0", "Back to 100 %");
     }
 
     if (escapePressed()) keys_open = false;
@@ -8156,6 +8205,21 @@ const commands = [_]Command{
     .{ .name = "Show or hide the changes panel", .icon = dvui.entypo.align_right, .keys = "Ctrl+J", .run = struct {
         fn f() void {
             show_detail = !show_detail;
+        }
+    }.f },
+    .{ .name = "Zoom in", .icon = dvui.entypo.plus, .keys = "Ctrl+=", .needs_repo = false, .run = struct {
+        fn f() void {
+            setZoom(zoom + 0.1);
+        }
+    }.f },
+    .{ .name = "Zoom out", .icon = dvui.entypo.minus, .keys = "Ctrl+-", .needs_repo = false, .run = struct {
+        fn f() void {
+            setZoom(zoom - 0.1);
+        }
+    }.f },
+    .{ .name = "Reset the zoom to 100 %", .icon = dvui.entypo.resize_100, .keys = "Ctrl+0", .needs_repo = false, .run = struct {
+        fn f() void {
+            setZoom(1.0);
         }
     }.f },
     .{ .name = "Create a pull request for this branch", .icon = dvui.entypo.merge, .run = requestCreateRequest },
@@ -9289,7 +9353,6 @@ fn tabBadge(name: []const u8, active: bool) void {
         .color_fill = .{ .color = if (active) style.accentDim() else style.border() },
         .corners = dvui.CornerRect.all(4),
         .min_size_content = .{ .w = 18, .h = 18 },
-        .max_size_content = .size(.{ .w = 18, .h = 18 }),
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.sm },
     });
@@ -9300,7 +9363,9 @@ fn tabBadge(name: []const u8, active: bool) void {
         .color_text = .{ .color = if (active) style.accent() else style.textMuted() },
         .gravity_x = 0.5,
         .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
+        // A little room each side: at some zooms the rounded glyphs come out
+        // a pixel wider, and a badge with no room left shows an ellipsis.
+        .padding = .{ .x = 2, .w = 2 },
     });
 }
 
@@ -17217,6 +17282,13 @@ fn statusBar() void {
         .color_fill = .{ .color = style.border() },
     });
 
+    // The zoom, only when it is not 100 %: a click puts it back.
+    if (zoom != 1.0) {
+        var buf: [8]u8 = undefined;
+        const caption = std.fmt.bufPrint(&buf, "{d}%", .{@round(zoom * 100)}) catch "";
+        if (linkButtonTagged(@src(), caption, style.textMuted(), "status:zoom")) setZoom(1.0);
+    }
+
     // The keys, then the panels' folds — side by side, a side each.
     if (iconButtonTagged(@src(), "status_keys", "Keyboard shortcuts", dvui.entypo.keyboard, if (keys_open) style.accent() else style.textMuted(), "status:keys")) {
         keys_open = true;
@@ -17972,6 +18044,7 @@ test "stage, commit and switch branches through the real git commands" {
 /// Reset, not merely freed: `deinit` leaves an ArrayList undefined rather than
 /// empty, and the next test to render a frame reads straight through it.
 fn resetUiGlobals() void {
+    zoom = 1.0;
     clearPickedChanges();
     picked_changes.deinit(gpa);
     picked_changes = .empty;
@@ -18293,6 +18366,38 @@ test "branches are ticked to show alone one by one, and unticked the same way" {
     try std.testing.expectEqualStrings("b", graph_only.items[0]);
     setSolo(null);
     try std.testing.expectEqual(@as(usize, 0), graph_only.items.len);
+}
+
+test "the zoom steps a tenth at a time, within its bounds, and Ctrl+0 or the status bar puts it back" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    try expectNoTag("status:zoom");
+
+    try pressFrame(.equal, .lcontrol);
+    try pressFrame(.kp_add, .lcontrol);
+    try std.testing.expectEqual(@as(f32, 1.2), zoom);
+    try std.testing.expectEqual(@as(f32, 1.2), dvui.currentWindow().content_scale);
+    // Held at the top, whatever is pressed past it.
+    for (0..12) |_| try pressFrame(.equal, .lcontrol);
+    try std.testing.expectEqual(ZOOM_MAX, zoom);
+    try pressFrame(.zero, .lcontrol);
+    try std.testing.expectEqual(@as(f32, 1.0), zoom);
+    for (0..6) |_| try pressFrame(.minus, .lcontrol);
+    try std.testing.expectEqual(ZOOM_MIN, zoom);
+
+    // Off 100 %, the status bar says so, and its click comes back.
+    try clickAt(try tagCenter("status:zoom"));
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqual(@as(f32, 1.0), zoom);
+    try expectNoTag("status:zoom");
+    // A file edited by hand.
+    try std.testing.expectEqual(@as(f32, 1.0), zoomStep(std.math.nan(f32)));
+    try std.testing.expectEqual(@as(f32, 1.3), zoomStep(1.27));
 }
 
 test "down and up walk the history, and the commit pane follows" {
@@ -22056,7 +22161,6 @@ test "a branch's name sits in the branch column, and dragging the column's edge 
     const wider = (dvui.tagGet("header:branches") orelse return error.TagNotFound).rect;
     try std.testing.expect(after.x + after.w <= wider.x + wider.w);
 }
-
 
 test "a hidden branch leaves the graph with its remote copy, and a hidden tag's name goes" {
     gpa = std.testing.allocator;
