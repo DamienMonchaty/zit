@@ -1954,6 +1954,20 @@ fn toggleGraphPref(list: *std.ArrayList([]u8), key: []const u8, name: []const u8
     if (list == &graph_hidden) graphFilterChanged();
 }
 
+/// A ref out of the graph, or back in, as its eye says. A local branch and
+/// the remote branch it tracks are one line of the graph — one tag where they
+/// agree — so they go out and come back together: hiding the local alone left
+/// its commits and its tag up, walked through the remote's.
+fn toggleHidden(ref: git.Ref) void {
+    const hide = !isHidden(ref.name);
+    // Copied first: in tests each toggle reads the history again, and `ref`
+    // points into the old one.
+    const upstream: ?[]u8 = if (ref.kind == .local) if (ref.tracking.upstream) |u| gpa.dupe(u8, u) catch null else null else null;
+    defer if (upstream) |u| gpa.free(u);
+    toggleGraphPref(&graph_hidden, "zit.hidden", ref.name);
+    if (upstream) |u| if (isHidden(u) != hide) toggleGraphPref(&graph_hidden, "zit.hidden", u);
+}
+
 fn unhideAll() void {
     clearNames(&graph_hidden);
     var outcome = run.git(gpa, app_io, repo_path.items, &.{ "config", "--local", "--unset-all", "zit.hidden" });
@@ -10093,18 +10107,19 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         };
     };
 
-    // The header and, beside it, the eye that hides or shows the whole
-    // section in the graph — a sibling, as a button nested in the header's
-    // would never see its click.
+    // The header: the button that folds it, then, in columns of their own at
+    // the right — so nothing moves when one appears — the eye that hides or
+    // shows the whole section in the graph, and the count. Siblings, as a
+    // button nested in the header's would never see its click.
     var head = dvui.box(src, .{ .dir = .horizontal }, .{ .id_extra = id, .tag = frameTag("section", section.label()), .expand = .horizontal, .background = false });
     const header_rect = head.data().borderRectScale().r;
     const head_hover = header_rect.contains(dvui.currentWindow().mouse_pt);
-    // A ref section's eye takes its count's place while the header is
-    // hovered — and for good while every ref in it is hidden — so neither
-    // pushes the other about.
     const eye_kind: ?git.Ref.Kind = section.refKind() orelse (if (section == .remotes) git.Ref.Kind.remote else null);
     const refs_shown: ?bool = if (eye_kind) |k| sectionShown(k) else null;
-    const show_eye = if (refs_shown) |shown| head_hover or !shown else false;
+    // Every ref in it out of the graph: said by fading the title, as a ref
+    // out of the graph is faded, and by the crossed eye staying up.
+    const all_hidden = if (refs_shown) |shown| !shown else false;
+    const ink = if (all_hidden) style.textFaint() else style.textMuted();
     // The hover across the whole line, eye included: drawn by hand, as the
     // ref lines' are.
     if (head_hover) header_rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
@@ -10122,8 +10137,7 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .both,
             .background = false,
-            // Extra on the right: the scroll area keeps a bar there.
-            .padding = .{ .x = style.space.md, .w = style.space.xl },
+            .padding = .{ .x = style.space.md },
         });
         defer row.deinit();
 
@@ -10138,7 +10152,7 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
 
         // Capitals sit high in their line, which keeps room below for
         // descenders they never use: the icons go up to meet them.
-        dvui.icon(@src(), "section_icon", section.icon(), .{ .fill_color = .{ .color = style.textMuted() } }, .{
+        dvui.icon(@src(), "section_icon", section.icon(), .{ .fill_color = .{ .color = ink } }, .{
             .min_size_content = .{ .w = 13, .h = 13 },
             .gravity_y = 0.5,
             .margin = .{ .h = SECTION_ICON_LIFT, .w = style.space.sm },
@@ -10146,33 +10160,62 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
 
         dvui.label(@src(), "{s}", .{section.label()}, .{
             .font = style.section(),
-            .color_text = .{ .color = style.textMuted() },
+            .color_text = .{ .color = ink },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
+    }
 
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+    var clicked = bw.clicked();
+    bw.deinit();
 
-        // The count on a chip of the accent's tint; none, faint and bare.
-        if (!show_eye) dvui.label(@src(), "{d}", .{count}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = if (count > 0) style.accent() else style.textFaint() },
-            .background = count > 0,
-            .color_fill = .{ .color = style.accentDim() },
-            .corners = style.radius.tag,
+    // The eye's column, kept on every header that has one: shown while the
+    // header is hovered, and for good while the whole section is hidden —
+    // the ref lines' eyes do the same in their gutter.
+    if (refs_shown) |shown| sectionEye(eye_kind.?, shown, if (!shown) style.textMuted() else if (head_hover) style.textFaint() else dvui.Color.transparent);
+
+    // The count, on one pill whatever it is — a zero only fainter — then the
+    // ⋯ for the right-click menu, in the column the ref lines' ⋯ take, short
+    // of the bar the scroll area keeps there. A click on the count folds the
+    // section as the rest of the line does.
+    var more_at: ?dvui.Point.Physical = null;
+    {
+        var tail = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .vertical,
+            .background = false,
+            .padding = .{ .x = style.space.xxs, .w = SIDE_RIGHT - style.space.xs },
+        });
+        defer tail.deinit();
+        var pill = dvui.box(@src(), .{}, .{
+            .background = true,
+            // A step up on a hovered line, whose fill is the pill's own colour.
+            .color_fill = .{ .color = if (head_hover) style.border() else style.surfaceRaised() },
+            .corners = .all(COUNT_PILL_H / 2),
+            .min_size_content = .{ .w = COUNT_PILL_MIN_W, .h = COUNT_PILL_H },
+            .max_size_content = .height(COUNT_PILL_H),
             .gravity_y = 0.5,
             .margin = .{ .h = SECTION_ICON_LIFT / 2 },
             .padding = .{ .x = 5, .w = 5 },
         });
+        dvui.label(@src(), "{d}", .{count}, .{
+            .font = style.tinyBold(),
+            .color_text = .{ .color = if (count > 0) style.textMuted() else style.textFaint() },
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+        pill.deinit();
+        // Kept, and only seen on hover, so the count never moves: a header
+        // has the room a ref line's name does not.
+        if (iconButtonTagged(@src(), "section_more", "More…", dvui.entypo.dots_three_horizontal, if (head_hover) style.textMuted() else dvui.Color.transparent, frameTag("section-more", section.label()))) {
+            more_at = dvui.currentWindow().mouse_pt;
+        }
+        if (dvui.clicked(tail.data(), .{})) clicked = true;
     }
-
-    const clicked = bw.clicked();
-    bw.deinit();
     if (clicked) collapsed.* = !collapsed.*;
-    if (show_eye) sectionEye(eye_kind.?, refs_shown.?);
     head.deinit();
 
-    sectionMenu(@src(), section, id, header_rect);
+    sectionMenu(@src(), section, id, header_rect, more_at);
 
     // A filter opens the sections it searches: a match folded away is a
     // match not found.
@@ -10215,7 +10258,7 @@ fn sectionShown(kind: git.Ref.Kind) ?bool {
 
 /// A section's eye: all its refs out of the graph, or all back in — so the
 /// few wanted can be shown again one eye at a time.
-fn sectionEye(kind: git.Ref.Kind, shown: bool) void {
+fn sectionEye(kind: git.Ref.Kind, shown: bool, color: dvui.Color) void {
     const what = switch (kind) {
         .local => "branches",
         .remote => "remote branches",
@@ -10223,7 +10266,7 @@ fn sectionEye(kind: git.Ref.Kind, shown: bool) void {
     };
     var buf: [64]u8 = undefined;
     const hint = std.fmt.bufPrint(&buf, "{s} all the {s} {s} the graph", .{ if (shown) "Hide" else "Show", what, if (shown) "from" else "in" }) catch "";
-    if (iconButtonTagged(@src(), "section_eye", hint, if (shown) dvui.entypo.eye else dvui.entypo.eye_with_line, style.textMuted(), frameTag("eye-all", what))) {
+    if (iconButtonTagged(@src(), "section_eye", hint, if (shown) dvui.entypo.eye else dvui.entypo.eye_with_line, color, frameTag("eye-all", what))) {
         hideAll(kind, shown);
     }
 }
@@ -10244,9 +10287,14 @@ fn hideAll(kind: git.Ref.Kind, hide: bool) void {
     }
     for (h.refs) |ref| {
         if (ref.kind != kind or ref.head) continue;
-        if (isHidden(ref.name) == hide) continue;
-        const owned = gpa.dupe(u8, ref.name) catch continue;
-        names.append(gpa, owned) catch gpa.free(owned);
+        // A local branch's remote copy with it, as its own eye does.
+        const upstream = if (kind == .local) ref.tracking.upstream else null;
+        for ([_]?[]const u8{ ref.name, upstream }) |maybe| {
+            const name = maybe orelse continue;
+            if (isHidden(name) == hide or hasName(names.items, name)) continue;
+            const owned = gpa.dupe(u8, name) catch continue;
+            names.append(gpa, owned) catch gpa.free(owned);
+        }
     }
     for (names.items) |n| toggleGraphPref(&graph_hidden, "zit.hidden", n);
 }
@@ -10268,6 +10316,10 @@ const SIDE_GUTTER: f32 = 22 + 2 * style.space.xxs;
 /// Inside a ref line's button, before its name.
 const SIDE_REF_PAD: f32 = style.space.xs;
 const SECTION_ICON_LIFT: f32 = 4;
+/// A section's count: a pill this high, never narrower than this, so one
+/// digit or three keep one right edge and a shape.
+const COUNT_PILL_H: f32 = 16;
+const COUNT_PILL_MIN_W: f32 = 10;
 var section_scroll: [@typeInfo(Section).@"enum".fields.len]dvui.ScrollInfo = @splat(.{});
 
 /// An open section's rows. Returns the ref the user asked to check out.
@@ -10414,9 +10466,12 @@ fn sectionMenu(
     section: Section,
     id: usize,
     rect: dvui.Rect.Physical,
+    /// Where the header's ⋯ was clicked, to open there as a right-click would.
+    open_at: ?dvui.Point.Physical,
 ) void {
     const ctx = dvui.context(src, .{ .rect = rect }, .{ .id_extra = id });
     defer ctx.deinit();
+    openContextAt(ctx, open_at);
 
     const cp = ctx.activePoint() orelse return;
 
@@ -11096,7 +11151,7 @@ fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
             .margin = .{ .x = (SIDE_GUTTER - 11) / 2, .w = (SIDE_GUTTER - 11) / 2 },
         });
     } else if (iconButtonTagged(@src(), "ref_eye", if (hidden) "Show in the graph" else "Hide from the graph", if (hidden) dvui.entypo.eye_with_line else dvui.entypo.eye, if (hidden) style.textMuted() else if (hover) style.textFaint() else dvui.Color.transparent, frameTag("eye", ref.name))) {
-        toggleGraphPref(&graph_hidden, "zit.hidden", ref.name);
+        toggleHidden(ref);
     }
 
     var bw: dvui.ButtonWidget = undefined;
@@ -11164,7 +11219,9 @@ fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
     const activated = ref.kind != .tag and clicked and isDoubleClick(bw.data().id);
     if (bw.hovered() and ref.time > 0) {
         var when: [32]u8 = undefined;
-        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .horizontal, .delay = 500_000 }, "Last commit {s}", .{relativeTime(&when, ref.time)}, .{
+        // Right of the whole line, past the sidebar's edge: right of the name
+        // alone it sat on the ⋯ the hover had just brought up.
+        dvui.tooltip(@src(), .{ .active_rect = line_rect, .position = .horizontal, .delay = 500_000 }, "Last commit {s}", .{relativeTime(&when, ref.time)}, .{
             .font = style.small(),
             .id_extra = id,
         });
@@ -11504,7 +11561,7 @@ fn refMenu(
         const hidden = isHidden(ref.name);
         if (menuIcon(@src(), if (hidden) dvui.entypo.eye else dvui.entypo.eye_with_line, if (hidden) "Show in the graph" else "Hide from the graph", false)) {
             fw.close();
-            toggleGraphPref(&graph_hidden, "zit.hidden", ref.name);
+            toggleHidden(ref);
         }
     }
     if (ref.kind == .local) {
@@ -13134,6 +13191,21 @@ fn sameOnRemote(h: git.History, ref: git.Ref) bool {
     return false;
 }
 
+/// Whether `ref` has a tag of its own in the graph. Not when its eye put it
+/// out of the graph — its commits may still be there, through another
+/// branch, but its name is not. And not a remote branch whose local branch,
+/// at the same commit, carries it with a cloud — unless that one is out and
+/// the remote is not.
+fn tagShown(h: git.History, ref: git.Ref) bool {
+    if (isHidden(ref.name) and !ref.head) return false;
+    if (ref.kind != .remote) return true;
+    for (h.refs) |other| {
+        if (other.kind != .local or !git.oidEql(other.target, ref.target)) continue;
+        if (std.mem.eql(u8, splitRemoteRef(ref.name).branch, other.name)) return isHidden(other.name) and !other.head;
+    }
+    return true;
+}
+
 /// A branch or tag name on its commit. The branch checked out is filled in
 /// its colour and bold, the one picked in "Branches:" outlined and bold —
 /// the two Git Graph sets apart from the rest. `synced`, a cloud after the
@@ -13146,8 +13218,7 @@ fn refTags(h: git.History, commit: git.Commit, row_index: usize, most: usize, la
     // "+N" after them, so how much each gets depends on how many there are.
     var count: usize = 0;
     for (h.refs) |ref| {
-        if (!git.oidEql(ref.target, commit.id)) continue;
-        if (ref.kind == .remote and sameOnRemote(h, ref)) continue;
+        if (!git.oidEql(ref.target, commit.id) or !tagShown(h, ref)) continue;
         count += 1;
     }
     const hidden = count -| most;
@@ -13157,10 +13228,8 @@ fn refTags(h: git.History, commit: git.Commit, row_index: usize, most: usize, la
     var drawn: usize = 0;
     for (h.refs, 0..) |ref, i| {
         if (drawn >= most) break;
-        if (!git.oidEql(ref.target, commit.id)) continue;
-        const synced = sameOnRemote(h, ref);
-        if (synced and ref.kind == .remote) continue;
-        refTag(@src(), ref, i, synced, true, lane, room);
+        if (!git.oidEql(ref.target, commit.id) or !tagShown(h, ref)) continue;
+        refTag(@src(), ref, i, ref.kind == .local and sameOnRemote(h, ref), true, lane, room);
         drawn += 1;
     }
     if (hidden > 0) moreRefs(@src(), commit, hidden, row_index);
@@ -21703,6 +21772,63 @@ test "a branch's name sits in the branch column, and dragging the column's edge 
 }
 
 
+test "a hidden branch leaves the graph with its remote copy, and a hidden tag's name goes" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    // The tag alone on its commit, main moved on past it.
+    try expectGit(dir, &.{ "tag", "v1" });
+    try expectGit(dir, &.{ "commit", "-q", "--allow-empty", "-m", "second" });
+    try expectGit(dir, &.{ "checkout", "-q", "-b", "feat" });
+    try expectGit(dir, &.{ "commit", "-q", "--allow-empty", "-m", "on feat" });
+    try expectGit(dir, &.{ "checkout", "-q", "main" });
+    // Pushed: its remote copy at the same commit, and tracked.
+    try expectGit(dir, &.{ "remote", "add", "origin", "https://example.invalid/zit.git" });
+    try expectGit(dir, &.{ "update-ref", "refs/remotes/origin/feat", "feat" });
+    try expectGit(dir, &.{ "branch", "-q", "-u", "origin/feat", "feat" });
+    openRepo(dir);
+    defer closeRepo();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(findCommit("on feat") != null);
+    _ = try tagCenter("ref:feat");
+    _ = try tagCenter("ref:v1");
+
+    // Its eye: the branch out, its remote copy with it — the commit only
+    // they reach gone, and neither name drawn.
+    toggleHidden(findRef("feat") orelse return error.BranchNotListed);
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(isHidden("feat") and isHidden("origin/feat"));
+    try std.testing.expect(findCommit("on feat") == null);
+    try expectNoTag("ref:feat");
+    try expectNoTag("ref:origin/feat");
+
+    // Back, both.
+    toggleHidden(findRef("feat") orelse return error.BranchNotListed);
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(!isHidden("feat") and !isHidden("origin/feat"));
+    try std.testing.expect(findCommit("on feat") != null);
+    _ = try tagCenter("ref:feat");
+
+    // A tag hidden: its commit is main's too and stays, its name does not.
+    toggleHidden(findRef("v1") orelse return error.TagNotListed);
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(findCommit("base") != null);
+    try expectNoTag("ref:v1");
+}
+
 test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the menu" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -21733,7 +21859,8 @@ test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the 
     try std.testing.expect(!isHidden("feat"));
 
     // The whole section out — the branch checked out stays — then back.
-    // The section's eye shows in its count's place on hover.
+    // The section's eye shows on hover, in a column of its own beside the
+    // count, which stays.
     try hoverAt(try tagCenter("section:LOCAL"));
     try clickAt(try tagCenter("eye-all:branches"));
     try std.testing.expect(isHidden("feat"));
@@ -21745,6 +21872,15 @@ test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the 
     try hoverAt(try tagCenter("feat"));
     try clickAt(try tagCenter("more:feat"));
     try std.testing.expect(dvui.tagGet("menu:Check out") != null);
+    try pressFrame(.escape, .none);
+
+    // A section header's ⋯ opens its right-click menu too, and the section
+    // stays folded or open as it was.
+    const open = section_collapsed[@intFromEnum(Section.local)];
+    try hoverAt(try tagCenter("section:LOCAL"));
+    try clickAt(try tagCenter("section-more:LOCAL"));
+    _ = try tagCenter("menu:New branch here");
+    try std.testing.expectEqual(open, section_collapsed[@intFromEnum(Section.local)]);
     try pressFrame(.escape, .none);
 
     // Signing, flipped beside the commit's title.

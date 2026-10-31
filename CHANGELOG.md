@@ -25,6 +25,17 @@ Every release of Zit, newest first. Downloads are on the
   to wait out frozen.
 
 ### Fixed
+- Hiding a branch from the graph takes it out: its name leaves the branch
+  column, and so do the commits only it reaches — the remote branch it tracks
+  is hidden with it, which kept them up before. A hidden tag's name goes too.
+- In the sidebar, a section's count stays where it is when its header is
+  hovered: the eye that hides the whole section from the graph has a column
+  of its own beside it, instead of taking the count's place further right.
+  Every count sits on the same pill, a zero only fainter, and a section hidden
+  from the graph is faded, its crossed eye kept up. A section's header has a ⋯
+  on hover, as a branch's line does, for its right-click menu.
+- A branch's "Last commit" tooltip in the sidebar opens past the sidebar's
+  edge, rather than over the ⋯ the hover brings up.
 - With thousands of changed files, the lists of unstaged and staged files
   scroll, and the commit box stays in sight under them. Only the rows on
   screen are drawn: with 11,000 files the window answers in under a
