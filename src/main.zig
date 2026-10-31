@@ -6569,7 +6569,7 @@ const DropButton = struct {
             .color_fill = .{ .color = style.surfaceRaised() },
             .border = dvui.Rect.all(1),
             .color_border = .{ .color = style.border() },
-            .corners = style.radius.row,
+            .corners = style.radius.popover,
             .padding = dvui.Rect.all(style.space.xs),
         });
     }
@@ -6701,7 +6701,8 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
         .tag = frameTag("switch", ref.name),
         .expand = .horizontal,
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+        .color_fill_hover = .{ .color = style.accentDim() },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -7650,7 +7651,7 @@ fn keysDialog() void {
         shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
         shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
         shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
-        shortcutRow(@src(), "Ctrl+= / Ctrl+-", "Zoom in / out, from 70 to 200 %");
+        shortcutRow(@src(), "Ctrl+=, Ctrl+-", "Zoom in / out, from 70 to 200 %");
         shortcutRow(@src(), "Ctrl+0", "Back to 100 %");
     }
 
@@ -9009,7 +9010,8 @@ fn workspaceSwitcher() void {
             .expand = .horizontal,
             .min_size_content = .{ .w = 260 },
             .corners = style.radius.input,
-            .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+            .color_fill_hover = .{ .color = style.accentDim() },
+            .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
         });
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -9940,6 +9942,7 @@ fn menuSubRow(src: std.builtin.SourceLocation, icon: []const u8, caption: []cons
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
         .corners = style.radius.input,
+        .color_fill_hover = .{ .color = style.accentDim() },
         .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
@@ -11788,7 +11791,7 @@ fn contextMenu(cp: dvui.Point.Natural) *dvui.FloatingMenuWidget {
         .color_fill = .{ .color = style.surfaceRaised() },
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = style.border() },
-        .corners = style.radius.row,
+        .corners = style.radius.popover,
         .padding = dvui.Rect.all(style.space.xs),
         .min_size_content = .{ .w = MENU_MIN_W },
     });
@@ -11823,6 +11826,9 @@ fn menuIconId(src: std.builtin.SourceLocation, id: usize, icon: []const u8, capt
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
         .corners = style.radius.input,
+        // Lit with a tint of the accent, not filled with it: the row
+        // under the pointer, or the keys, is found without shouting.
+        .color_fill_hover = .{ .color = style.accentDim() },
         .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.lg, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
@@ -12793,12 +12799,12 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
             .border = dvui.Rect.all(WIP_RING),
             .color_border = .{ .color = hue },
             .corners = .all(style.avatar / 2),
-            .min_size_content = .{ .w = style.avatar, .h = style.avatar },
-            .max_size_content = .size(.{ .w = style.avatar, .h = style.avatar }),
+            .min_size_content = .{ .w = style.avatar - 2 * WIP_RING, .h = style.avatar - 2 * WIP_RING },
+            .max_size_content = .size(.{ .w = style.avatar - 2 * WIP_RING, .h = style.avatar - 2 * WIP_RING }),
             .gravity_y = 0.5,
-            // Centred on the lane as a commit's node is: the row's padding is
-            // already the canvas's offset, the ring adds to the node's width.
-            .margin = .{ .x = branchColumn() + laneX(if (head) |hl| hl.lane else 0) - style.avatar / 2 - WIP_RING },
+            // Centred on the lane as a commit's node is, and as big, ring
+            // included: the row's padding is already the canvas's offset.
+            .margin = .{ .x = branchColumn() + laneX(if (head) |hl| hl.lane else 0) - style.avatar / 2 },
             .padding = dvui.Rect.all(0),
         });
         defer node.deinit();
@@ -12923,6 +12929,10 @@ fn commitRow(
     const hovered = !selected and rs.r.contains(dvui.currentWindow().mouse_pt);
     if (hovered) rs.rectToPhysical(.{ .x = 0, .y = 0, .w = width, .h = rh - 1 })
         .fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
+    // HEAD's commit, a bar of the accent down its left edge, as GitComet
+    // marks it: where the next commit goes, found at a glance.
+    if (h.head_oid) |head| if (git.oidEql(head, commit.id)) rs.rectToPhysical(.{ .x = 0, .y = 0, .w = 3, .h = rh })
+        .fill(.{}, .{ .color = .{ .color = style.accent() }, .fade = 0 });
 
     // Only under the pointer, as GitComet has it: the lines alone say which
     // branch is which.
@@ -13174,7 +13184,7 @@ fn commitMenu(
             .color_fill = .{ .color = style.surfaceRaised() },
             .border = dvui.Rect.all(1),
             .color_border = .{ .color = style.border() },
-            .corners = style.radius.row,
+            .corners = style.radius.popover,
             .padding = dvui.Rect.all(style.space.xs),
             .min_size_content = .{ .w = 220 },
         });
@@ -13278,7 +13288,7 @@ fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, a
 
     // Made smaller rather than cut: at a fractional display scale two wide
     // capitals, "DG", came out of a disc this size as "…".
-    var font: dvui.Font = .find(.{ .family = style.UI_FAMILY, .size = 8.5 * d / style.avatar, .weight = .bold });
+    var font: dvui.Font = .find(.{ .family = style.UI_FAMILY, .size = 9.5 * d / style.avatar, .weight = .bold });
     const room = d - 2 * border.x - 2;
     const wide = font.textSize(letters).w;
     if (wide > room) font = font.withSize(font.size * room / wide);
@@ -13709,7 +13719,7 @@ fn drawLanes(
     // colour, as GitKraken joins its work in progress to the commit under it.
     if (extra > 0) if (headLane()) |hl| {
         const x = laneX(hl.lane);
-        const top = @max(0.5 * rh + style.avatar / 2 + WIP_RING + 2, @as(f32, @floatFromInt(first)) * rh);
+        const top = @max(0.5 * rh + style.avatar / 2 + 2, @as(f32, @floatFromInt(first)) * rh);
         const bottom = @min((@as(f32, @floatFromInt(hl.index + extra)) + 0.5) * rh - style.avatar / 2 - 2, @as(f32, @floatFromInt(last)) * rh);
         var y = top;
         while (y + 2 <= bottom) : (y += 5) {
@@ -15719,7 +15729,9 @@ fn sectionHairlineUnder(wd: *dvui.WidgetData) void {
         .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
 }
 
-const SECTION_HEAD_H: f32 = 30;
+const SECTION_HEAD_H: f32 = 36;
+/// A panel's own title, over its sections: GitComet's pane header.
+const PANEL_HEAD_H: f32 = 42;
 
 /// A section's title on the right, as the sidebar's are on the left: its
 /// icon, its name in the text's own colour and case, semi-bold; and where it
@@ -15832,16 +15844,22 @@ fn workingDetail() void {
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            // As high as a section's header and set in as far — its icon over
-            // their chevrons — with a hairline under it, parting the panel's
-            // title from the lists.
-            .min_size_content = .{ .h = SECTION_HEAD_H },
+            // The panel's title, taller than the sections under it and in a
+            // title's face, as GitComet heads its panes; set in as far as
+            // they are — its icon over their chevrons — with a hairline
+            // under it, parting it from the lists.
+            .min_size_content = .{ .h = PANEL_HEAD_H },
             .padding = .{ .x = style.space.md, .w = style.space.md },
         });
         defer head.deinit();
         defer sectionHairlineUnder(head.data());
 
-        panelTitle("Changed files", dvui.entypo.documents, null);
+        dvui.icon(@src(), "panel_icon", dvui.entypo.documents, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 15, .h = 15 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.md },
+        });
+        dvui.label(@src(), "Changed files", .{}, .{ .font = style.title(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
@@ -17730,7 +17748,7 @@ fn modalWindow(
         .color_fill = .{ .color = fill },
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = style.border() },
-        .corners = style.radius.row,
+        .corners = style.radius.popover,
         .min_size_content = .{ .w = min_w },
         .padding = padding,
     });

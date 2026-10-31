@@ -140,13 +140,17 @@ pub const radius = struct {
     pub const row = dvui.CornerRect.all(6);
     /// Ref tags and file flags: tighter, because they are small and square-ish.
     pub const tag = dvui.CornerRect.all(3);
+    /// What floats over the window: menus, dialogs, tooltips. Rounder than
+    /// what sits in it, as GitComet's popovers are.
+    pub const popover = dvui.CornerRect.all(8);
 };
 
 /// Height of a row in a list — the file lists, a commit's files. GitComet's
 /// comfortable row.
-pub const row_height: f32 = 30;
-/// A row in the sidebar's lists: a little tighter than a list row.
-pub const side_row: f32 = 28;
+pub const row_height: f32 = 32;
+/// A row in the sidebar's lists: as high as the changes panel's, the two
+/// side panels being one design.
+pub const side_row: f32 = row_height;
 
 /// Height of a commit row. Taller than a list row: it carries a lane drawing,
 /// an avatar, a tag, a message, an author, a sha and a date — and those are
@@ -154,8 +158,9 @@ pub const side_row: f32 = 28;
 /// the commit list is virtualised.
 pub const graph_row: f32 = 32;
 
-/// Diameter of the author's initials disc in a commit row.
-pub const avatar: f32 = 22;
+/// Diameter of a node in the graph, its ring included: the author's
+/// initials disc, a merge's, the uncommitted changes' — all one size.
+pub const avatar: f32 = 25;
 
 /// Height of one line of a diff: the mono face at about 1.75, GitComet's
 /// line for its code. Fixed, for the same reason.
@@ -168,7 +173,7 @@ pub const graph = struct {
     /// Wider than a line needs: every node is an avatar, and two on
     /// neighbouring lanes must not touch. Closer together only when there are
     /// more lanes than room.
-    pub const lane_w: f32 = 28;
+    pub const lane_w: f32 = 30;
     /// Between the deepest node and the text, so a ring never touches a tag.
     pub const gap: f32 = 14;
     /// Thickness of a lane line.
@@ -499,6 +504,11 @@ pub fn apply(file: ThemeFile, theme_name: []const u8, dark: bool) void {
     theme.window.fill_press = palette.press;
     theme.window.text = text_c;
     theme.window.border = palette.border;
+
+    // Tooltips on the raised surface, rounded as the rows are: they float
+    // over the window, as the menus do.
+    dvui.FloatingTooltipWidget.defaults.color_fill = .{ .color = surfaceRaised() };
+    dvui.FloatingTooltipWidget.defaults.corners = radius.row;
 
     theme.control.fill = surfaceInput();
     theme.control.fill_hover = palette.hover;

@@ -19,6 +19,15 @@ Every release of Zit, newest first. Downloads are on the
   larger throughout, taller rows in the lists, the history and the sidebar,
   wider menus with taller items, larger fields, buttons and tabs, and the
   changed files named in the interface's face rather than a mono one.
+- The repository tabs are browser tabs, as GitComet's: the active one raised
+  and open onto the bar below, the others flat with a rule between them, each
+  with the repository's initials. Menus, dialogs and tooltips have rounder
+  corners; a menu's row under the pointer is tinted with the accent rather
+  than filled with it; the checked-out commit has an accent bar down its edge.
+- The two side panels are one design, roomier: section headers and rows the
+  same height on both, and the changes panel headed by **Changed files** as a
+  title, over its sections. The graph's nodes — avatars, merges and the
+  uncommitted changes' — are all one size, a little larger.
 - The history's branch names have a column of their own, **BRANCH / TAG**,
   before the graph, as in GitKraken: read from its left, joined to their commit
   by a line of the branch's colour, and cut only where the column ends. Drag
