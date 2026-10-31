@@ -5,6 +5,22 @@ Every release of Zit, newest first. Downloads are on the
 
 ## Unreleased
 
+### Changed
+- The Tree view of changed files is a file explorer's tree: folders nested in
+  folders, set in under the one they are in, folders before files, each with
+  how many files it holds; a folder holding only one folder shares its line,
+  `src/components`. A click folds a folder; its + or − stages or unstages all
+  of it. A commit's files show the same tree.
+- Stage all runs off the window's thread, with its pill in the status bar:
+  adding 11,000 new files is 13 s of `git` on Windows, which the window used
+  to wait out frozen.
+
+### Fixed
+- With thousands of changed files, the lists of unstaged and staged files
+  scroll, and the commit box stays in sight under them. Only the rows on
+  screen are drawn: with 11,000 files the window answers in under a
+  millisecond while scrolling, against 170 ms before.
+
 ## [0.1.2] — 2026-10-29
 
 ### Fixed

@@ -1126,6 +1126,7 @@ fn clearSelection() void {
     if (file_at) |*d| d.deinit();
     file_at = null;
     clearTreeFiles();
+    commit_tree.clear();
     diff_all = &.{};
     diff_rows = 0;
     diff_stale = false;
@@ -2456,6 +2457,7 @@ fn closeRepo() void {
     lanes = null;
     if (work) |*w| w.deinit();
     work = null;
+    work_version +%= 1;
 
     repo_path.clearAndFree(gpa);
     repo_name = "";
@@ -2524,6 +2526,7 @@ fn reloadWork() void {
 fn swapWork(next: git.Work) void {
     if (work) |*w| w.deinit();
     work = next;
+    work_version +%= 1;
 
     // A commit's diff cannot change, so only the working-tree side is worth
     // re-reading — and this runs on the poll timer.
@@ -15119,10 +15122,10 @@ var commit_all_files: bool = false;
 var folded_dirs: std.StringHashMapUnmanaged(void) = .empty;
 
 fn clearFoldedDirs() void {
-    var it = folded_dirs.keyIterator();
-    while (it.next()) |k| gpa.free(k.*);
-    folded_dirs.deinit(gpa);
-    folded_dirs = .empty;
+    foldClear(&folded_dirs);
+    for (&changes_folded) |*m| foldClear(m);
+    for (&change_trees) |*t| t.clear();
+    commit_tree.clear();
 }
 
 /// ponytail: one widget per row, no virtualising — capped instead. A
@@ -15161,70 +15164,44 @@ fn commitFiles(id: git.Oid) void {
         loadTreeFiles(id);
         break :blk tree_files.paths.len;
     } else diff_all.len;
-
-    var last_dir: []const u8 = "";
-    var rows: usize = 0;
-    for (0..paths_n) |i| {
-        const path = if (commit_all_files) tree_files.paths[i] else diff_all[i].path;
-        const status = if (commit_all_files) (if (i < tree_files.status.len) tree_files.status[i] else .unchanged) else diff_all[i].status;
-        if (changes_view == .tree) {
-            const dir = std.fs.path.dirname(path) orelse "";
-            if (!std.mem.eql(u8, dir, last_dir)) {
-                last_dir = dir;
-                folderRow(@src(), dir, i);
-            }
-            if (inFoldedDir(dir)) continue;
+    const Files = struct {
+        fn path(all: bool, i: usize) []const u8 {
+            return if (all) tree_files.paths[i] else diff_all[i].path;
         }
+        fn status(all: bool, i: usize) git.Status {
+            return if (all) (if (i < tree_files.status.len) tree_files.status[i] else .unchanged) else diff_all[i].status;
+        }
+    };
+
+    if (changes_view != .tree) {
+        for (0..@min(paths_n, MAX_FILE_ROWS)) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), i, null);
+        if (paths_n > MAX_FILE_ROWS) sidebarNote(@src(), "More files than are listed here.");
+        return;
+    }
+
+    // Rebuilt for another commit, the other list, or the diff read again.
+    var key = std.hash.Wyhash.init(@intFromBool(commit_all_files));
+    key.update(std.mem.asBytes(&id));
+    key.update(std.mem.asBytes(&paths_n));
+    const list: usize = if (commit_all_files) @intFromPtr(tree_files.paths.ptr) else @intFromPtr(diff_all.ptr);
+    key.update(std.mem.asBytes(&list));
+    commit_tree.build(key.final(), paths_n, commit_all_files, Files.path);
+
+    var it: TreeShown = .{ .rows = commit_tree.rows, .folded = &folded_dirs };
+    var rows: usize = 0;
+    var fold: ?[]const u8 = null;
+    while (it.next()) |shown| : (rows += 1) {
         if (rows == MAX_FILE_ROWS) {
             sidebarNote(@src(), "More files than are listed here.");
             break;
         }
-        rows += 1;
-        fileRow(@src(), id, path, status, i, changes_view == .tree);
+        if (shown.row.file) |f| {
+            fileRow(@src(), id, Files.path(commit_all_files, f), Files.status(commit_all_files, f), f, @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON);
+        } else if (folderLine(@src(), shown.index, shown.row, shown.folded, null)) {
+            fold = shown.row.path;
+        }
     }
-}
-
-/// Whether `dir`, or a folder it is in, is folded away.
-fn inFoldedDir(dir: []const u8) bool {
-    var d = dir;
-    while (d.len > 0) {
-        if (folded_dirs.contains(d)) return true;
-        d = std.fs.path.dirname(d) orelse "";
-    }
-    return false;
-}
-
-/// A folder's line in the tree view: a click folds it, or opens it.
-fn folderRow(src: std.builtin.SourceLocation, dir: []const u8, id: usize) void {
-    // Inside a folded folder, the folders in it are folded with it.
-    if (std.fs.path.dirname(dir)) |parent| if (inFoldedDir(parent)) return;
-    const folded = folded_dirs.contains(dir);
-    var row = dvui.box(src, .{ .dir = .horizontal }, .{
-        .id_extra = id,
-        .expand = .horizontal,
-        .background = false,
-        .padding = .{ .x = style.space.lg, .y = style.space.xs, .w = style.space.md },
-    });
-    dvui.icon(@src(), "fold", if (folded) dvui.entypo.chevron_small_right else dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textFaint() } }, .{
-        .min_size_content = .{ .w = 11, .h = 11 },
-        .gravity_y = 0.5,
-        .margin = .{ .w = style.space.xs },
-    });
-    dvui.label(@src(), "{s}", .{if (dir.len == 0) "/" else dir}, .{
-        .font = style.tiny(),
-        .color_text = .{ .color = style.textFaint() },
-        .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
-    });
-    const hit = dvui.clicked(row.data(), .{});
-    row.deinit();
-    if (!hit or dir.len == 0) return;
-    if (folded_dirs.fetchRemove(dir)) |kv| {
-        gpa.free(kv.key);
-    } else {
-        const owned = gpa.dupe(u8, dir) catch return;
-        folded_dirs.put(gpa, owned, {}) catch gpa.free(owned);
-    }
+    if (fold) |path| foldToggle(&folded_dirs, path);
 }
 
 /// A co-author trailer naming someone other than the author: crediting
@@ -15433,7 +15410,7 @@ fn compareDetail() void {
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     defer scroll.deinit();
     if (diff == null) return;
-    for (diff_all, 0..) |file, i| fileRow(@src(), compare_to, file.path, file.status, i, false);
+    for (diff_all, 0..) |file, i| fileRow(@src(), compare_to, file.path, file.status, i, null);
 }
 
 /// The working tree: what is staged, what is not, and the way to move a file
@@ -15483,12 +15460,337 @@ fn workingDetail() void {
     });
     defer lists.deinit();
 
-    changesSection(@src(), "UNSTAGED", unstaged, false, 0);
-    changesSection(@src(), "STAGED", staged, true, 1);
+    // A list that fits in half the room takes what it needs and leaves the
+    // rest to the other; two that do not share it. Neither asks for more than
+    // a few rows, so the commit box under them stays in sight however many
+    // files there are.
+    const half = lists.data().contentRect().h / 2;
+    const fits_unstaged = changes_head_h + changeListHeight(0, unstaged) <= half;
+    const fits_staged = changes_head_h + changeListHeight(1, staged) <= half;
+    changesSection(@src(), "UNSTAGED", unstaged, false, 0, !(fits_unstaged and !fits_staged));
+    changesSection(@src(), "STAGED", staged, true, 1, !fits_staged);
+}
+
+/// Each side's list scrolls on its own. Its rows are placed by hand, only
+/// the ones in sight, so its height is given rather than measured: 11,000
+/// changed files are 11,000 rows, and building them all made every frame
+/// slow and the list as tall as all of them, pushing the commit box off.
+var changes_scroll: [2]dvui.ScrollInfo = @splat(.{ .vertical = .given });
+
+/// A list's head — "UNSTAGED 3   Stage all" — as last laid out.
+var changes_head_h: f32 = 28;
+
+/// The fewest rows a long list keeps while it shares the panel.
+const CHANGES_MIN_ROWS = 3;
+
+/// The rows a list shows: one per file, and in the tree view one per folder
+/// too, less what folded folders hide.
+fn changeRows(side: usize, changes: []const git.Change) usize {
+    if (changes_view != .tree) return changes.len;
+    var it: TreeShown = .{ .rows = changeTree(side, changes).rows, .folded = &changes_folded[side] };
+    var rows: usize = 0;
+    while (it.next()) |_| rows += 1;
+    return rows;
+}
+
+fn changeListHeight(side: usize, changes: []const git.Change) f32 {
+    return @as(f32, @floatFromInt(changeRows(side, changes))) * style.row_height;
+}
+
+// === Tree view ===
+//
+// Files as a file explorer shows them: folders nested in folders, each set
+// in under the one it is in, its folders before its files, every folder
+// folding away. Built once per list — 11,000 files sorted and nested is a
+// few milliseconds, not something to do every frame — and read a screenful
+// at a time.
+
+/// One line of a tree view: a folder, or a file in one.
+const TreeRow = struct {
+    /// How deep it is: 0 at the repository's root.
+    depth: u16,
+    /// What the line reads: the folder's or the file's own name.
+    name: []const u8,
+    /// A folder: its path, which is what it is folded by. A file: its path.
+    path: []const u8,
+    /// A file: its index in the list the tree was built from.
+    file: ?u32,
+    /// A folder: the lines inside it, which follow it.
+    inside: u32 = 0,
+    /// A folder: the files inside it, at any depth.
+    files: u32 = 0,
+};
+
+/// A tree's lines, and the files in the order it shows them.
+const Tree = struct {
+    arena: ?std.heap.ArenaAllocator = null,
+    /// What it was built from; a different one builds it again.
+    key: u64 = 0,
+    rows: []const TreeRow = &.{},
+    /// File indices, top to bottom: a Shift+click's range runs in this order.
+    order: []const u32 = &.{},
+
+    fn clear(self: *Tree) void {
+        if (self.arena) |*a| a.deinit();
+        self.* = .{};
+    }
+
+    /// The tree of `paths` — copied, so it outlives the list they are from.
+    fn build(self: *Tree, key: u64, n: usize, ctx: anytype, comptime pathAt: fn (@TypeOf(ctx), usize) []const u8) void {
+        if (self.arena != null and self.key == key) return;
+        self.clear();
+        self.arena = .init(gpa);
+        self.key = key;
+        const a = self.arena.?.allocator();
+        const paths = a.alloc([]const u8, n) catch return;
+        for (paths, 0..) |*p, i| p.* = a.dupe(u8, pathAt(ctx, i)) catch return;
+        self.rows = treeRows(a, paths) catch &.{};
+        var order: std.ArrayList(u32) = .empty;
+        for (self.rows) |row| if (row.file) |f| order.append(a, f) catch {};
+        self.order = order.items;
+    }
+};
+
+/// Explorer order: in a folder, its folders first, then its files, each by
+/// name whatever the case.
+fn treeLessThan(paths: []const []const u8, a: u32, b: u32) bool {
+    var pa = paths[a];
+    var pb = paths[b];
+    while (true) {
+        const ea = std.mem.indexOfScalar(u8, pa, '/');
+        const eb = std.mem.indexOfScalar(u8, pb, '/');
+        const ca = pa[0 .. ea orelse pa.len];
+        const cb = pb[0 .. eb orelse pb.len];
+        if (ea != null and eb != null and std.mem.eql(u8, ca, cb)) {
+            pa = pa[ea.? + 1 ..];
+            pb = pb[eb.? + 1 ..];
+            continue;
+        }
+        if ((ea != null) != (eb != null)) return ea != null;
+        return switch (std.ascii.orderIgnoreCase(ca, cb)) {
+            .lt => true,
+            .gt => false,
+            .eq => std.mem.lessThan(u8, ca, cb),
+        };
+    }
+}
+
+/// The lines of the tree of `paths`: a folder's line, then what is in it.
+fn treeRows(a: std.mem.Allocator, paths: []const []const u8) ![]TreeRow {
+    const order = try a.alloc(u32, paths.len);
+    for (order, 0..) |*o, i| o.* = @intCast(i);
+    std.mem.sort(u32, order, paths, treeLessThan);
+
+    var rows: std.ArrayList(TreeRow) = .empty;
+    // The folders the last path was in, outermost first: their lines.
+    var open: std.ArrayList(u32) = .empty;
+    for (order) |i| {
+        const path = paths[i];
+        // The open folders this path is in too.
+        var keep: usize = 0;
+        var at: usize = 0;
+        while (keep < open.items.len) : (keep += 1) {
+            const dir = rows.items[open.items[keep]].path;
+            if (path.len <= dir.len or !std.mem.startsWith(u8, path, dir) or path[dir.len] != '/') break;
+            at = dir.len + 1;
+        }
+        while (open.items.len > keep) {
+            const f = open.pop().?;
+            rows.items[f].inside = @intCast(rows.items.len - f - 1);
+        }
+        // The folders it is in that are new.
+        while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| {
+            try open.append(a, @intCast(rows.items.len));
+            try rows.append(a, .{ .depth = @intCast(open.items.len - 1), .name = path[at..slash], .path = path[0..slash], .file = null });
+            at = slash + 1;
+        }
+        for (open.items) |f| rows.items[f].files += 1;
+        try rows.append(a, .{ .depth = @intCast(open.items.len), .name = path[at..], .path = path, .file = i });
+    }
+    while (open.pop()) |f| rows.items[f].inside = @intCast(rows.items.len - f - 1);
+    return compactTree(a, rows.items);
+}
+
+/// Compact folders, as GitComet and VS Code have them: a folder that holds
+/// nothing but one folder is one line with it — "src/components" — named
+/// and folded by the deepest of them.
+fn compactTree(a: std.mem.Allocator, rows: []const TreeRow) ![]TreeRow {
+    var out: std.ArrayList(TreeRow) = .empty;
+    // Where the folders merged into the line after them end: the lines
+    // before that sit one level higher for each.
+    var merged: std.ArrayList(usize) = .empty;
+    // Where in its path the name of a line merged so far starts.
+    var from: ?usize = null;
+    for (rows, 0..) |row, i| {
+        while (merged.items.len > 0 and merged.items[merged.items.len - 1] <= i) _ = merged.pop();
+        var r = row;
+        r.depth -= @intCast(merged.items.len);
+        // Its only line inside is a folder, with everything else in that.
+        if (r.file == null and i + 1 < rows.len and rows[i + 1].file == null and r.inside == rows[i + 1].inside + 1) {
+            if (from == null) from = r.path.len - r.name.len;
+            try merged.append(a, i + 1 + r.inside);
+            continue;
+        }
+        if (from) |f| r.name = r.path[f..];
+        from = null;
+        try out.append(a, r);
+    }
+    // What each folder holds, counted again over the lines that are left.
+    var open: std.ArrayList(usize) = .empty;
+    for (out.items, 0..) |row, j| {
+        while (open.items.len > 0 and out.items[open.items[open.items.len - 1]].depth >= row.depth) {
+            const f = open.pop().?;
+            out.items[f].inside = @intCast(j - f - 1);
+        }
+        if (row.file == null) try open.append(a, j);
+    }
+    while (open.pop()) |f| out.items[f].inside = @intCast(out.items.len - f - 1);
+    return out.items;
+}
+
+/// The lines of a tree that show: a folded folder's own, not what is in it.
+const TreeShown = struct {
+    rows: []const TreeRow,
+    folded: *const std.StringHashMapUnmanaged(void),
+    at: usize = 0,
+    /// Files gone by, folded ones too: the next file's place in `Tree.order`.
+    files: u32 = 0,
+
+    const Shown = struct { row: TreeRow, index: usize, folded: bool, pos: u32 };
+
+    fn next(self: *TreeShown) ?Shown {
+        if (self.at >= self.rows.len) return null;
+        const index = self.at;
+        const row = self.rows[index];
+        self.at += 1;
+        const pos = self.files;
+        if (row.file != null) {
+            self.files += 1;
+            return .{ .row = row, .index = index, .folded = false, .pos = pos };
+        }
+        const folded = self.folded.contains(row.path);
+        if (folded) {
+            self.at += row.inside;
+            self.files += row.files;
+        }
+        return .{ .row = row, .index = index, .folded = folded, .pos = pos };
+    }
+};
+
+/// How far in a tree's lines are set, per level.
+const TREE_INDENT: f32 = 14;
+/// A file's line goes in by a folder's chevron more, so its name lines up
+/// with its folder's siblings' names.
+const TREE_CHEVRON: f32 = 11 + 4;
+
+/// Each side's tree, and the folders folded in it, by path, owned.
+var change_trees: [2]Tree = .{ .{}, .{} };
+var changes_folded: [2]std.StringHashMapUnmanaged(void) = .{ .empty, .empty };
+/// Bumped each time the working tree's snapshot is replaced.
+var work_version: u64 = 0;
+
+fn changeTree(side: usize, changes: []const git.Change) *const Tree {
+    const t = &change_trees[side];
+    t.build(work_version *% 2 +% side, changes.len, changes, struct {
+        fn at(c: []const git.Change, i: usize) []const u8 {
+            return c[i].path;
+        }
+    }.at);
+    return t;
+}
+
+/// The commit's files' tree.
+var commit_tree: Tree = .{};
+
+fn foldToggle(map: *std.StringHashMapUnmanaged(void), path: []const u8) void {
+    if (map.fetchRemove(path)) |kv| {
+        gpa.free(kv.key);
+        return;
+    }
+    const owned = gpa.dupe(u8, path) catch return;
+    map.put(gpa, owned, {}) catch gpa.free(owned);
+}
+
+fn foldClear(map: *std.StringHashMapUnmanaged(void)) void {
+    var it = map.keyIterator();
+    while (it.next()) |k| gpa.free(k.*);
+    map.deinit(gpa);
+    map.* = .empty;
+}
+
+/// A folder's line in a tree view: set in by its depth, a chevron, the
+/// folder, its name and how many files are in it. A click folds or opens it.
+/// With `side`, a button stages or unstages the whole folder, as a file's
+/// line does the file.
+fn folderLine(src: std.builtin.SourceLocation, id: usize, row: TreeRow, folded: bool, side: ?git.DiffSide) bool {
+    var line = dvui.box(src, .{ .dir = .horizontal }, .{
+        .id_extra = id,
+        // "unstaged:src/", as a file's line is tagged by its side: the same
+        // folder can be on both, and dvui flags a tag used twice.
+        .tag = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}:{s}/", .{ if (side) |s| @tagName(s) else "folder", row.path }) catch null,
+        .expand = .horizontal,
+        .min_size_content = .{ .h = style.row_height },
+        // On the files' ground, so the tree reads as one list.
+        .background = true,
+        .color_fill = .{ .color = style.surfaceRaised() },
+        .padding = .{ .w = style.space.sm },
+    });
+    defer line.deinit();
+    const rect = line.data().borderRectScale().r;
+    if (rect.contains(dvui.currentWindow().mouse_pt)) rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
+
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{ .draw_focus = false }, .{
+        .expand = .both,
+        .background = false,
+        .margin = dvui.Rect.all(0),
+        .padding = .{ .x = style.space.lg + @as(f32, @floatFromInt(row.depth)) * TREE_INDENT },
+    });
+    bw.processEvents();
+    {
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both, .background = false });
+        defer face.deinit();
+        dvui.icon(@src(), "fold", if (folded) dvui.entypo.chevron_small_right else dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textFaint() } }, .{
+            .min_size_content = .{ .w = 11, .h = 11 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = 4 },
+        });
+        dvui.icon(@src(), "folder", dvui.entypo.folder, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 13, .h = 13 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.sm },
+        });
+        dvui.label(@src(), "{s}", .{row.name}, .{
+            .font = style.small(),
+            .color_text = .{ .color = style.textMuted() },
+            .gravity_y = 0.5,
+            .max_size_content = .width(0),
+            .expand = .horizontal,
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.label(@src(), "{d}", .{row.files}, .{
+            .font = style.tiny(),
+            .color_text = .{ .color = style.textFaint() },
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.sm },
+            .padding = dvui.Rect.all(0),
+        });
+    }
+    const hit = bw.clicked();
+    bw.deinit();
+
+    if (side) |s| {
+        if (s == .staged) {
+            if (iconButton(@src(), "unstage_folder", "Unstage this folder", dvui.entypo.minus, style.textMuted())) request(&.{ "reset", "-q", "--", row.path });
+        } else {
+            if (iconButton(@src(), "stage_folder", "Stage this folder", dvui.entypo.plus, style.textMuted())) requestLocal("Staging", &.{ "add", "-A", "--", row.path });
+        }
+    }
+    return hit;
 }
 
 /// One file of a commit — a flag, a path, and a click that opens its diff.
-fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8, status: git.Status, id: usize, in_tree: bool) void {
+fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8, status: git.Status, id: usize, indent: ?f32) void {
     const open = std.mem.eql(u8, selected_path.items, path);
     var row = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
@@ -15499,7 +15801,7 @@ fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8
         .border = .{ .x = 2 },
         .color_border = .{ .color = if (open) style.accent() else dvui.Color.transparent },
         // Under its folder's line in the tree view, set in from it.
-        .padding = .{ .x = if (in_tree) style.space.lg + style.space.xl else style.space.lg, .w = style.space.md },
+        .padding = .{ .x = style.space.lg + (indent orelse 0), .w = style.space.md },
     });
 
     statusFlag(@src(), status);
@@ -15508,7 +15810,7 @@ fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8
     // faint: a long path cut at the end cut the part that mattered. In the
     // tree view the folder is the line above.
     const name = std.fs.path.basename(path);
-    const folder = if (in_tree) "" else std.fs.path.dirname(path) orelse "";
+    const folder = if (indent != null) "" else std.fs.path.dirname(path) orelse "";
     dvui.label(@src(), "{s}", .{name}, .{
         .font = style.small(),
         .color_text = .{ .color = if (status == .unchanged) style.textMuted() else style.text() },
@@ -15619,12 +15921,14 @@ fn changesSection(
     changes: []const git.Change,
     staged: bool,
     id: usize,
+    /// Takes a share of the room left, rather than just what its rows need.
+    grow: bool,
 ) void {
     var section = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = id,
         // An empty list is a header and one line: expanded, it would squeeze
         // the list that has files into half the panel.
-        .expand = if (changes.len == 0) .horizontal else .both,
+        .expand = if (changes.len == 0 or !grow) .horizontal else .both,
         .background = false,
         .padding = dvui.Rect.all(0),
     });
@@ -15676,16 +15980,13 @@ fn changesSection(
             if (staged) {
                 if (linkButtonTagged(@src(), "Unstage all", style.accent(), "link:unstage_all")) request(&.{ "reset", "-q", "--", "." });
             } else {
-                if (linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) request(&.{ "add", "-A" });
+                // A job: adding 11,000 new files is 13 s of git on Windows,
+                // which the window would otherwise wait out frozen.
+                if (linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) requestLocal("Staging", &.{ "add", "-A" });
             }
         }
+        changes_head_h = head.data().rect.h;
     }
-
-    var scroll = dvui.scrollArea(@src(), .{}, .{
-        .expand = .both,
-        .background = false,
-    });
-    defer scroll.deinit();
 
     if (changes.len == 0) {
         dvui.label(@src(), "{s}", .{if (staged) "Nothing staged." else "No local changes."}, .{
@@ -15697,26 +15998,62 @@ fn changesSection(
         return;
     }
 
-    var last_dir: []const u8 = "";
-    for (changes, 0..) |change, i| {
-        if (changes_view == .tree) {
-            const dir = std.fs.path.dirname(change.path) orelse "";
-            if (!std.mem.eql(u8, dir, last_dir)) {
-                last_dir = dir;
-                dvui.label(@src(), "{s}", .{if (dir.len == 0) "/" else dir}, .{
-                    .id_extra = id * 10000 + i,
-                    .font = style.tiny(),
-                    .color_text = .{ .color = style.textFaint() },
-                    .margin = .{ .x = style.space.lg, .y = style.space.xs },
-                    .padding = dvui.Rect.all(0),
-                });
-            }
+    const rh = style.row_height;
+    const info = &changes_scroll[id];
+    info.virtual_size.h = changeListHeight(id, changes);
+    // Held to the list: one that just got shorter — files staged while
+    // scrolled far down — would otherwise be drawn scrolled past its end.
+    info.viewport.y = @min(info.viewport.y, info.scrollMax(.vertical));
+    var scroll = dvui.scrollArea(@src(), .{ .scroll_info = info }, .{
+        .expand = .both,
+        .background = false,
+        // All of a list that fits; a few rows of one that shares the room,
+        // which is what keeps the commit box in the panel.
+        .min_size_content = .{ .h = if (grow) @min(info.virtual_size.h, CHANGES_MIN_ROWS * rh) else info.virtual_size.h },
+    });
+    defer scroll.deinit();
+
+    // Only the rows in sight are built, as in the history.
+    const width = @max(info.viewport.w, 120);
+    const first: usize = @intFromFloat(@floor(@max(0, info.viewport.y) / rh));
+    const last = first + @as(usize, @intFromFloat(@ceil(info.viewport.h / rh))) + 1;
+
+    if (changes_view != .tree) {
+        // Held to the list: one that just got shorter — files staged while
+        // scrolled far down — is still scrolled past its end this frame.
+        const end = @min(last, changes.len);
+        for (@min(first, end)..end) |i| {
+            var slot = dvui.box(@src(), .{}, .{ .id_extra = i, .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(i)) * rh, .w = width, .h = rh }, .background = false });
+            changeRow(@src(), changes[i], staged, id * 10000 + i, changes, i, null, 0);
+            slot.deinit();
         }
-        changeRow(@src(), change, staged, id * 10000 + i, changes, i);
+        return;
     }
+
+    const tree = changeTree(id, changes);
+    var it: TreeShown = .{ .rows = tree.rows, .folded = &changes_folded[id] };
+    var row: usize = 0;
+    var fold: ?[]const u8 = null;
+    while (it.next()) |shown| : (row += 1) {
+        if (row >= last) break;
+        if (row < first) continue;
+        var slot = dvui.box(@src(), .{}, .{ .id_extra = shown.index, .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row)) * rh, .w = width, .h = rh }, .background = false });
+        defer slot.deinit();
+        if (shown.row.file) |f| {
+            const indent = @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON;
+            changeRow(@src(), changes[f], staged, id * 10000 + f, changes, shown.pos, tree.order, indent);
+        } else if (folderLine(@src(), shown.index, shown.row, shown.folded, if (staged) .staged else .unstaged)) {
+            fold = shown.row.path;
+        }
+    }
+    // After the loop: folding changes which lines it walks.
+    if (fold) |path| foldToggle(&changes_folded[id], path);
 }
 
-fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, id: usize, changes: []const git.Change, index: usize) void {
+/// `index`: the file's place in the list as shown — `order` maps it to
+/// `changes` in the tree view, where a Shift+click's range runs top to
+/// bottom as the tree reads. `indent`: how far a tree's line is set in.
+fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, id: usize, changes: []const git.Change, index: usize, order: ?[]const u32, indent: f32) void {
     const side: git.DiffSide = if (staged) .staged else .unstaged;
     const selected = switch (selection) {
         .change => |s| s == side and std.mem.eql(u8, selected_path.items, change.path),
@@ -15757,7 +16094,7 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
         .expand = .both,
         .background = false,
         .margin = dvui.Rect.all(0),
-        .padding = .{ .x = style.space.lg },
+        .padding = .{ .x = style.space.lg + indent },
     });
     bw.processEvents();
     {
@@ -15812,7 +16149,10 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
             // Shift+click: everything from the last file clicked to this one.
             const from = pick_anchor orelse index;
             clearPickedChanges();
-            for (changes[@min(from, index) .. @max(from, index) + 1]) |c| toggleChangePick(side, c.path);
+            for (@min(from, index)..@max(from, index) + 1) |at| {
+                const i = if (order) |o| (if (at < o.len) o[at] else continue) else at;
+                if (i < changes.len) toggleChangePick(side, changes[i].path);
+            }
             pick_anchor = from;
         } else {
             clearPickedChanges();
@@ -17229,6 +17569,7 @@ fn resetUiGlobals() void {
     clearFoldedDirs();
     commit_all_files = false;
     focus_mode = false;
+    changes_scroll = @splat(.{ .vertical = .given });
     clearSearchHits();
     reapSearchFetches(true);
     clearGraphPrefs();
@@ -19470,6 +19811,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
 
     // Amend ticked: the last message to start from, the button live at once.
     try clickAt(try tagCenter("link:stage_all"));
+    try pumpJob();
     try clickAt(try tagCenter("commit:amend"));
     try std.testing.expect(amend);
     try std.testing.expectEqualStrings("first", commit_summary.items);
@@ -21118,6 +21460,133 @@ test "dragging a branch's tag in the graph onto another raises the drop bar" {
     try std.testing.expectEqualStrings("on feat", commitSummary(selection.commit));
 }
 
+test "a long list of changes is built a screenful at a time, scrolls, and leaves the commit box in sight" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "staged.txt", .data = "s\n" });
+    try expectGit(dir, &.{ "add", "staged.txt" });
+    try tmp.dir.createDirPath(app_io, "src");
+    const n = 600;
+    for (0..n) |i| {
+        var name: [32]u8 = undefined;
+        try tmp.dir.writeFile(app_io, .{ .sub_path = try std.fmt.bufPrint(&name, "src/f-{d:0>4}.txt", .{i}), .data = "x\n" });
+    }
+    openRepo(dir);
+    defer closeRepo();
+    reloadWork();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqual(@as(usize, n), work.?.unstaged.len);
+
+    // The commit box in the window, under the staged file.
+    const button = try tagRect("commit_button");
+    try std.testing.expect(button.y + button.h <= dvui.windowRectPixels().h);
+    _ = try tagCenter("staged:staged.txt");
+    // The first files built, the last not.
+    _ = try tagCenter("unstaged:src/f-0000.txt");
+    try expectNoTag("unstaged:src/f-0599.txt");
+
+    // Scrolled to the end: the last file, and the commit box where it was.
+    changes_scroll[0].viewport.y = changes_scroll[0].scrollMax(.vertical);
+    try dvui.testing.settle(frameArrowCursor);
+    _ = try tagCenter("unstaged:src/f-0599.txt");
+    try std.testing.expectEqual(button.y, (try tagRect("commit_button")).y);
+
+    // Most of them staged while it is scrolled to its end: the shorter list
+    // draws, still scrolled past its end for a frame.
+    try expectGit(dir, &.{ "add", "src/f-00*", "src/f-01*", "src/f-02*", "src/f-03*", "src/f-04*" });
+    reloadWork();
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqual(@as(usize, 100), work.?.unstaged.len);
+    // The file at the top of what is in view is drawn: f-0500 is row 0 now.
+    {
+        const in_view: usize = @intFromFloat(@ceil(changes_scroll[0].viewport.y / style.row_height));
+        try std.testing.expect(in_view < 100);
+        var name: [40]u8 = undefined;
+        _ = try tagCenter(try std.fmt.bufPrint(&name, "unstaged:src/f-{d:0>4}.txt", .{500 + in_view}));
+    }
+
+    // The tree: the folder's line first, the files set in under it.
+    changes_view = .tree;
+    defer changes_view = .path;
+    changes_scroll[0].viewport.y = 0;
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqual(@as(usize, 100 + 1), changeRows(0, work.?.unstaged));
+    const folder = try tagRect("unstaged:src/");
+    const file = try tagRect("unstaged:src/f-0500.txt");
+    try std.testing.expect(file.y > folder.y);
+
+    // Folded by a click: one line, its files gone.
+    try clickAt(.{ .x = folder.x + 40, .y = folder.y + folder.h / 2 });
+    try std.testing.expectEqual(@as(usize, 1), changeRows(0, work.?.unstaged));
+    try expectNoTag("unstaged:src/f-0500.txt");
+
+    // Its + stages the whole folder.
+    try clickAt(.{ .x = folder.x + folder.w - 16, .y = folder.y + folder.h / 2 });
+    try pumpJob();
+    try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
+    try std.testing.expectEqual(@as(usize, n + 1), work.?.staged.len);
+}
+
+test "a tree lists a folder's folders before its files, each by name, with what is in them" {
+    gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const paths = [_][]const u8{ "b.txt", "a/z.txt", "a/b/c.txt", "A.md", "a/b/d.txt", "c/e.txt", "x/y/z/w.txt", "x/y/z/v.txt" };
+    const rows = try treeRows(arena.allocator(), &paths);
+
+    const want = [_]struct { u16, []const u8, ?u32, u32, u32 }{
+        .{ 0, "a", null, 4, 3 },
+        .{ 1, "b", null, 2, 2 },
+        .{ 2, "c.txt", 2, 0, 0 },
+        .{ 2, "d.txt", 4, 0, 0 },
+        .{ 1, "z.txt", 1, 0, 0 },
+        .{ 0, "c", null, 1, 1 },
+        .{ 1, "e.txt", 5, 0, 0 },
+        // Folders holding one folder and nothing else: one line.
+        .{ 0, "x/y/z", null, 2, 2 },
+        .{ 1, "v.txt", 7, 0, 0 },
+        .{ 1, "w.txt", 6, 0, 0 },
+        .{ 0, "A.md", 3, 0, 0 },
+        .{ 0, "b.txt", 0, 0, 0 },
+    };
+    try std.testing.expectEqual(want.len, rows.len);
+    for (want, rows) |w, r| {
+        try std.testing.expectEqual(w[0], r.depth);
+        try std.testing.expectEqualStrings(w[1], r.name);
+        try std.testing.expectEqual(w[2], r.file);
+        try std.testing.expectEqual(w[3], r.inside);
+        try std.testing.expectEqual(w[4], r.files);
+    }
+    try std.testing.expectEqualStrings("a/b", rows[1].path);
+    // Folded by the deepest of them.
+    try std.testing.expectEqualStrings("x/y/z", rows[7].path);
+
+    // Folding "a" hides its four lines; the next shown is "c".
+    var folded: std.StringHashMapUnmanaged(void) = .empty;
+    defer folded.deinit(gpa);
+    try folded.put(gpa, "a", {});
+    var it: TreeShown = .{ .rows = rows, .folded = &folded };
+    try std.testing.expectEqualStrings("a", it.next().?.row.name);
+    const c = it.next().?;
+    try std.testing.expectEqualStrings("c", c.row.name);
+    // The files folded away still count toward the next one's place.
+    try std.testing.expectEqual(@as(u32, 3), c.pos);
+}
+
 test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the menu" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -21636,6 +22105,23 @@ test "the stage and unstage buttons on a file row work when clicked" {
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
 }
 
+/// Where `tag` is on screen; says which when it is not.
+fn tagRect(tag: []const u8) !dvui.Rect.Physical {
+    const data = dvui.tagGet(tag) orelse {
+        std.debug.print("tag \"{s}\" not on screen\n", .{tag});
+        return error.TagNotFound;
+    };
+    return data.rect;
+}
+
+/// `tag` not drawn this frame; says which when it is.
+fn expectNoTag(tag: []const u8) !void {
+    if (dvui.tagGet(tag) != null) {
+        std.debug.print("tag \"{s}\" on screen, and should not be\n", .{tag});
+        return error.TagOnScreen;
+    }
+}
+
 /// The centre of a tagged widget, failing the test if it is not on screen.
 fn tagCenter(tag: []const u8) !dvui.Point.Physical {
     const data = dvui.tagGet(tag) orelse {
@@ -21738,8 +22224,9 @@ test "audit: the main controls do what they say when clicked" {
     try std.testing.expectEqual(@as(usize, 0), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 2), work.?.unstaged.len);
 
-    // Stage all, Unstage all.
+    // Stage all — a job — and Unstage all.
     try clickAt(try tagCenter("link:stage_all"));
+    try pumpJob();
     try std.testing.expectEqual(@as(usize, 2), work.?.staged.len);
     try clickAt(try tagCenter("link:unstage_all"));
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
@@ -21944,3 +22431,4 @@ test "a commit date reads as a date, and fits its column" {
     try std.testing.expectEqual(@as(u8, ':'), text[13]);
     try std.testing.expect(style.graphMono().textSize("2026-10-21 18:05").w <= style.time_column);
 }
+
