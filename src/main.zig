@@ -6450,7 +6450,8 @@ fn titlebar() void {
             .background = false,
         });
         defer left.deinit();
-        repoContext();
+        // The branch every button acts on; the repository is the tab's.
+        if (repo != null) branchSwitcher();
     }
     {
         // Vertical, so the row of buttons in it can be centred across it: a
@@ -6467,6 +6468,13 @@ fn titlebar() void {
             .margin = .{ .x = style.space.sm },
             .padding = dvui.Rect.all(0),
         });
+        // Captions while the row fits over the history, as measured the last
+        // frame it had them; icons alone when it would not, so no button is
+        // cut off at a narrow window.
+        if (!toolbar_compact) if (dvui.minSizeGet(tools.data().id)) |m| {
+            toolbar_full_w = m.w;
+        };
+        toolbar_compact = toolbar_full_w + 2 * style.space.sm > middle.data().contentRect().w;
 
         // The search first: finding a commit comes before doing anything to it.
         if (toolbarButton(@src(), "Search", dvui.entypo.magnifying_glass, 0)) {
@@ -6490,6 +6498,9 @@ fn titlebar() void {
             // otherwise the first push of every new branch is an error message.
             requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
         }
+        // After Push, what comes after pushing a branch: the repository's
+        // pull requests, where it is on a host Zit speaks to.
+        if (pr.host != .none) pullsButton();
         toolbarDivider(@src(), 1);
         if (toolbarButton(@src(), "Branch", dvui.entypo.flow_branch, 0)) askName(.new_branch, "");
         if (toolbarButton(@src(), "Stash", dvui.entypo.save, 0)) requestLocal("Stashing", &.{ "stash", "push", "-u" });
@@ -6522,6 +6533,17 @@ fn titlebar() void {
     }
 }
 
+/// The repository's pull requests, in the toolbar: how many are open on its
+/// badge, lit while they are shown. A click shows them — they are opened,
+/// reviewed and made in their own view — and a second goes back to the
+/// history.
+fn pullsButton() void {
+    const shown = !new_tab_open and active_view == .pulls;
+    if (!toolbarButtonOn(@src(), "Pull requests", dvui.entypo.merge, pr.list.len, "toolbar:pulls", shown)) return;
+    new_tab_open = false;
+    active_view = if (shown) .graph else .pulls;
+}
+
 /// The toolbar's side zones, as wide as the panels under them were last
 /// frame — less the bar's own padding — and never narrower than what they
 /// hold needs.
@@ -6535,13 +6557,24 @@ fn toolbarZones() struct { left: f32, right: f32 } {
     };
 }
 
+/// A toolbar button's least size: GitComet's comfortable action bar, the
+/// caption under the icon. Square without it.
+const TOOL_W: f32 = 58;
+const TOOL_H: f32 = 44;
+
+/// The toolbar's buttons are icons alone this frame: with their captions the
+/// row would not fit over the history.
+var toolbar_compact = false;
+/// How wide the row was the last frame it had its captions.
+var toolbar_full_w: f32 = 0;
+
 /// A thin upright rule between groups of toolbar buttons.
 fn toolbarDivider(src: std.builtin.SourceLocation, id: usize) void {
     _ = dvui.separator(src, .{
         .id_extra = id,
-        .min_size_content = .{ .w = 1, .h = 26 },
+        .min_size_content = .{ .w = 1, .h = 28 },
         .gravity_y = 0.5,
-        .margin = .{ .x = style.space.sm, .w = style.space.sm },
+        .margin = .{ .x = style.space.md, .w = style.space.md },
         .color_fill = .{ .color = style.border() },
     });
 }
@@ -6609,48 +6642,58 @@ fn pullMenu() void {
     }
 }
 
-/// Left of the toolbar: which repository, and which branch of it — the two
-/// facts every button there acts on.
-fn repoContext() void {
-    if (repo == null) return;
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .gravity_y = 0.5,
-        .background = false,
-        .padding = dvui.Rect.all(0),
-    });
-    defer line.deinit();
-    contextField(@src(), 0, "repository", repo_name, .{
-        .name = "context_sep",
-        .icon = dvui.entypo.chevron_small_right,
-        .color = style.textFaint(),
-        .margin = .{ .x = style.space.sm, .w = style.space.sm },
-    });
-    branchSwitcher();
-}
-
 /// What the branch switcher's list is narrowed to.
 var switch_filter: std.ArrayList(u8) = .empty;
 
 /// The toolbar's branch, as a menu: the branch checked out, and a click away
 /// every other — local first, then the remotes', a filter over them all.
 fn branchSwitcher() void {
+    const detached = if (history) |h| h.head == null else false;
     const head: []const u8 = if (history) |h| h.head orelse "detached HEAD" else "";
     const button = DropButton.begin(@src(), .{
         .tag = "toolbar:branch",
         .gravity_y = 0.5,
         .background = false,
+        // Under the face below, which covers it: never the accent, even at
+        // its rounded edge, while the menu is open.
         .color_fill_hover = .{ .color = style.rowHover() },
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.xs, .y = 2, .w = style.space.xs, .h = 2 },
+        .padding = dvui.Rect.all(0),
     });
     {
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+        // A control, framed as a field is, so what it does reads before it
+        // is clicked: the branch's mark, its name, the menu's chevron. Lit
+        // under the pointer and while its menu is open.
+        const lit = button.item.show_active or button.item.mouse_over;
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .min_size_content = .{ .h = BRANCH_BUTTON_H },
+            .padding = .{ .x = style.space.md, .w = style.space.sm },
+        });
         defer face.deinit();
-        contextField(@src(), 1, "branch", head, .{
-            .name = "switch_chevron",
-            .icon = dvui.entypo.chevron_small_down,
-            .color = style.textMuted(),
-            .margin = .{ .x = style.space.xs },
+        dvui.icon(@src(), "branch_mark", if (detached) dvui.entypo.flow_line else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = style.accent() } }, .{
+            .min_size_content = .{ .w = 13, .h = 13 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.sm },
+        });
+        var buf: [MAX_SHOWN_LINE]u8 = undefined;
+        // As long as the zone over the sidebar lets it be, less the mark,
+        // the chevron and the frame's padding.
+        const room = toolbarZones().left - 72;
+        dvui.label(@src(), "{s}", .{fitText(&buf, head, style.bodyBold(), room)}, .{
+            .font = style.bodyBold(),
+            .color_text = .{ .color = style.text() },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.icon(@src(), "switch_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.sm },
         });
     }
     const menu = button.open();
@@ -6664,9 +6707,11 @@ fn branchSwitcher() void {
     focusOnce(searchField(@src(), &switch_filter, "Switch to a branch…", "switch_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
     const needle = std.mem.trim(u8, switch_filter.items, " ");
 
+    // As tall as its branches, up to a bound — and less where the window is
+    // short: a long list scrolls, a short one leaves no empty space under it.
     var list = dvui.scrollArea(@src(), .{}, .{
-        .min_size_content = .{ .w = 320, .h = 340 },
-        .max_size_content = .size(.{ .w = 320, .h = 340 }),
+        .min_size_content = .{ .w = 320 },
+        .max_size_content = .size(.{ .w = 320, .h = @min(BRANCH_LIST_MAX_H, dvui.windowRect().h * 0.6) }),
         .background = false,
     });
     defer list.deinit();
@@ -6725,40 +6770,10 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
     return mi.activeRect() != null;
 }
 
-/// The chevron after a context field's value.
-const ContextMark = struct { name: []const u8, icon: []const u8, color: dvui.Color, margin: dvui.Rect };
-
-/// A small caption over a value, as the toolbar's left end shows them; `mark`
-/// after the value, on its line. There, it is centred on the value: placed
-/// beside the whole field, by eye, it sat a few pixels above it on Windows.
-fn contextField(src: std.builtin.SourceLocation, id: usize, caption: []const u8, value: []const u8, mark: ContextMark) void {
-    var stack = dvui.box(src, .{ .dir = .vertical }, .{
-        .id_extra = id,
-        .gravity_y = 0.5,
-        .background = false,
-        .padding = dvui.Rect.all(0),
-    });
-    defer stack.deinit();
-    dvui.label(@src(), "{s}", .{caption}, .{
-        .font = style.tiny(),
-        .color_text = .{ .color = style.textFaint() },
-        .padding = dvui.Rect.all(0),
-    });
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .padding = dvui.Rect.all(0) });
-    defer line.deinit();
-    var buf: [MAX_SHOWN_LINE]u8 = undefined;
-    dvui.label(@src(), "{s}", .{fitText(&buf, value, style.smallBold(), 200)}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
-    });
-    dvui.icon(@src(), mark.name, mark.icon, .{ .fill_color = .{ .color = mark.color } }, .{
-        .min_size_content = .{ .w = 12, .h = 12 },
-        .gravity_y = 0.5,
-        .margin = mark.margin,
-    });
-}
+/// The toolbar's branch button: a control's height.
+const BRANCH_BUTTON_H: f32 = 30;
+/// The branch menu's list, at most.
+const BRANCH_LIST_MAX_H: f32 = 360;
 
 /// The "s" a count past one takes: "1 file", "2 files".
 fn plural(n: anytype) []const u8 {
@@ -8471,7 +8486,6 @@ fn tabStrip() void {
     active_tab_foot = null;
     workspaceSwitcher();
     tabList();
-    pullsButton();
     userMenu();
     windowControls();
 
@@ -9371,85 +9385,6 @@ fn tabBadge(name: []const u8, active: bool) void {
     });
 }
 
-/// The open repository's pull requests, at the strip's right end before
-/// the settings: a pill with their name and how many are open. A click shows
-/// them, a second goes back to the history; lit while they are shown.
-fn pullsButton() void {
-    if (repo == null or pr.host == .none) return;
-    const shown = !new_tab_open and active_view == .pulls;
-    const n = pr.list.len;
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{ .draw_focus = false }, .{
-        .tag = "tab:pulls",
-        .gravity_y = 0.5,
-        .background = true,
-        .color_fill = .{ .color = if (shown) style.accent() else style.accentDim() },
-        .color_fill_hover = .{ .color = if (shown) style.accentHover() else style.accent().opacity(0.22) },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = if (shown) style.accent() else style.accent().opacity(0.3) },
-        .corners = .all(100),
-        .margin = .{ .w = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = 3, .w = 4, .h = 3 },
-    });
-    bw.processEvents();
-    bw.drawBackground();
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-        defer row.deinit();
-        const ink = if (shown) style.textOnAccent() else style.accent();
-        dvui.icon(@src(), "pulls_icon", dvui.entypo.merge, .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
-            .min_size_content = .{ .w = 12, .h = 12 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.xs },
-        });
-        dvui.label(@src(), "{s}", .{"Pull requests"}, .{
-            .font = style.smallBold(),
-            .color_text = .{ .color = ink },
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
-        // How many wait on your review, in orange, before the total.
-        const waiting = requestsToReview();
-        if (waiting > 0) dvui.label(@src(), "{d} to review", .{waiting}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = style.textOnAccent() },
-            .background = true,
-            .color_fill = .{ .color = style.get().orange },
-            .corners = .all(100),
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = .{ .x = 5, .w = 5 },
-        });
-        // The count on a disc of its own, the pill's colours swapped.
-        dvui.label(@src(), "{d}", .{n}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = if (shown) style.accent() else style.textOnAccent() },
-            .background = true,
-            .color_fill = .{ .color = if (shown) style.textOnAccent() else style.accent() },
-            .corners = .all(100),
-            .min_size_content = .{ .w = 12 },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = .{ .x = 5, .y = 0, .w = 5, .h = 0 },
-        });
-    }
-    if (bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{d} open — click to see them", .{n}, .{ .font = style.small() });
-    const clicked = bw.clicked();
-    bw.deinit();
-    if (clicked) {
-        new_tab_open = false;
-        active_view = if (shown) .graph else .pulls;
-    }
-
-    // A hairline between the repository's own and the app's.
-    _ = dvui.separator(@src(), .{
-        .min_size_content = .{ .w = 1, .h = 16 },
-        .gravity_y = 0.5,
-        .margin = .{ .x = style.space.xs, .w = style.space.xs },
-        .color_fill = .{ .color = style.border() },
-    });
-}
-
 /// What says a pill opens a menu: a chevron after its text, and the hand
 /// cursor over it.
 fn dropAffordance(dd: *dvui.DropdownWidget, color: dvui.Color) void {
@@ -9815,15 +9750,25 @@ fn dropChoice(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8, hint
 /// `badge` is drawn beside the caption when it is not zero — how many commits
 /// Pull or Push would actually move.
 fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize) bool {
+    return toolbarButtonTagged(src, caption, icon, badge, frameTag("toolbar", caption));
+}
+
+/// As `toolbarButton`, findable by `tag` whatever its caption says.
+fn toolbarButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8) bool {
+    return toolbarButtonOn(src, caption, icon, badge, tag, false);
+}
+
+/// As `toolbarButtonTagged`, lit in the accent while `on`: a view it shows.
+fn toolbarButtonOn(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8, on: bool) bool {
     const enabled = repo != null;
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
-        .tag = frameTag("toolbar", caption),
-        .min_size_content = .{ .w = 52, .h = 38 },
+        .tag = tag,
+        .min_size_content = .{ .w = if (toolbar_compact) TOOL_H else TOOL_W, .h = TOOL_H },
         .gravity_y = 0.5,
         .background = false,
-        .margin = .{ .w = 2 },
+        .margin = .{ .x = 2, .w = 2 },
         .padding = dvui.Rect.all(0),
         .corners = style.radius.input,
     });
@@ -9831,22 +9776,26 @@ fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []c
     bw.processEvents();
 
     const hovered = enabled and bw.hovered();
-    const color = if (!enabled) style.textFaint() else if (hovered) style.text() else style.textMuted();
+    const color = if (!enabled) style.textFaint() else if (on) style.accent() else if (hovered) style.text() else style.textMuted();
+    // Without its caption, the caption says itself on hover.
+    if (toolbar_compact and bw.hovered()) {
+        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{caption}, .{ .font = style.small() });
+    }
 
     {
         var cell = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
-            .background = hovered,
-            .color_fill = .{ .color = style.rowHover() },
+            .background = hovered or on,
+            .color_fill = .{ .color = if (on) style.accentDim() else style.rowHover() },
             .corners = style.radius.input,
-            .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
+            .padding = .{ .x = style.space.md, .y = 5, .w = style.space.md, .h = 5 },
         });
         defer cell.deinit();
 
         dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
-            .min_size_content = .{ .w = 16, .h = 16 },
+            .min_size_content = .{ .w = 17, .h = 17 },
             .gravity_x = 0.5,
-            .margin = .{ .h = 3 },
+            .margin = .{ .h = 4 },
         });
 
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -9856,8 +9805,8 @@ fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []c
         });
         defer line.deinit();
 
-        dvui.label(@src(), "{s}", .{caption}, .{
-            .font = style.tiny(),
+        if (!toolbar_compact) dvui.label(@src(), "{s}", .{caption}, .{
+            .font = style.small(),
             .color_text = .{ .color = color },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),

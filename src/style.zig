@@ -184,9 +184,9 @@ pub const graph = struct {
     pub const inset: f32 = 16;
 };
 
-/// GitComet's comfortable chrome: a 44px action bar over the sidebar and the
-/// content, closed by a status bar; the tabs a strip of their own above.
-pub const titlebar_height: f32 = 46;
+/// The action bar over the sidebar and the content: GitComet's 44 plus room
+/// for a caption under each icon. The tabs are a strip of their own above.
+pub const titlebar_height: f32 = 56;
 /// The tab strip above it: one line of text and a close button.
 pub const tab_height: f32 = 34;
 pub const statusbar_height: f32 = 28;
