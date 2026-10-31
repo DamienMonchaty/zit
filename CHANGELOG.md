@@ -49,5 +49,6 @@ First public release: history graph, staging by line, branches, rebase,
 conflicts, stashes, worktrees, and GitHub pull requests, checks and issues.
 Its downloads were withdrawn: its GitHub sign-in no longer works.
 
+[0.1.2]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.2
 [0.1.1]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.0
