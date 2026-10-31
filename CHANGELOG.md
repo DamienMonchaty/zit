@@ -9,8 +9,32 @@ Every release of Zit, newest first. Downloads are on the
 - A website, [damienmonchaty.github.io/zit](https://damienmonchaty.github.io/zit/):
   installing, connecting GitHub, every feature, the search syntax and the
   keyboard shortcuts.
+- A zoom for the whole window, as a browser's: `Ctrl =` and `Ctrl -` (the
+  keypad's too) a tenth at a time from 70 to 200 %, `Ctrl 0` back to 100 %,
+  also in the command palette. It is remembered, and shown in the status bar
+  when it is not 100 % — a click there resets it.
 
 ### Changed
+- Zit is roomier, towards GitComet's comfortable density: text a point
+  larger throughout, taller rows in the lists, the history and the sidebar,
+  wider menus with taller items, larger fields, buttons and tabs, and the
+  changed files named in the interface's face rather than a mono one.
+- The repository tabs are browser tabs, as GitComet's: the active one raised
+  and open onto the bar below, the others flat with a rule between them, each
+  with the repository's initials. Menus, dialogs and tooltips have rounder
+  corners; a menu's row under the pointer is tinted with the accent rather
+  than filled with it; the checked-out commit has an accent bar down its edge.
+- The two side panels are one design, roomier: section headers and rows the
+  same height on both, and the changes panel headed by **Changed files** as a
+  title, over its sections. The graph's nodes — avatars, merges and the
+  uncommitted changes' — are all one size, a little larger.
+- The toolbar is taller, its buttons larger with readable captions. Its left
+  end is the branch alone, on a framed button — the repository is the tab's —
+  and the branch menu is as tall as its branches, up to a bound, rather than
+  a fixed height. **Pull requests** has moved from the tab strip to the
+  toolbar, after Push, with how many are open; it shows them, and a second
+  click goes back to the history. A window too narrow for the captions shows
+  the icons alone, their captions on hover.
 - The history's branch names have a column of their own, **BRANCH / TAG**,
   before the graph, as in GitKraken: read from its left, joined to their commit
   by a line of the branch's colour, and cut only where the column ends. Drag

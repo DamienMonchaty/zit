@@ -292,6 +292,7 @@ fn loadWorkspace() void {
     graph_first_parent = loaded.file.first_parent;
     graph_width = loaded.file.graph_width;
     branch_width = loaded.file.branch_width;
+    zoom = zoomStep(loaded.file.zoom);
     // The file's strings die with `loaded`.
     commit_template.clearRetainingCapacity();
     commit_template.appendSlice(gpa, commit_prefs.template) catch {};
@@ -380,12 +381,46 @@ fn writeWorkspace() bool {
         .default_branch = default_branch.items,
         .prune = prune_on_fetch,
         .integrations = integrations,
+        .zoom = zoom,
         .commit = prefs: {
             var prefs = commit_prefs;
             prefs.template = commit_template.items;
             break :prefs prefs;
         },
     });
+}
+
+/// The whole window's zoom, over the system's own scale, as a browser's:
+/// Ctrl+= and Ctrl+- a tenth at a time, Ctrl+0 back to 100 %. Remembered.
+var zoom: f32 = 1.0;
+const ZOOM_MIN: f32 = 0.7;
+const ZOOM_MAX: f32 = 2.0;
+
+/// `to` on the tenths and within the bounds: dvui's own steps add 0.1 to a
+/// float, which drifts, and a file edited by hand can say anything.
+fn zoomStep(to: f32) f32 {
+    if (!std.math.isFinite(to)) return 1.0;
+    return std.math.clamp(@round(to * 10) / 10, ZOOM_MIN, ZOOM_MAX);
+}
+
+/// Within a frame: the next one is laid out at the new size.
+fn setZoom(to: f32) void {
+    const z = zoomStep(to);
+    dvui.currentWindow().content_scale = z;
+    dvui.refresh(null, @src(), null);
+    if (z == zoom) return;
+    zoom = z;
+    saveWorkspace();
+}
+
+/// What a key asks of the zoom: the step, or back to 100 %. The keypad's as
+/// well as the main row's; Cmd on a Mac, through dvui's own binds.
+fn zoomKey(ke: dvui.Event.Key) ?f32 {
+    const mod = ke.mod.control() and !ke.mod.alt();
+    if ((mod and (ke.code == .equal or ke.code == .kp_add)) or ke.matchBind("zoom_in")) return zoom + 0.1;
+    if ((mod and (ke.code == .minus or ke.code == .kp_subtract)) or ke.matchBind("zoom_out")) return zoom - 0.1;
+    if (mod and !ke.mod.shift() and (ke.code == .zero or ke.code == .kp_0)) return 1.0;
+    return null;
 }
 
 /// The General settings: what is saved with the workspace beside the tabs.
@@ -1615,6 +1650,7 @@ fn appInit(win: *dvui.Window) !void {
     // Before the theme, which is one of the things it remembers.
     loadWorkspace();
     applyTheme();
+    win.content_scale = zoom;
     try openRepoFromArgs();
 
     // A machine git has never been told who is using it: every commit would
@@ -4160,6 +4196,9 @@ fn appFrame() !dvui.App.Result {
     if (collectWorkLoad()) dvui.refresh(null, @src(), null);
     if (collectHistoryLoad()) dvui.refresh(null, @src(), null);
     updateWindowTitle();
+    // A zoom key that reached dvui rather than `shortcuts` — under a modal,
+    // say: bounded and remembered all the same.
+    if (dvui.currentWindow().content_scale != zoom) setZoom(dvui.currentWindow().content_scale);
     no_split = 0;
     all_split = 1;
 
@@ -6121,6 +6160,14 @@ fn shortcuts() void {
             stepCommit(if (ke.code == .up) -1 else 1);
             continue;
         }
+        // Taken before dvui's own zoom keys, which are not bounded and not
+        // remembered; held down, they repeat, as a browser's do. In a text
+        // field too: they mean nothing there.
+        if (zoomKey(ke)) |to| {
+            e.handled = true;
+            setZoom(to);
+            continue;
+        }
         // Everything else once per press: a held Ctrl+Z must not undo the
         // history away one repeat at a time.
         if (ke.action != .down) continue;
@@ -6403,7 +6450,8 @@ fn titlebar() void {
             .background = false,
         });
         defer left.deinit();
-        repoContext();
+        // The branch every button acts on; the repository is the tab's.
+        if (repo != null) branchSwitcher();
     }
     {
         // Vertical, so the row of buttons in it can be centred across it: a
@@ -6420,6 +6468,13 @@ fn titlebar() void {
             .margin = .{ .x = style.space.sm },
             .padding = dvui.Rect.all(0),
         });
+        // Captions while the row fits over the history, as measured the last
+        // frame it had them; icons alone when it would not, so no button is
+        // cut off at a narrow window.
+        if (!toolbar_compact) if (dvui.minSizeGet(tools.data().id)) |m| {
+            toolbar_full_w = m.w;
+        };
+        toolbar_compact = toolbar_full_w + 2 * style.space.sm > middle.data().contentRect().w;
 
         // The search first: finding a commit comes before doing anything to it.
         if (toolbarButton(@src(), "Search", dvui.entypo.magnifying_glass, 0)) {
@@ -6443,6 +6498,9 @@ fn titlebar() void {
             // otherwise the first push of every new branch is an error message.
             requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
         }
+        // After Push, what comes after pushing a branch: the repository's
+        // pull requests, where it is on a host Zit speaks to.
+        if (pr.host != .none) pullsButton();
         toolbarDivider(@src(), 1);
         if (toolbarButton(@src(), "Branch", dvui.entypo.flow_branch, 0)) askName(.new_branch, "");
         if (toolbarButton(@src(), "Stash", dvui.entypo.save, 0)) requestLocal("Stashing", &.{ "stash", "push", "-u" });
@@ -6475,6 +6533,17 @@ fn titlebar() void {
     }
 }
 
+/// The repository's pull requests, in the toolbar: how many are open on its
+/// badge, lit while they are shown. A click shows them — they are opened,
+/// reviewed and made in their own view — and a second goes back to the
+/// history.
+fn pullsButton() void {
+    const shown = !new_tab_open and active_view == .pulls;
+    if (!toolbarButtonOn(@src(), "Pull requests", dvui.entypo.merge, pr.list.len, "toolbar:pulls", shown)) return;
+    new_tab_open = false;
+    active_view = if (shown) .graph else .pulls;
+}
+
 /// The toolbar's side zones, as wide as the panels under them were last
 /// frame — less the bar's own padding — and never narrower than what they
 /// hold needs.
@@ -6488,13 +6557,24 @@ fn toolbarZones() struct { left: f32, right: f32 } {
     };
 }
 
+/// A toolbar button's least size: GitComet's comfortable action bar, the
+/// caption under the icon. Square without it.
+const TOOL_W: f32 = 58;
+const TOOL_H: f32 = 44;
+
+/// The toolbar's buttons are icons alone this frame: with their captions the
+/// row would not fit over the history.
+var toolbar_compact = false;
+/// How wide the row was the last frame it had its captions.
+var toolbar_full_w: f32 = 0;
+
 /// A thin upright rule between groups of toolbar buttons.
 fn toolbarDivider(src: std.builtin.SourceLocation, id: usize) void {
     _ = dvui.separator(src, .{
         .id_extra = id,
-        .min_size_content = .{ .w = 1, .h = 26 },
+        .min_size_content = .{ .w = 1, .h = 28 },
         .gravity_y = 0.5,
-        .margin = .{ .x = style.space.sm, .w = style.space.sm },
+        .margin = .{ .x = style.space.md, .w = style.space.md },
         .color_fill = .{ .color = style.border() },
     });
 }
@@ -6522,7 +6602,7 @@ const DropButton = struct {
             .color_fill = .{ .color = style.surfaceRaised() },
             .border = dvui.Rect.all(1),
             .color_border = .{ .color = style.border() },
-            .corners = style.radius.row,
+            .corners = style.radius.popover,
             .padding = dvui.Rect.all(style.space.xs),
         });
     }
@@ -6562,48 +6642,58 @@ fn pullMenu() void {
     }
 }
 
-/// Left of the toolbar: which repository, and which branch of it — the two
-/// facts every button there acts on.
-fn repoContext() void {
-    if (repo == null) return;
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .gravity_y = 0.5,
-        .background = false,
-        .padding = dvui.Rect.all(0),
-    });
-    defer line.deinit();
-    contextField(@src(), 0, "repository", repo_name, .{
-        .name = "context_sep",
-        .icon = dvui.entypo.chevron_small_right,
-        .color = style.textFaint(),
-        .margin = .{ .x = style.space.sm, .w = style.space.sm },
-    });
-    branchSwitcher();
-}
-
 /// What the branch switcher's list is narrowed to.
 var switch_filter: std.ArrayList(u8) = .empty;
 
 /// The toolbar's branch, as a menu: the branch checked out, and a click away
 /// every other — local first, then the remotes', a filter over them all.
 fn branchSwitcher() void {
+    const detached = if (history) |h| h.head == null else false;
     const head: []const u8 = if (history) |h| h.head orelse "detached HEAD" else "";
     const button = DropButton.begin(@src(), .{
         .tag = "toolbar:branch",
         .gravity_y = 0.5,
         .background = false,
+        // Under the face below, which covers it: never the accent, even at
+        // its rounded edge, while the menu is open.
         .color_fill_hover = .{ .color = style.rowHover() },
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.xs, .y = 2, .w = style.space.xs, .h = 2 },
+        .padding = dvui.Rect.all(0),
     });
     {
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+        // A control, framed as a field is, so what it does reads before it
+        // is clicked: the branch's mark, its name, the menu's chevron. Lit
+        // under the pointer and while its menu is open.
+        const lit = button.item.show_active or button.item.mouse_over;
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .min_size_content = .{ .h = BRANCH_BUTTON_H },
+            .padding = .{ .x = style.space.md, .w = style.space.sm },
+        });
         defer face.deinit();
-        contextField(@src(), 1, "branch", head, .{
-            .name = "switch_chevron",
-            .icon = dvui.entypo.chevron_small_down,
-            .color = style.textMuted(),
-            .margin = .{ .x = style.space.xs },
+        dvui.icon(@src(), "branch_mark", if (detached) dvui.entypo.flow_line else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = style.accent() } }, .{
+            .min_size_content = .{ .w = 13, .h = 13 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.sm },
+        });
+        var buf: [MAX_SHOWN_LINE]u8 = undefined;
+        // As long as the zone over the sidebar lets it be, less the mark,
+        // the chevron and the frame's padding.
+        const room = toolbarZones().left - 72;
+        dvui.label(@src(), "{s}", .{fitText(&buf, head, style.bodyBold(), room)}, .{
+            .font = style.bodyBold(),
+            .color_text = .{ .color = style.text() },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.icon(@src(), "switch_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.sm },
         });
     }
     const menu = button.open();
@@ -6617,9 +6707,11 @@ fn branchSwitcher() void {
     focusOnce(searchField(@src(), &switch_filter, "Switch to a branch…", "switch_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
     const needle = std.mem.trim(u8, switch_filter.items, " ");
 
+    // As tall as its branches, up to a bound — and less where the window is
+    // short: a long list scrolls, a short one leaves no empty space under it.
     var list = dvui.scrollArea(@src(), .{}, .{
-        .min_size_content = .{ .w = 320, .h = 340 },
-        .max_size_content = .size(.{ .w = 320, .h = 340 }),
+        .min_size_content = .{ .w = 320 },
+        .max_size_content = .size(.{ .w = 320, .h = @min(BRANCH_LIST_MAX_H, dvui.windowRect().h * 0.6) }),
         .background = false,
     });
     defer list.deinit();
@@ -6654,7 +6746,8 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
         .tag = frameTag("switch", ref.name),
         .expand = .horizontal,
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+        .color_fill_hover = .{ .color = style.accentDim() },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -6677,40 +6770,10 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
     return mi.activeRect() != null;
 }
 
-/// The chevron after a context field's value.
-const ContextMark = struct { name: []const u8, icon: []const u8, color: dvui.Color, margin: dvui.Rect };
-
-/// A small caption over a value, as the toolbar's left end shows them; `mark`
-/// after the value, on its line. There, it is centred on the value: placed
-/// beside the whole field, by eye, it sat a few pixels above it on Windows.
-fn contextField(src: std.builtin.SourceLocation, id: usize, caption: []const u8, value: []const u8, mark: ContextMark) void {
-    var stack = dvui.box(src, .{ .dir = .vertical }, .{
-        .id_extra = id,
-        .gravity_y = 0.5,
-        .background = false,
-        .padding = dvui.Rect.all(0),
-    });
-    defer stack.deinit();
-    dvui.label(@src(), "{s}", .{caption}, .{
-        .font = style.tiny(),
-        .color_text = .{ .color = style.textFaint() },
-        .padding = dvui.Rect.all(0),
-    });
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .padding = dvui.Rect.all(0) });
-    defer line.deinit();
-    var buf: [MAX_SHOWN_LINE]u8 = undefined;
-    dvui.label(@src(), "{s}", .{fitText(&buf, value, style.smallBold(), 200)}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
-    });
-    dvui.icon(@src(), mark.name, mark.icon, .{ .fill_color = .{ .color = mark.color } }, .{
-        .min_size_content = .{ .w = 12, .h = 12 },
-        .gravity_y = 0.5,
-        .margin = mark.margin,
-    });
-}
+/// The toolbar's branch button: a control's height.
+const BRANCH_BUTTON_H: f32 = 30;
+/// The branch menu's list, at most.
+const BRANCH_LIST_MAX_H: f32 = 360;
 
 /// The "s" a count past one takes: "1 file", "2 files".
 fn plural(n: anytype) []const u8 {
@@ -7007,7 +7070,7 @@ fn dialogInput(src: std.builtin.SourceLocation, id: usize, text: *std.ArrayList(
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = style.border() },
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+        .padding = .{ .x = style.space.md + 2, .y = style.space.md, .w = style.space.md + 2, .h = style.space.md },
     });
     const changed = te.text_changed;
     if (te.enter_pressed) entered.* = true;
@@ -7603,6 +7666,8 @@ fn keysDialog() void {
         shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
         shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
         shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
+        shortcutRow(@src(), "Ctrl+=, Ctrl+-", "Zoom in / out, from 70 to 200 %");
+        shortcutRow(@src(), "Ctrl+0", "Back to 100 %");
     }
 
     if (escapePressed()) keys_open = false;
@@ -8158,6 +8223,21 @@ const commands = [_]Command{
             show_detail = !show_detail;
         }
     }.f },
+    .{ .name = "Zoom in", .icon = dvui.entypo.plus, .keys = "Ctrl+=", .needs_repo = false, .run = struct {
+        fn f() void {
+            setZoom(zoom + 0.1);
+        }
+    }.f },
+    .{ .name = "Zoom out", .icon = dvui.entypo.minus, .keys = "Ctrl+-", .needs_repo = false, .run = struct {
+        fn f() void {
+            setZoom(zoom - 0.1);
+        }
+    }.f },
+    .{ .name = "Reset the zoom to 100 %", .icon = dvui.entypo.resize_100, .keys = "Ctrl+0", .needs_repo = false, .run = struct {
+        fn f() void {
+            setZoom(1.0);
+        }
+    }.f },
     .{ .name = "Create a pull request for this branch", .icon = dvui.entypo.merge, .run = requestCreateRequest },
     .{ .name = "Git identity: name, email, GitHub sign-in", .icon = dvui.entypo.user, .needs_repo = false, .run = openIdentity },
     .{ .name = "Settings", .icon = dvui.entypo.cog, .needs_repo = false, .run = struct {
@@ -8406,7 +8486,6 @@ fn tabStrip() void {
     active_tab_foot = null;
     workspaceSwitcher();
     tabList();
-    pullsButton();
     userMenu();
     windowControls();
 
@@ -8541,6 +8620,8 @@ fn tabList() void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false });
     defer row.deinit();
     const width = TAB_W;
+    // No rule before the first tab.
+    tab_prev_active = true;
 
     // Only recorded here, run after the frame: selecting or closing one
     // rebuilds the snapshots the rest of this frame is drawn from. The
@@ -8671,7 +8752,7 @@ fn userMenu() void {
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            .min_size_content = .{ .w = 240 },
+            .min_size_content = .{ .w = MENU_MIN_W },
             .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
         });
         defer head.deinit();
@@ -8943,7 +9024,8 @@ fn workspaceSwitcher() void {
             .expand = .horizontal,
             .min_size_content = .{ .w = 260 },
             .corners = style.radius.input,
-            .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+            .color_fill_hover = .{ .color = style.accentDim() },
+            .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
         });
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -9126,7 +9208,7 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
 const TabHit = enum { none, select, close };
 
 /// Each tab as wide as its name, up to this much, cut with "…" past it.
-const TAB_W: f32 = 180;
+const TAB_W: f32 = 200;
 
 /// What kind of tab: its icon.
 const TabLook = struct {
@@ -9186,23 +9268,41 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     var hit: TabHit = .none;
     const lit = if (look.slot) |s| (if (tab_drop_over) |o| o[0] == s[0] and o[1] == s[1] else false) else false;
 
-    // Square and the strip's full height, a hairline between: the active tab
-    // is the one on the toolbar's ground, joined to the bar below it.
+    // Browser tabs, as GitComet's: the active one raised on the toolbar's
+    // ground, its top corners round, outlined on top and on its sides and
+    // open below — one piece with the bar under it. The others lie flat on
+    // the strip, a short rule between two, lit under the pointer.
+    const prev_active = tab_prev_active;
+    tab_prev_active = active;
     var face = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
         .expand = .vertical,
         .background = true,
         .color_fill = .{ .color = if (lit) style.accentDim() else if (active) style.surface() else style.background() },
-        .border = .{ .w = 1 },
+        .border = if (active) .{ .x = 1, .y = 1, .w = 1 } else dvui.Rect.all(0),
         .color_border = .{ .color = style.border() },
-        .margin = dvui.Rect.all(0),
+        .corners = if (active) .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr } else dvui.CornerRect.all(0),
+        .margin = .{ .x = TAB_GAP / 2, .y = TAB_TOP, .w = TAB_GAP / 2 },
         .padding = .{ .w = style.space.xs },
     });
     defer face.deinit();
     const face_rs = face.data().borderRectScale();
+    const s = face_rs.s;
     rect_out.* = face_rs.r;
-    // The hairline below it, less the 1 px edge on its right.
-    if (active) active_tab_foot = .{ .x = face_rs.r.x, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - face_rs.s, .h = face_rs.s };
+    // The strip's hairline is rubbed out under it, between its side edges.
+    if (active) active_tab_foot = .{ .x = face_rs.r.x + s, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - 2 * s, .h = s };
+    if (!active and !lit) {
+        // Under the pointer, a plate a little in from the tab's edges.
+        if (face_rs.r.contains(dvui.currentWindow().mouse_pt)) {
+            (dvui.Rect.Physical{ .x = face_rs.r.x, .y = face_rs.r.y + 2 * s, .w = face_rs.r.w, .h = face_rs.r.h - 6 * s })
+                .fill(dvui.CornerRect.Physical.all(5 * s), .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
+        }
+        // The rule from the tab before, unless either of them is the raised one.
+        if (!prev_active) {
+            (dvui.Rect.Physical{ .x = face_rs.r.x - (TAB_GAP / 2) * s - s / 2, .y = face_rs.r.y + (face_rs.r.h - 16 * s) / 2 - 2 * s, .w = s, .h = 16 * s })
+                .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
+        }
+    }
 
     var bw: dvui.ButtonWidget = undefined;
     var id_buf: [16]u8 = undefined;
@@ -9219,12 +9319,13 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     bw.processEvents();
     if (look.slot) |slot| tabDragStart(bw.data(), slot);
 
-    const font = if (active) style.tabBold() else style.tab();
+    const font = style.tab();
     // A button lays its children over each other: the icon and the name go
     // in a row of their own.
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
-    // A repository's branch, or the new-tab page's plus: what kind of tab.
-    dvui.icon(@src(), "tab_icon", look.icon, .{ .fill_color = .{ .color = if (active) style.accent() else style.textMuted() } }, .{
+    // A repository's initials on a badge, as GitComet marks its tabs —
+    // the accent's on the active one; the new-tab page's plus.
+    if (look.slot != null) tabBadge(name, active) else dvui.icon(@src(), "tab_icon", look.icon, .{ .fill_color = .{ .color = if (active) style.accent() else style.textMuted() } }, .{
         .min_size_content = .{ .w = 14, .h = 14 },
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.sm },
@@ -9248,86 +9349,39 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     if (bw.clicked()) hit = .select;
     bw.deinit();
 
-    if (iconButton(@src(), "tab_close", "Close this tab — Ctrl+W", dvui.entypo.cross, style.textFaint())) hit = .close;
+    // The × on the active tab and the one under the pointer; on the others its
+    // room is kept, so a tab does not change width as the pointer crosses it.
+    const show_close = active or face_rs.r.contains(dvui.currentWindow().mouse_pt);
+    if (iconButton(@src(), "tab_close", "Close this tab — Ctrl+W", dvui.entypo.cross, if (show_close) style.textFaint() else dvui.Color.transparent)) hit = .close;
     return hit;
 }
 
-/// The open repository's pull requests, at the strip's right end before
-/// the settings: a pill with their name and how many are open. A click shows
-/// them, a second goes back to the history; lit while they are shown.
-fn pullsButton() void {
-    if (repo == null or pr.host == .none) return;
-    const shown = !new_tab_open and active_view == .pulls;
-    const n = pr.list.len;
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{ .draw_focus = false }, .{
-        .tag = "tab:pulls",
-        .gravity_y = 0.5,
-        .background = true,
-        .color_fill = .{ .color = if (shown) style.accent() else style.accentDim() },
-        .color_fill_hover = .{ .color = if (shown) style.accentHover() else style.accent().opacity(0.22) },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = if (shown) style.accent() else style.accent().opacity(0.3) },
-        .corners = .all(100),
-        .margin = .{ .w = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = 3, .w = 4, .h = 3 },
-    });
-    bw.processEvents();
-    bw.drawBackground();
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-        defer row.deinit();
-        const ink = if (shown) style.textOnAccent() else style.accent();
-        dvui.icon(@src(), "pulls_icon", dvui.entypo.merge, .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
-            .min_size_content = .{ .w = 12, .h = 12 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.xs },
-        });
-        dvui.label(@src(), "{s}", .{"Pull requests"}, .{
-            .font = style.smallBold(),
-            .color_text = .{ .color = ink },
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
-        // How many wait on your review, in orange, before the total.
-        const waiting = requestsToReview();
-        if (waiting > 0) dvui.label(@src(), "{d} to review", .{waiting}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = style.textOnAccent() },
-            .background = true,
-            .color_fill = .{ .color = style.get().orange },
-            .corners = .all(100),
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = .{ .x = 5, .w = 5 },
-        });
-        // The count on a disc of its own, the pill's colours swapped.
-        dvui.label(@src(), "{d}", .{n}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = if (shown) style.accent() else style.textOnAccent() },
-            .background = true,
-            .color_fill = .{ .color = if (shown) style.textOnAccent() else style.accent() },
-            .corners = .all(100),
-            .min_size_content = .{ .w = 12 },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = .{ .x = 5, .y = 0, .w = 5, .h = 0 },
-        });
-    }
-    if (bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{d} open — click to see them", .{n}, .{ .font = style.small() });
-    const clicked = bw.clicked();
-    bw.deinit();
-    if (clicked) {
-        new_tab_open = false;
-        active_view = if (shown) .graph else .pulls;
-    }
+/// Where the tab before this one was the raised one, for the rule between.
+var tab_prev_active = true;
+/// The strip shows above a tab, and between two.
+const TAB_TOP: f32 = 4;
+const TAB_GAP: f32 = 4;
 
-    // A hairline between the repository's own and the app's.
-    _ = dvui.separator(@src(), .{
-        .min_size_content = .{ .w = 1, .h = 16 },
+/// A repository's initials on a rounded square, before its name in a tab.
+fn tabBadge(name: []const u8, active: bool) void {
+    var badge = dvui.box(@src(), .{}, .{
+        .background = true,
+        .color_fill = .{ .color = if (active) style.accentDim() else style.border() },
+        .corners = dvui.CornerRect.all(4),
+        .min_size_content = .{ .w = 18, .h = 18 },
         .gravity_y = 0.5,
-        .margin = .{ .x = style.space.xs, .w = style.space.xs },
-        .color_fill = .{ .color = style.border() },
+        .margin = .{ .w = style.space.sm },
+    });
+    defer badge.deinit();
+    var buf: [8]u8 = undefined;
+    dvui.label(@src(), "{s}", .{initials(&buf, name)}, .{
+        .font = style.tinyBold(),
+        .color_text = .{ .color = if (active) style.accent() else style.textMuted() },
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+        // A little room each side: at some zooms the rounded glyphs come out
+        // a pixel wider, and a badge with no room left shows an ellipsis.
+        .padding = .{ .x = 2, .w = 2 },
     });
 }
 
@@ -9696,15 +9750,25 @@ fn dropChoice(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8, hint
 /// `badge` is drawn beside the caption when it is not zero — how many commits
 /// Pull or Push would actually move.
 fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize) bool {
+    return toolbarButtonTagged(src, caption, icon, badge, frameTag("toolbar", caption));
+}
+
+/// As `toolbarButton`, findable by `tag` whatever its caption says.
+fn toolbarButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8) bool {
+    return toolbarButtonOn(src, caption, icon, badge, tag, false);
+}
+
+/// As `toolbarButtonTagged`, lit in the accent while `on`: a view it shows.
+fn toolbarButtonOn(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8, on: bool) bool {
     const enabled = repo != null;
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
-        .tag = frameTag("toolbar", caption),
-        .min_size_content = .{ .w = 46, .h = 34 },
+        .tag = tag,
+        .min_size_content = .{ .w = if (toolbar_compact) TOOL_H else TOOL_W, .h = TOOL_H },
         .gravity_y = 0.5,
         .background = false,
-        .margin = .{ .w = 2 },
+        .margin = .{ .x = 2, .w = 2 },
         .padding = dvui.Rect.all(0),
         .corners = style.radius.input,
     });
@@ -9712,22 +9776,26 @@ fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []c
     bw.processEvents();
 
     const hovered = enabled and bw.hovered();
-    const color = if (!enabled) style.textFaint() else if (hovered) style.text() else style.textMuted();
+    const color = if (!enabled) style.textFaint() else if (on) style.accent() else if (hovered) style.text() else style.textMuted();
+    // Without its caption, the caption says itself on hover.
+    if (toolbar_compact and bw.hovered()) {
+        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{caption}, .{ .font = style.small() });
+    }
 
     {
         var cell = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
-            .background = hovered,
-            .color_fill = .{ .color = style.rowHover() },
+            .background = hovered or on,
+            .color_fill = .{ .color = if (on) style.accentDim() else style.rowHover() },
             .corners = style.radius.input,
-            .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
+            .padding = .{ .x = style.space.md, .y = 5, .w = style.space.md, .h = 5 },
         });
         defer cell.deinit();
 
         dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
-            .min_size_content = .{ .w = 15, .h = 15 },
+            .min_size_content = .{ .w = 17, .h = 17 },
             .gravity_x = 0.5,
-            .margin = .{ .h = 3 },
+            .margin = .{ .h = 4 },
         });
 
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -9737,8 +9805,8 @@ fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []c
         });
         defer line.deinit();
 
-        dvui.label(@src(), "{s}", .{caption}, .{
-            .font = style.tiny(),
+        if (!toolbar_compact) dvui.label(@src(), "{s}", .{caption}, .{
+            .font = style.small(),
             .color_text = .{ .color = color },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
@@ -9775,7 +9843,7 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
-        .min_size_content = .{ .w = 22, .h = 22 },
+        .min_size_content = .{ .w = 24, .h = 24 },
         .gravity_y = 0.5,
         .background = false,
         .margin = .{ .x = style.space.xxs, .w = style.space.xxs },
@@ -9797,7 +9865,7 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
         dvui.icon(@src(), name, icon, .{
             .fill_color = .{ .color = if (bw.hovered()) style.text() else color },
         }, .{
-            .min_size_content = .{ .w = 13, .h = 13 },
+            .min_size_content = .{ .w = 14, .h = 14 },
             .gravity_x = 0.5,
             .gravity_y = 0.5,
         });
@@ -9823,7 +9891,8 @@ fn menuSubRow(src: std.builtin.SourceLocation, icon: []const u8, caption: []cons
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = 5, .w = style.space.md, .h = 5 },
+        .color_fill_hover = .{ .color = style.accentDim() },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -11660,15 +11729,20 @@ fn refMenu(
 }
 
 /// A right-click menu: a raised card with a border, a little room inside.
+/// A menu's least width and its rows' padding above and below the caption:
+/// GitComet's comfortable menus — 260 wide, rows about 30 high.
+const MENU_MIN_W: f32 = 260;
+const MENU_ROW_PAD_Y: f32 = 7;
+
 fn contextMenu(cp: dvui.Point.Natural) *dvui.FloatingMenuWidget {
     return dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(cp) }, .{
         .background = true,
         .color_fill = .{ .color = style.surfaceRaised() },
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = style.border() },
-        .corners = style.radius.row,
+        .corners = style.radius.popover,
         .padding = dvui.Rect.all(style.space.xs),
-        .min_size_content = .{ .w = 240 },
+        .min_size_content = .{ .w = MENU_MIN_W },
     });
 }
 
@@ -11701,7 +11775,10 @@ fn menuIconId(src: std.builtin.SourceLocation, id: usize, icon: []const u8, capt
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = 5, .w = style.space.lg, .h = 5 },
+        // Lit with a tint of the accent, not filled with it: the row
+        // under the pointer, or the keys, is found without shouting.
+        .color_fill_hover = .{ .color = style.accentDim() },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.lg, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -11889,7 +11966,7 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            .min_size_content = .{ .h = 22 },
+            .min_size_content = .{ .h = 28 },
             .padding = .{ .x = style.space.lg, .w = style.space.lg + bar_w },
         });
         defer bar.deinit();
@@ -12671,12 +12748,12 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
             .border = dvui.Rect.all(WIP_RING),
             .color_border = .{ .color = hue },
             .corners = .all(style.avatar / 2),
-            .min_size_content = .{ .w = style.avatar, .h = style.avatar },
-            .max_size_content = .size(.{ .w = style.avatar, .h = style.avatar }),
+            .min_size_content = .{ .w = style.avatar - 2 * WIP_RING, .h = style.avatar - 2 * WIP_RING },
+            .max_size_content = .size(.{ .w = style.avatar - 2 * WIP_RING, .h = style.avatar - 2 * WIP_RING }),
             .gravity_y = 0.5,
-            // Centred on the lane as a commit's node is: the row's padding is
-            // already the canvas's offset, the ring adds to the node's width.
-            .margin = .{ .x = branchColumn() + laneX(if (head) |hl| hl.lane else 0) - style.avatar / 2 - WIP_RING },
+            // Centred on the lane as a commit's node is, and as big, ring
+            // included: the row's padding is already the canvas's offset.
+            .margin = .{ .x = branchColumn() + laneX(if (head) |hl| hl.lane else 0) - style.avatar / 2 },
             .padding = dvui.Rect.all(0),
         });
         defer node.deinit();
@@ -12801,6 +12878,10 @@ fn commitRow(
     const hovered = !selected and rs.r.contains(dvui.currentWindow().mouse_pt);
     if (hovered) rs.rectToPhysical(.{ .x = 0, .y = 0, .w = width, .h = rh - 1 })
         .fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
+    // HEAD's commit, a bar of the accent down its left edge, as GitComet
+    // marks it: where the next commit goes, found at a glance.
+    if (h.head_oid) |head| if (git.oidEql(head, commit.id)) rs.rectToPhysical(.{ .x = 0, .y = 0, .w = 3, .h = rh })
+        .fill(.{}, .{ .color = .{ .color = style.accent() }, .fade = 0 });
 
     // Only under the pointer, as GitComet has it: the lines alone say which
     // branch is which.
@@ -13052,7 +13133,7 @@ fn commitMenu(
             .color_fill = .{ .color = style.surfaceRaised() },
             .border = dvui.Rect.all(1),
             .color_border = .{ .color = style.border() },
-            .corners = style.radius.row,
+            .corners = style.radius.popover,
             .padding = dvui.Rect.all(style.space.xs),
             .min_size_content = .{ .w = 220 },
         });
@@ -13156,7 +13237,7 @@ fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, a
 
     // Made smaller rather than cut: at a fractional display scale two wide
     // capitals, "DG", came out of a disc this size as "…".
-    var font: dvui.Font = .find(.{ .family = style.UI_FAMILY, .size = 8.5 * d / style.avatar, .weight = .bold });
+    var font: dvui.Font = .find(.{ .family = style.UI_FAMILY, .size = 9.5 * d / style.avatar, .weight = .bold });
     const room = d - 2 * border.x - 2;
     const wide = font.textSize(letters).w;
     if (wide > room) font = font.withSize(font.size * room / wide);
@@ -13587,7 +13668,7 @@ fn drawLanes(
     // colour, as GitKraken joins its work in progress to the commit under it.
     if (extra > 0) if (headLane()) |hl| {
         const x = laneX(hl.lane);
-        const top = @max(0.5 * rh + style.avatar / 2 + WIP_RING + 2, @as(f32, @floatFromInt(first)) * rh);
+        const top = @max(0.5 * rh + style.avatar / 2 + 2, @as(f32, @floatFromInt(first)) * rh);
         const bottom = @min((@as(f32, @floatFromInt(hl.index + extra)) + 0.5) * rh - style.avatar / 2 - 2, @as(f32, @floatFromInt(last)) * rh);
         var y = top;
         while (y + 2 <= bottom) : (y += 5) {
@@ -15597,7 +15678,9 @@ fn sectionHairlineUnder(wd: *dvui.WidgetData) void {
         .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
 }
 
-const SECTION_HEAD_H: f32 = 30;
+const SECTION_HEAD_H: f32 = 36;
+/// A panel's own title, over its sections: GitComet's pane header.
+const PANEL_HEAD_H: f32 = 42;
 
 /// A section's title on the right, as the sidebar's are on the left: its
 /// icon, its name in the text's own colour and case, semi-bold; and where it
@@ -15710,16 +15793,22 @@ fn workingDetail() void {
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            // As high as a section's header and set in as far — its icon over
-            // their chevrons — with a hairline under it, parting the panel's
-            // title from the lists.
-            .min_size_content = .{ .h = SECTION_HEAD_H },
+            // The panel's title, taller than the sections under it and in a
+            // title's face, as GitComet heads its panes; set in as far as
+            // they are — its icon over their chevrons — with a hairline
+            // under it, parting it from the lists.
+            .min_size_content = .{ .h = PANEL_HEAD_H },
             .padding = .{ .x = style.space.md, .w = style.space.md },
         });
         defer head.deinit();
         defer sectionHairlineUnder(head.data());
 
-        panelTitle("Changed files", dvui.entypo.documents, null);
+        dvui.icon(@src(), "panel_icon", dvui.entypo.documents, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 15, .h = 15 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.md },
+        });
+        dvui.label(@src(), "Changed files", .{}, .{ .font = style.title(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
@@ -16210,8 +16299,8 @@ fn statusFlag(src: std.builtin.SourceLocation, status: git.Status) void {
         .color_fill = .{ .color = style.tint(hue) },
         .corners = style.radius.tag,
         .gravity_y = 0.5,
-        .min_size_content = .{ .w = 15, .h = 15 },
-        .max_size_content = .size(.{ .w = 15, .h = 15 }),
+        .min_size_content = .{ .w = 16, .h = 16 },
+        .max_size_content = .size(.{ .w = 16, .h = 16 }),
         .padding = dvui.Rect.all(0),
         .margin = dvui.Rect.all(0),
     });
@@ -16233,7 +16322,7 @@ fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []con
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .id_extra = @intFromEnum(view),
-        .min_size_content = .{ .h = 20 },
+        .min_size_content = .{ .h = 24 },
         .gravity_y = 0.5,
         .background = false,
         .margin = dvui.Rect.all(0),
@@ -16462,7 +16551,10 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
 
         const shown = if (changes_view == .tree) std.fs.path.basename(change.path) else change.path;
         dvui.label(@src(), "{s}", .{shown}, .{
-            .font = style.mono(),
+            // The interface's face, as a commit's files and the sidebar's names
+            // are — and as GitComet writes paths in its lists: mono read large
+            // and cramped there.
+            .font = style.small(),
             .color_text = .{ .color = if (selected) style.text() else style.textMuted() },
             .gravity_y = 0.5,
             .expand = .horizontal,
@@ -16829,7 +16921,7 @@ fn commitBox() void {
     bw.init(@src(), .{ .draw_focus = false }, .{
         .tag = "commit_button",
         .expand = .horizontal,
-        .min_size_content = .{ .h = 32 },
+        .min_size_content = .{ .h = 36 },
         .background = false,
         .margin = .{ .y = style.space.xs },
         .padding = dvui.Rect.all(0),
@@ -16943,7 +17035,7 @@ fn pillFace(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8) void {
 fn pillInit(dd: *dvui.DropdownWidget, src: std.builtin.SourceLocation, tag: []const u8, margin: dvui.Rect) void {
     dd.init(src, .{}, .{
         .tag = tag,
-        .min_size_content = .{ .h = 24 },
+        .min_size_content = .{ .h = 26 },
         .gravity_y = 0.5,
         .background = false,
         .margin = margin,
@@ -17058,7 +17150,7 @@ fn signalChip(src: std.builtin.SourceLocation, id: usize, icon: []const u8, text
         .color_fill = .{ .color = style.tint(color) },
         .corners = style.radius.tag,
         .gravity_y = 0.5,
-        .min_size_content = .{ .h = 20 },
+        .min_size_content = .{ .h = 22 },
         .margin = .{ .x = style.space.xs },
         .padding = .{ .x = style.space.sm, .w = style.space.sm },
     });
@@ -17089,7 +17181,7 @@ fn coAuthorChips() void {
             .color_fill = .{ .color = style.accentDim() },
             .corners = style.radius.tag,
             .padding = .{ .x = style.space.sm },
-            .min_size_content = .{ .h = 20 },
+            .min_size_content = .{ .h = 22 },
             .gravity_y = 0.5,
             .margin = .{ .w = style.space.xs, .h = style.space.xs },
         });
@@ -17156,6 +17248,13 @@ fn statusBar() void {
         .margin = .{ .x = style.space.md, .w = style.space.sm },
         .color_fill = .{ .color = style.border() },
     });
+
+    // The zoom, only when it is not 100 %: a click puts it back.
+    if (zoom != 1.0) {
+        var buf: [8]u8 = undefined;
+        const caption = std.fmt.bufPrint(&buf, "{d}%", .{@round(zoom * 100)}) catch "";
+        if (linkButtonTagged(@src(), caption, style.textMuted(), "status:zoom")) setZoom(1.0);
+    }
 
     // The keys, then the panels' folds — side by side, a side each.
     if (iconButtonTagged(@src(), "status_keys", "Keyboard shortcuts", dvui.entypo.keyboard, if (keys_open) style.accent() else style.textMuted(), "status:keys")) {
@@ -17598,7 +17697,7 @@ fn modalWindow(
         .color_fill = .{ .color = fill },
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = style.border() },
-        .corners = style.radius.row,
+        .corners = style.radius.popover,
         .min_size_content = .{ .w = min_w },
         .padding = padding,
     });
@@ -17912,6 +18011,7 @@ test "stage, commit and switch branches through the real git commands" {
 /// Reset, not merely freed: `deinit` leaves an ArrayList undefined rather than
 /// empty, and the next test to render a frame reads straight through it.
 fn resetUiGlobals() void {
+    zoom = 1.0;
     clearPickedChanges();
     picked_changes.deinit(gpa);
     picked_changes = .empty;
@@ -18233,6 +18333,38 @@ test "branches are ticked to show alone one by one, and unticked the same way" {
     try std.testing.expectEqualStrings("b", graph_only.items[0]);
     setSolo(null);
     try std.testing.expectEqual(@as(usize, 0), graph_only.items.len);
+}
+
+test "the zoom steps a tenth at a time, within its bounds, and Ctrl+0 or the status bar puts it back" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    try expectNoTag("status:zoom");
+
+    try pressFrame(.equal, .lcontrol);
+    try pressFrame(.kp_add, .lcontrol);
+    try std.testing.expectEqual(@as(f32, 1.2), zoom);
+    try std.testing.expectEqual(@as(f32, 1.2), dvui.currentWindow().content_scale);
+    // Held at the top, whatever is pressed past it.
+    for (0..12) |_| try pressFrame(.equal, .lcontrol);
+    try std.testing.expectEqual(ZOOM_MAX, zoom);
+    try pressFrame(.zero, .lcontrol);
+    try std.testing.expectEqual(@as(f32, 1.0), zoom);
+    for (0..6) |_| try pressFrame(.minus, .lcontrol);
+    try std.testing.expectEqual(ZOOM_MIN, zoom);
+
+    // Off 100 %, the status bar says so, and its click comes back.
+    try clickAt(try tagCenter("status:zoom"));
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqual(@as(f32, 1.0), zoom);
+    try expectNoTag("status:zoom");
+    // A file edited by hand.
+    try std.testing.expectEqual(@as(f32, 1.0), zoomStep(std.math.nan(f32)));
+    try std.testing.expectEqual(@as(f32, 1.3), zoomStep(1.27));
 }
 
 test "down and up walk the history, and the commit pane follows" {
@@ -18983,6 +19115,14 @@ fn pumpJob() !void {
         if (job != null) try std.Io.sleep(app_io, .fromMilliseconds(10), .awake);
     }
     if (job != null) return error.JobNeverFinished;
+}
+
+/// As `pumpJob`, then the frames after it: what the job changed is on screen,
+/// and its tags with it, before the next click looks for them. Without them
+/// the click aims at the last frame drawn, which may be from while it ran.
+fn pumpJobFrame() !void {
+    try pumpJob();
+    try dvui.testing.settle(frameArrowCursor);
 }
 
 // Nothing about the threading is checked by the compiler: a job that never
@@ -20146,7 +20286,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     reloadWork();
     try dvui.testing.settle(frameArrowCursor);
     try clickAt(try tagCenter("toolbar:Stash"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     {
         var short: [8]u8 = undefined;
@@ -20155,14 +20295,14 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
         try hoverAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
         try clickAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash_apply:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
     }
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), changeCount());
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
 
     // Amend ticked: the last message to start from, the button live at once.
     try clickAt(try tagCenter("link:stage_all"));
-    try pumpJob();
+    try pumpJobFrame();
     try clickAt(try tagCenter("commit:amend"));
     try std.testing.expect(amend);
     try std.testing.expectEqualStrings("first", commit_summary.items);
@@ -21997,7 +22137,6 @@ test "a branch's name sits in the branch column, and dragging the column's edge 
     try std.testing.expect(after.x + after.w <= wider.x + wider.w);
 }
 
-
 test "a hidden branch leaves the graph with its remote copy, and a hidden tag's name goes" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -22696,17 +22835,17 @@ test "audit: the main controls do what they say when clicked" {
 
     // Toolbar: Stash takes both changes away, Pop brings them back.
     try clickAt(try tagCenter("toolbar:Stash"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 0), changeCount());
     try clickAt(try tagCenter("toolbar:Pop"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 0), history.?.stashes.len);
     try std.testing.expectEqual(@as(usize, 2), work.?.unstaged.len);
 
     // Stage all — a job — and Unstage all.
     try clickAt(try tagCenter("link:stage_all"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 2), work.?.staged.len);
     try clickAt(try tagCenter("link:unstage_all"));
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
@@ -22773,7 +22912,7 @@ test "audit: the main controls do what they say when clicked" {
 
     // Double-click a branch to check it out.
     try doubleClickAt(try tagCenter("feature"));
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqualStrings("feature", history.?.head.?);
 
     // The palette: Ctrl+P, a few letters, Enter.
@@ -22782,7 +22921,7 @@ test "audit: the main controls do what they say when clicked" {
     try typeText("stash ever");
     try pressFrame(.enter, .none);
     try std.testing.expect(!palette_open);
-    try pumpJob();
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
 
     // Settings from the menu on the face: switch to the light theme, Esc out.

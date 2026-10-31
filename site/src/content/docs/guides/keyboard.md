@@ -42,3 +42,5 @@ action without a key of its own is in the command palette, `Ctrl+P`.
 | `Ctrl+B` | Show or hide the branches panel |
 | `Ctrl+J` | Show or hide the changes panel |
 | `Ctrl+Shift+PgUp` / `PgDn` | Move this tab left / right |
+| `Ctrl+=` / `Ctrl+-` | Zoom in / out, from 70 to 200 % — remembered |
+| `Ctrl+0` | Back to 100 % |
