@@ -6959,7 +6959,7 @@ fn dialogInput(src: std.builtin.SourceLocation, id: usize, text: *std.ArrayList(
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = style.border() },
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+        .padding = .{ .x = style.space.md + 2, .y = style.space.md, .w = style.space.md + 2, .h = style.space.md },
     });
     const changed = te.text_changed;
     if (te.enter_pressed) entered.* = true;
@@ -8625,7 +8625,7 @@ fn userMenu() void {
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            .min_size_content = .{ .w = 240 },
+            .min_size_content = .{ .w = MENU_MIN_W },
             .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
         });
         defer head.deinit();
@@ -9066,7 +9066,7 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
 const TabHit = enum { none, select, close };
 
 /// Each tab as wide as its name, up to this much, cut with "…" past it.
-const TAB_W: f32 = 180;
+const TAB_W: f32 = 200;
 
 /// What kind of tab: its icon.
 const TabLook = struct {
@@ -9641,7 +9641,7 @@ fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []c
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = frameTag("toolbar", caption),
-        .min_size_content = .{ .w = 46, .h = 34 },
+        .min_size_content = .{ .w = 52, .h = 38 },
         .gravity_y = 0.5,
         .background = false,
         .margin = .{ .w = 2 },
@@ -9665,7 +9665,7 @@ fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []c
         defer cell.deinit();
 
         dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
-            .min_size_content = .{ .w = 15, .h = 15 },
+            .min_size_content = .{ .w = 16, .h = 16 },
             .gravity_x = 0.5,
             .margin = .{ .h = 3 },
         });
@@ -9715,7 +9715,7 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
-        .min_size_content = .{ .w = 22, .h = 22 },
+        .min_size_content = .{ .w = 24, .h = 24 },
         .gravity_y = 0.5,
         .background = false,
         .margin = .{ .x = style.space.xxs, .w = style.space.xxs },
@@ -9737,7 +9737,7 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
         dvui.icon(@src(), name, icon, .{
             .fill_color = .{ .color = if (bw.hovered()) style.text() else color },
         }, .{
-            .min_size_content = .{ .w = 13, .h = 13 },
+            .min_size_content = .{ .w = 14, .h = 14 },
             .gravity_x = 0.5,
             .gravity_y = 0.5,
         });
@@ -9763,7 +9763,7 @@ fn menuSubRow(src: std.builtin.SourceLocation, icon: []const u8, caption: []cons
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = 5, .w = style.space.md, .h = 5 },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -11622,6 +11622,11 @@ fn refMenu(
 }
 
 /// A right-click menu: a raised card with a border, a little room inside.
+/// A menu's least width and its rows' padding above and below the caption:
+/// GitComet's comfortable menus — 260 wide, rows about 30 high.
+const MENU_MIN_W: f32 = 260;
+const MENU_ROW_PAD_Y: f32 = 7;
+
 fn contextMenu(cp: dvui.Point.Natural) *dvui.FloatingMenuWidget {
     return dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(cp) }, .{
         .background = true,
@@ -11630,7 +11635,7 @@ fn contextMenu(cp: dvui.Point.Natural) *dvui.FloatingMenuWidget {
         .color_border = .{ .color = style.border() },
         .corners = style.radius.row,
         .padding = dvui.Rect.all(style.space.xs),
-        .min_size_content = .{ .w = 240 },
+        .min_size_content = .{ .w = MENU_MIN_W },
     });
 }
 
@@ -11663,7 +11668,7 @@ fn menuIconId(src: std.builtin.SourceLocation, id: usize, icon: []const u8, capt
         .tag = frameTag("menu", caption),
         .expand = .horizontal,
         .corners = style.radius.input,
-        .padding = .{ .x = style.space.md, .y = 5, .w = style.space.lg, .h = 5 },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.lg, .h = MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -11851,7 +11856,7 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            .min_size_content = .{ .h = 22 },
+            .min_size_content = .{ .h = 28 },
             .padding = .{ .x = style.space.lg, .w = style.space.lg + bar_w },
         });
         defer bar.deinit();
@@ -16001,8 +16006,8 @@ fn statusFlag(src: std.builtin.SourceLocation, status: git.Status) void {
         .color_fill = .{ .color = style.tint(hue) },
         .corners = style.radius.tag,
         .gravity_y = 0.5,
-        .min_size_content = .{ .w = 15, .h = 15 },
-        .max_size_content = .size(.{ .w = 15, .h = 15 }),
+        .min_size_content = .{ .w = 16, .h = 16 },
+        .max_size_content = .size(.{ .w = 16, .h = 16 }),
         .padding = dvui.Rect.all(0),
         .margin = dvui.Rect.all(0),
     });
@@ -16024,7 +16029,7 @@ fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []con
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .id_extra = @intFromEnum(view),
-        .min_size_content = .{ .h = 20 },
+        .min_size_content = .{ .h = 24 },
         .gravity_y = 0.5,
         .background = false,
         .margin = dvui.Rect.all(0),
@@ -16251,7 +16256,10 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
 
         const shown = if (changes_view == .tree) std.fs.path.basename(change.path) else change.path;
         dvui.label(@src(), "{s}", .{shown}, .{
-            .font = style.mono(),
+            // The interface's face, as a commit's files and the sidebar's names
+            // are — and as GitComet writes paths in its lists: mono read large
+            // and cramped there.
+            .font = style.small(),
             .color_text = .{ .color = if (selected) style.text() else style.textMuted() },
             .gravity_y = 0.5,
             .expand = .horizontal,
@@ -16623,7 +16631,7 @@ fn commitBox() void {
     bw.init(@src(), .{ .draw_focus = false }, .{
         .tag = "commit_button",
         .expand = .horizontal,
-        .min_size_content = .{ .h = 32 },
+        .min_size_content = .{ .h = 36 },
         .background = false,
         .margin = .{ .y = style.space.xs },
         .padding = dvui.Rect.all(0),
@@ -16737,7 +16745,7 @@ fn pillFace(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8) void {
 fn pillInit(dd: *dvui.DropdownWidget, src: std.builtin.SourceLocation, tag: []const u8, margin: dvui.Rect) void {
     dd.init(src, .{}, .{
         .tag = tag,
-        .min_size_content = .{ .h = 24 },
+        .min_size_content = .{ .h = 26 },
         .gravity_y = 0.5,
         .background = false,
         .margin = margin,
@@ -16852,7 +16860,7 @@ fn signalChip(src: std.builtin.SourceLocation, id: usize, icon: []const u8, text
         .color_fill = .{ .color = style.tint(color) },
         .corners = style.radius.tag,
         .gravity_y = 0.5,
-        .min_size_content = .{ .h = 20 },
+        .min_size_content = .{ .h = 22 },
         .margin = .{ .x = style.space.xs },
         .padding = .{ .x = style.space.sm, .w = style.space.sm },
     });
@@ -16883,7 +16891,7 @@ fn coAuthorChips() void {
             .color_fill = .{ .color = style.accentDim() },
             .corners = style.radius.tag,
             .padding = .{ .x = style.space.sm },
-            .min_size_content = .{ .h = 20 },
+            .min_size_content = .{ .h = 22 },
             .gravity_y = 0.5,
             .margin = .{ .w = style.space.xs, .h = style.space.xs },
         });

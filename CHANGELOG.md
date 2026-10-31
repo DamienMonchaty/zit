@@ -11,6 +11,10 @@ Every release of Zit, newest first. Downloads are on the
   keyboard shortcuts.
 
 ### Changed
+- Zit is roomier, towards GitComet's comfortable density: text a point
+  larger throughout, taller rows in the lists, the history and the sidebar,
+  wider menus with taller items, larger fields, buttons and tabs, and the
+  changed files named in the interface's face rather than a mono one.
 - The history's branch names have a column of their own, **BRANCH / TAG**,
   before the graph, as in GitKraken: read from its left, joined to their commit
   by a line of the branch's colour, and cut only where the column ends. Drag

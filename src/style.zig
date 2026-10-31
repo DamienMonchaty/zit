@@ -40,23 +40,24 @@ const fonts: []const dvui.Font.Source = &.{
     },
 };
 
-/// Type scale. Kept tight: this is a dense tool, not a document reader.
+/// Type scale: a point over the dense one Zit started with, towards GitComet's
+/// comfortable density — the one it starts people on — in Inter, whose tall
+/// x-height reads larger than most faces at the same size.
 pub const size = struct {
-    // Inter has a tall x-height, so the scale sits half a point small.
-    pub const tiny: f32 = 9.5;
-    pub const small: f32 = 10.5;
-    pub const body: f32 = 12;
-    pub const section: f32 = 10;
-    pub const title: f32 = 12.5;
-    pub const mono: f32 = 11;
+    pub const tiny: f32 = 10.5;
+    pub const small: f32 = 11.5;
+    pub const body: f32 = 12.5;
+    pub const section: f32 = 10.5;
+    pub const title: f32 = 13.5;
+    pub const mono: f32 = 12;
     /// Tab names: read from across the window, not scanned in a list.
-    pub const tab: f32 = 11;
-    /// The commit list: six things a row, thousands of rows. Its own size so
-    /// it can be dense without shrinking every other panel with it.
-    pub const graph: f32 = 10.75;
-    pub const graph_meta: f32 = 10.5;
+    pub const tab: f32 = 12;
+    /// The commit list: a message to read, its author and date under it in
+    /// weight, never in size so far that they cannot be read.
+    pub const graph: f32 = 12;
+    pub const graph_meta: f32 = 11;
     /// Sha and date: a mono face reads larger than Inter at the same size.
-    pub const graph_mono: f32 = 9.5;
+    pub const graph_mono: f32 = 10.5;
 };
 
 pub fn tab() dvui.Font {
@@ -141,24 +142,24 @@ pub const radius = struct {
     pub const tag = dvui.CornerRect.all(3);
 };
 
-/// Height of a row in a list — the sidebar, the file lists. Tracks `size.body`
-/// plus the mockup's 6px of padding either side.
-pub const row_height: f32 = 28;
-/// A row in the sidebar's lists: tighter than a list row, many to a screen.
-pub const side_row: f32 = 23;
+/// Height of a row in a list — the file lists, a commit's files. GitComet's
+/// comfortable row.
+pub const row_height: f32 = 30;
+/// A row in the sidebar's lists: a little tighter than a list row.
+pub const side_row: f32 = 28;
 
 /// Height of a commit row. Taller than a list row: it carries a lane drawing,
 /// an avatar, a tag, a message, an author, a sha and a date — and those are
-/// what you scan, so it is dense rather than roomy. Fixed, because the commit
-/// list is virtualised.
-pub const graph_row: f32 = 26;
+/// what you scan; GitComet's comfortable history row is 36. Fixed, because
+/// the commit list is virtualised.
+pub const graph_row: f32 = 32;
 
 /// Diameter of the author's initials disc in a commit row.
-pub const avatar: f32 = 21;
+pub const avatar: f32 = 22;
 
-/// Height of one line of a diff. A mono line at 1.65, which is the density the
-/// mockup reads at. Fixed, for the same reason.
-pub const diff_row: f32 = 21;
+/// Height of one line of a diff: the mono face at about 1.75, GitComet's
+/// line for its code. Fixed, for the same reason.
+pub const diff_row: f32 = 22;
 
 /// Geometry of the commit graph, which is drawn rather than laid out: every
 /// number a lane or a curve is positioned by lives here. The column's width
@@ -178,20 +179,20 @@ pub const graph = struct {
     pub const inset: f32 = 16;
 };
 
-/// The mockup's grid: a 42px title bar over the sidebar and the content,
-/// closed by a 24px status bar.
-pub const titlebar_height: f32 = 42;
-/// The tab strip above it: one line of small text and a close button.
-pub const tab_height: f32 = 30;
-pub const statusbar_height: f32 = 24;
+/// GitComet's comfortable chrome: a 44px action bar over the sidebar and the
+/// content, closed by a status bar; the tabs a strip of their own above.
+pub const titlebar_height: f32 = 46;
+/// The tab strip above it: one line of text and a close button.
+pub const tab_height: f32 = 34;
+pub const statusbar_height: f32 = 28;
 /// Height of a pane's own header strip (diff path, detail title).
-pub const toolbar_cell: f32 = 30;
+pub const toolbar_cell: f32 = 34;
 /// The three fixed right-hand columns of a commit row. Fixed, not
 /// content-sized: a ragged "who" column makes every column after it jump from
 /// row to row, and a header can only name a column that stays put.
 pub const author_column: f32 = 130;
-pub const sha_column: f32 = 80;
-pub const time_column: f32 = 150;
+pub const sha_column: f32 = 84;
+pub const time_column: f32 = 140;
 
 // === Palette ===
 
