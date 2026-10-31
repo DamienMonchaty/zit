@@ -784,22 +784,6 @@ var detail_split: f32 = 0.68;
 /// panel comes back the width it was.
 var show_sidebar: bool = true;
 var show_detail: bool = true;
-/// Focus mode: the graph and its diff alone — no tabs, toolbar or side
-/// panels. The panels' own switches are put back as they were on the way out.
-var focus_mode: bool = false;
-var focus_saved: [2]bool = .{ true, true };
-
-fn toggleFocus() void {
-    focus_mode = !focus_mode;
-    if (focus_mode) {
-        focus_saved = .{ show_sidebar, show_detail };
-        show_sidebar = false;
-        show_detail = false;
-    } else {
-        show_sidebar = focus_saved[0];
-        show_detail = focus_saved[1];
-    }
-}
 /// What a hidden panel's seam points at instead: no room on that side. The
 /// paned widget writes through it while dragging, so these are not consts.
 var no_split: f32 = 0;
@@ -1850,7 +1834,9 @@ fn openRepo(path: []const u8) void {
     detectLfs();
     loadGraphPrefs();
     startRepoConfig();
-    reloadWork();
+    // Off the UI thread too, beside the history's: under the loading screen,
+    // which is up longer than 11,000 files take to stat.
+    workChanged("Reading the changes");
     // The first read of a repository is the slow one — packfiles not yet in
     // the page cache — so it happens off the UI thread, with the loading
     // screen in the meantime. Tests read it in place: they assert on it straight after.
@@ -2184,9 +2170,10 @@ fn refreshHistory() void {
 // The status is re-read on the poll timer. On Linux that is a few
 // milliseconds; on Windows, where every stat is slow, it is long enough in a
 // big repository to freeze the window every poll. So the timer's reads go to
-// another thread; a read after a command stays synchronous — what was just
-// staged has to show at once — and bumps `work_gen`, which retires any
-// background read already out.
+// another thread, and so do the reads after a command (`workChanged`): with
+// 11,000 changed files one is 300 ms on Windows, which the window waited out
+// frozen after every stage. A read after a command bumps `work_gen`, which
+// retires any read already out — it may have started before the command.
 
 const WorkLoad = struct {
     path: []u8,
@@ -2216,6 +2203,62 @@ var work_gen: u64 = 0;
 /// Asked for while one was out: what changed during that read is read when
 /// it lands, not lost.
 var work_again = false;
+
+/// After a command: the status read again, off the UI thread. A read
+/// already out may have begun before the command: retired, and read again
+/// once it lands, so what lands is never older than the command.
+fn workChanged(what: []const u8) void {
+    if (@import("builtin").is_test) return reloadWork();
+    work_gen +%= 1;
+    work_settling = true;
+    settling_label = what;
+    refreshWork();
+}
+
+/// A read asked for by a command is out: the lists on screen are about to
+/// change, which the changes panel says over them — with what the command
+/// did, "Staging". The poll's reads, which usually find nothing new, do not
+/// set it.
+var work_settling = false;
+var settling_label: []const u8 = "Reading the changes";
+
+/// What the command a result is folded in for did, as the changes' veil says
+/// it until they are read again: set by whoever calls `applyOutcome`.
+var command_label: []const u8 = "Reading the changes";
+
+/// "Staging" for `git add`: what a command does, in the words the veil over
+/// the changes uses while they are read again after it.
+fn commandLabel(args: []const []const u8) []const u8 {
+    // Past git's own options: `--literal-pathspecs`, `-c key=value`.
+    var at: usize = 0;
+    while (at < args.len and args[at].len > 0 and args[at][0] == '-') : (at += 1) {
+        if (std.mem.eql(u8, args[at], "-c")) at += 1;
+    }
+    if (at >= args.len) return "Updating";
+    const verb = args[at];
+    const rest = args[at..];
+    const eq = std.mem.eql;
+    if (eq(u8, verb, "add")) return "Staging";
+    if (eq(u8, verb, "reset")) return if (hasArg(rest, "--hard") or hasArg(rest, "--soft") or hasArg(rest, "--mixed")) "Resetting" else "Unstaging";
+    if (eq(u8, verb, "apply")) return if (!hasArg(rest, "--cached")) "Discarding" else if (hasArg(rest, "-R") or hasArg(rest, "--reverse")) "Unstaging" else "Staging";
+    if (eq(u8, verb, "restore") or eq(u8, verb, "clean")) return "Discarding";
+    if (eq(u8, verb, "checkout")) return if (hasArg(rest, "--")) "Discarding" else "Switching";
+    if (eq(u8, verb, "switch")) return "Switching";
+    if (eq(u8, verb, "rm")) return "Removing";
+    if (eq(u8, verb, "mv")) return "Renaming";
+    if (eq(u8, verb, "commit")) return "Committing";
+    if (eq(u8, verb, "stash")) return "Stashing";
+    if (eq(u8, verb, "merge")) return "Merging";
+    if (eq(u8, verb, "rebase")) return "Rebasing";
+    if (eq(u8, verb, "cherry-pick")) return "Cherry-picking";
+    if (eq(u8, verb, "revert")) return "Reverting";
+    return "Updating";
+}
+
+fn hasArg(args: []const []const u8, arg: []const u8) bool {
+    for (args) |a| if (std.mem.eql(u8, a, arg)) return true;
+    return false;
+}
 
 fn refreshWork() void {
     if (@import("builtin").is_test) return reloadWork();
@@ -2248,6 +2291,8 @@ fn collectWorkLoad() bool {
         refreshWork();
     };
     if (repo == null or !std.mem.eql(u8, load.path, repo_path.items) or load.gen != work_gen) return false;
+    // The newest read is in, whatever it found.
+    work_settling = false;
     var next = load.work orelse return false;
     load.work = null;
     // Nothing changed — the usual answer, on a timer or a watcher's word —
@@ -2501,6 +2546,7 @@ fn closeRepo() void {
     if (work) |*w| w.deinit();
     work = null;
     work_version +%= 1;
+    work_settling = false;
 
     repo_path.clearAndFree(gpa);
     repo_name = "";
@@ -2818,7 +2864,7 @@ fn runAction() bool {
         .tabs => runTabAction(),
         .refresh => {
             reloadHistory();
-            reloadWork();
+            workChanged("Refreshing");
         },
         .open_repo => promptOpenRepo(),
         .repo_dialog => submitRepoDialog(),
@@ -3190,6 +3236,9 @@ fn collectJob() void {
     const still_current = repo != null and std.mem.eql(u8, running.cwd, repo_path.items);
 
     job = null;
+    // Its words go on over the changes while they are read again after it.
+    // A literal, as every job's label is: it outlives the job.
+    command_label = if (job_label.len > 0) job_label else "Reading the changes";
     job_label = "";
     const quiet = job_quiet;
     job_quiet = false;
@@ -3248,7 +3297,8 @@ fn applyOutcome(outcome: ?run.Outcome) void {
     // moving it — a fetch being the obvious one, and a merge that stopped on a
     // conflict being the one that hides the banner if this is skipped.
     refreshHistory();
-    reloadWork();
+    workChanged(command_label);
+    command_label = "Reading the changes";
 }
 
 /// Run a git command in the repository and fold the result back into the UI.
@@ -3262,6 +3312,7 @@ fn gitDoInput(args: []const []const u8, input: ?[]const u8) void {
     if (repo == null) return;
 
     const outcome = run.gitInput(gpa, app_io, repo_path.items, args, input) catch null;
+    command_label = commandLabel(args);
     applyOutcome(outcome);
 }
 
@@ -3475,7 +3526,7 @@ fn runResolve() void {
     // The offsets of every region after the one just resolved have moved, so
     // the list is rebuilt rather than patched.
     diff_stale = true;
-    reloadWork();
+    workChanged("Resolving");
 }
 
 /// Take back whatever last moved HEAD, as the reflog tells it.
@@ -4162,9 +4213,9 @@ fn appFrame() !dvui.App.Result {
     // The new-tab page takes the window, as GitKraken's does: a repository's
     // toolbar and sidebar have nothing to say about a tab with none in it.
     const start_page = new_tab_open or repo == null;
-    if (start_page or !focus_mode) tabStrip();
+    tabStrip();
     if (!start_page) {
-        if (!focus_mode) titlebar();
+        titlebar();
         progressBanner();
     }
     confirmBar();
@@ -6102,8 +6153,6 @@ fn shortcuts() void {
                 clearSelection();
             } else if (file_history.items.len > 0) {
                 clearFileHistory();
-            } else if (focus_mode) {
-                toggleFocus();
             }
             continue;
         }
@@ -6147,7 +6196,6 @@ fn shortcuts() void {
                     show_detail = !show_detail;
                 }
             }.f;
-            if (pressedShift(ke, .f)) break :blk toggleFocus;
             // Ctrl+F: the commit search, where the graph is up.
             if (pressed(ke, .f, true)) break :blk struct {
                 fn f() void {
@@ -7554,7 +7602,6 @@ fn keysDialog() void {
         defer card.deinit();
         shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
         shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
-        shortcutRow(@src(), "Ctrl+Shift+F", "Focus mode: the graph alone (Esc leaves)");
         shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
     }
 
@@ -8111,7 +8158,6 @@ const commands = [_]Command{
             show_detail = !show_detail;
         }
     }.f },
-    .{ .name = "Focus mode: the graph alone", .icon = dvui.entypo.resize_full_screen, .keys = "Ctrl+Shift+F", .run = toggleFocus },
     .{ .name = "Create a pull request for this branch", .icon = dvui.entypo.merge, .run = requestCreateRequest },
     .{ .name = "Git identity: name, email, GitHub sign-in", .icon = dvui.entypo.user, .needs_repo = false, .run = openIdentity },
     .{ .name = "Settings", .icon = dvui.entypo.cog, .needs_repo = false, .run = struct {
@@ -8821,19 +8867,33 @@ fn connectDialog() void {
         .done => "Connected.",
         .failed => connect_note.items,
     };
-    {
+    if (connect_state == .asking or connect_state == .user) {
+        // Working: the dots before what it is doing, as a request's loading
+        // has them.
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        loadingSpinner(@src());
+        dvui.label(@src(), "{s}", .{text}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    } else {
         // Wrapped to the dialog's width, which a label would widen instead.
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(420 - 2 * style.space.xl), .background = false, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.lg } });
         tl.addText(text, .{ .font = style.small(), .color_text = .{ .color = if (connect_state == .failed) style.danger() else style.textMuted() } });
         tl.deinit();
     }
     if (connect_state == .waiting) {
-        dvui.label(@src(), "{s}", .{connect_code.items}, .{ .font = style.bodyBold().withSize(28), .color_text = .{ .color = style.text() }, .gravity_x = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.lg } });
+        dvui.label(@src(), "{s}", .{connect_code.items}, .{ .font = style.bodyBold().withSize(28), .color_text = .{ .color = style.text() }, .gravity_x = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.sm } });
+        // What it waits on, on a line of its own under the code: beside the
+        // buttons, the dots read as part of the last one.
+        {
+            var wait = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .background = false, .margin = .{ .h = style.space.lg } });
+            defer wait.deinit();
+            loadingSpinner(@src());
+            dvui.label(@src(), "Waiting for your approval on github.com", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        }
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .background = false });
         defer row.deinit();
         if (dialogButton(@src(), "Copy the code", false)) dvui.clipboardTextSet(connect_code.items);
         if (dialogButton(@src(), "Open the page again", false)) openUrl(connect_uri.items);
-        loadingSpinner(@src());
     }
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.lg } });
@@ -10152,15 +10212,11 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
     // lines' are.
     if (head_hover) header_rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
     // The line parting it from the section above.
-    if (id > 0) {
-        const s = head.data().borderRectScale().s;
-        (dvui.Rect.Physical{ .x = header_rect.x, .y = header_rect.y, .w = header_rect.w, .h = @max(1, s) })
-            .fill(.{}, .{ .color = .{ .color = style.borderSubtle() }, .fade = 0 });
-    }
+    if (id > 0) sectionHairline(head.data());
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .expand = .horizontal,
-        .min_size_content = .{ .h = 30 },
+        .min_size_content = .{ .h = SECTION_HEAD_H },
         .background = false,
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(0),
@@ -10175,25 +10231,7 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         });
         defer row.deinit();
 
-        dvui.icon(@src(), "section_chevron", if (collapsed.*)
-            dvui.entypo.chevron_small_right
-        else
-            dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textFaint() } }, .{
-            .min_size_content = .{ .w = 12, .h = 12 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.xs },
-        });
-        dvui.icon(@src(), "section_icon", section.icon(), .{ .fill_color = .{ .color = if (all_hidden) style.textFaint() else style.textMuted() } }, .{
-            .min_size_content = .{ .w = 13, .h = 13 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.sm },
-        });
-        dvui.label(@src(), "{s}", .{section.title()}, .{
-            .font = style.smallBold(),
-            .color_text = .{ .color = if (all_hidden) style.textFaint() else style.text() },
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
+        sectionFace(collapsed.*, section.icon(), section.title(), all_hidden);
         if (all_hidden) dvui.icon(@src(), "section_hidden", dvui.entypo.eye_with_line, .{ .fill_color = .{ .color = style.textFaint() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
@@ -12614,9 +12652,12 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
     // Clicked: the changes, on the right, in place of whichever commit was.
     defer if (dvui.clicked(row.data(), .{})) clearSelection();
 
-    // Its node where the head's lane starts: a pencil on a ring of the
-    // accent, a commit still being written.
+    // Its node on the line of the commit it goes on top of — HEAD's — in that
+    // line's colour, a pencil on a ring: a commit still being written. A
+    // dotted line down joins it to HEAD's node (`drawLanes`).
     {
+        const head = headLane();
+        const hue = if (head) |hl| hl.color else style.accent();
         var column = dvui.box(@src(), .{}, .{
             .min_size_content = .{ .w = graphLead() },
             .expand = .vertical,
@@ -12626,18 +12667,20 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
         defer column.deinit();
         var node = dvui.box(@src(), .{}, .{
             .background = true,
-            .color_fill = .{ .color = style.accentDim() },
-            .border = dvui.Rect.all(1.5),
-            .color_border = .{ .color = style.accent() },
+            .color_fill = .{ .color = style.tint(hue) },
+            .border = dvui.Rect.all(WIP_RING),
+            .color_border = .{ .color = hue },
             .corners = .all(style.avatar / 2),
             .min_size_content = .{ .w = style.avatar, .h = style.avatar },
             .max_size_content = .size(.{ .w = style.avatar, .h = style.avatar }),
             .gravity_y = 0.5,
-            .margin = .{ .x = branchColumn() + laneX(0) - style.avatar / 2 - style.space.lg },
+            // Centred on the lane as a commit's node is: the row's padding is
+            // already the canvas's offset, the ring adds to the node's width.
+            .margin = .{ .x = branchColumn() + laneX(if (head) |hl| hl.lane else 0) - style.avatar / 2 - WIP_RING },
             .padding = dvui.Rect.all(0),
         });
         defer node.deinit();
-        dvui.icon(@src(), "wip_icon", dvui.entypo.pencil, .{ .fill_color = .{ .color = style.accent() } }, .{
+        dvui.icon(@src(), "wip_icon", dvui.entypo.pencil, .{ .fill_color = .{ .color = hue } }, .{
             .min_size_content = .{ .w = 10, .h = 10 },
             .gravity_x = 0.5,
             .gravity_y = 0.5,
@@ -12654,6 +12697,24 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
     // How many, on chips: still to stage, and staged.
     if (w.unstaged.len > 0) wipChip(@src(), dvui.entypo.pencil, w.unstaged.len, "unstaged", style.fileStatusColor(.modified));
     if (w.staged.len > 0) wipChip(@src(), dvui.entypo.check, w.staged.len, "staged", style.fileStatusColor(.added));
+}
+
+const WIP_RING: f32 = 1.5;
+
+/// The line HEAD's commit is on, which the uncommitted changes go on top of:
+/// its lane, its colour, and its place among the commits. Null where the
+/// lanes are not drawn in full.
+fn headLane() ?struct { lane: u16, color: dvui.Color, index: usize } {
+    if (graphCompact()) return null;
+    const h = history orelse return null;
+    const l = lanes orelse return null;
+    const id = h.head_oid orelse return null;
+    // HEAD is near the top: the walk stops early.
+    for (h.commits, 0..) |c, i| if (git.oidEql(c.id, id)) {
+        if (i >= l.rows.len) return null;
+        return .{ .lane = l.rows[i].lane, .color = style.laneColor(l.rows[i].color), .index = i };
+    };
+    return null;
 }
 
 /// A count on the uncommitted row: its icon and number on a tint of `color`.
@@ -13521,6 +13582,18 @@ fn drawLanes(
     defer canvas.deinit();
 
     const rs = canvas.data().rectScale();
+
+    // The uncommitted changes' node to HEAD's: dots down HEAD's lane, in its
+    // colour, as GitKraken joins its work in progress to the commit under it.
+    if (extra > 0) if (headLane()) |hl| {
+        const x = laneX(hl.lane);
+        const top = @max(0.5 * rh + style.avatar / 2 + WIP_RING + 2, @as(f32, @floatFromInt(first)) * rh);
+        const bottom = @min((@as(f32, @floatFromInt(hl.index + extra)) + 0.5) * rh - style.avatar / 2 - 2, @as(f32, @floatFromInt(last)) * rh);
+        var y = top;
+        while (y + 2 <= bottom) : (y += 5) {
+            rs.rectToPhysical(.{ .x = x - 1, .y = y, .w = 2, .h = 2 }).fill(.{}, .{ .color = .{ .color = hl.color }, .fade = 0 });
+        }
+    };
 
     if (graphCompact()) {
         const h = history orelse return;
@@ -15190,7 +15263,7 @@ fn commitDetail(id: git.Oid) void {
 
     // Then who and when — the author, everyone the message names as a
     // co-author — and the parents it came from, a click each away.
-    if (commit) |c| if (accordion(@src(), 2, "AUTHORS & PARENTS", null, &detail_open[2], true)) {
+    if (commit) |c| if (accordion(@src(), 2, "Authors & parents", null, &detail_open[2], true)) {
         var when: [32]u8 = undefined;
         var exact: [32]u8 = undefined;
         const authored = std.fmt.allocPrint(dvui.currentWindow().arena(), "authored {s} · {s}", .{ relativeTime(&when, c.time), absoluteTime(&exact, c.time) }) catch "";
@@ -15220,7 +15293,7 @@ fn commitDetail(id: git.Oid) void {
     };
 
     const files = if (diff != null) diff_all.len else 0;
-    if (accordion(@src(), 1, "FILES", files, &detail_open[1], false)) {
+    if (accordion(@src(), 1, "Files", files, &detail_open[1], false)) {
         if (diff != null) commitFiles(id);
     }
 }
@@ -15475,28 +15548,95 @@ fn accordion(src: std.builtin.SourceLocation, id: usize, title: []const u8, coun
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer row.deinit();
-        dvui.icon(@src(), "fold", if (open.*) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{ .fill_color = .{ .color = style.textFaint() } }, .{
+        dvui.icon(@src(), "fold", if (open.*) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{ .fill_color = .{ .color = style.text() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
             .margin = .{ .w = style.space.xs },
         });
-        dvui.label(@src(), "{s}", .{title}, .{ .font = style.section(), .color_text = .{ .color = if (bw.hovered()) style.textMuted() else style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        // On a chip, as the sidebar's sections have it.
-        if (count) |n| dvui.label(@src(), "{d}", .{n}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = if (n > 0) style.accent() else style.textFaint() },
-            .background = n > 0,
-            .color_fill = .{ .color = style.accentDim() },
-            .corners = style.radius.tag,
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = .{ .x = 5, .w = 5 },
-        });
+        panelTitle(title, null, count);
     }
     if (bw.clicked()) open.* = !open.*;
     bw.deinit();
     return open.*;
 }
+
+/// A folding section's header, the same on either side of the window: the
+/// chevron in the text's colour, the section's icon, its name semi-bold.
+/// `faded`: everything in it out of the graph.
+fn sectionFace(folded: bool, icon: []const u8, title: []const u8, faded: bool) void {
+    dvui.icon(@src(), "section_chevron", if (folded) dvui.entypo.chevron_small_right else dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = if (faded) style.textFaint() else style.text() } }, .{
+        .min_size_content = .{ .w = 12, .h = 12 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.xs },
+    });
+    dvui.icon(@src(), "section_icon", icon, .{ .fill_color = .{ .color = if (faded) style.textFaint() else style.textMuted() } }, .{
+        .min_size_content = .{ .w = 13, .h = 13 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    dvui.label(@src(), "{s}", .{title}, .{
+        .font = style.smallBold(),
+        .color_text = .{ .color = if (faded) style.textFaint() else style.text() },
+        .gravity_y = 0.5,
+        .padding = dvui.Rect.all(0),
+    });
+}
+
+/// The line over a section header that parts it from the one above.
+fn sectionHairline(wd: *dvui.WidgetData) void {
+    const rs = wd.borderRectScale();
+    (dvui.Rect.Physical{ .x = rs.r.x, .y = rs.r.y, .w = rs.r.w, .h = @max(1, rs.s) })
+        .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
+}
+
+/// The same line, under a panel's title.
+fn sectionHairlineUnder(wd: *dvui.WidgetData) void {
+    const rs = wd.borderRectScale();
+    const h = @max(1, rs.s);
+    (dvui.Rect.Physical{ .x = rs.r.x, .y = rs.r.y + rs.r.h - h, .w = rs.r.w, .h = h })
+        .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
+}
+
+const SECTION_HEAD_H: f32 = 30;
+
+/// A section's title on the right, as the sidebar's are on the left: its
+/// icon, its name in the text's own colour and case, semi-bold; and where it
+/// helps, how many, on a pill.
+fn panelTitle(title: []const u8, icon: ?[]const u8, count: ?usize) void {
+    // The sidebar's section icon: its size, its colour, its gap.
+    if (icon) |i| dvui.icon(@src(), "panel_icon", i, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+        .min_size_content = .{ .w = 13, .h = 13 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    dvui.label(@src(), "{s}", .{title}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    countPill(count orelse return);
+}
+
+/// How many, on a pill a step lighter than the panel, so it reads at a
+/// glance; a zero on the same pill, quieter.
+fn countPill(n: usize) void {
+    var pill = dvui.box(@src(), .{}, .{
+        .background = true,
+        .color_fill = .{ .color = style.border() },
+        .corners = .all(COUNT_PILL_H / 2),
+        .min_size_content = .{ .w = COUNT_PILL_H - 10, .h = COUNT_PILL_H },
+        .max_size_content = .height(COUNT_PILL_H),
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm },
+        .padding = .{ .x = 5, .w = 5 },
+    });
+    defer pill.deinit();
+    dvui.label(@src(), "{d}", .{n}, .{
+        .font = style.tinyBold(),
+        .color_text = .{ .color = if (n > 0) style.textMuted() else style.textFaint() },
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+        .padding = dvui.Rect.all(0),
+    });
+}
+
+const COUNT_PILL_H: f32 = 16;
 
 /// "Label  value", one line of the details section.
 fn detailLine(src: std.builtin.SourceLocation, id: usize, caption: []const u8, value: []const u8) void {
@@ -15541,7 +15681,7 @@ fn compareDetail() void {
             .color_border = .{ .color = style.border() },
         });
         defer head.deinit();
-        dvui.label(@src(), "Comparing", .{}, .{ .font = style.section(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
+        panelTitle("Comparing", null, null);
         dvui.label(@src(), "{s}", .{compare_label}, .{
             .font = style.title(),
             .color_text = .{ .color = style.text() },
@@ -15570,16 +15710,16 @@ fn workingDetail() void {
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            .padding = .{ .x = style.space.lg, .y = style.space.sm, .w = style.space.md, .h = style.space.xs },
+            // As high as a section's header and set in as far — its icon over
+            // their chevrons — with a hairline under it, parting the panel's
+            // title from the lists.
+            .min_size_content = .{ .h = SECTION_HEAD_H },
+            .padding = .{ .x = style.space.md, .w = style.space.md },
         });
         defer head.deinit();
+        defer sectionHairlineUnder(head.data());
 
-        dvui.label(@src(), "CHANGED FILES", .{}, .{
-            .font = style.section(),
-            .color_text = .{ .color = style.textFaint() },
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
+        panelTitle("Changed files", dvui.entypo.documents, null);
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
@@ -15611,10 +15751,76 @@ fn workingDetail() void {
     // a few rows, so the commit box under them stays in sight however many
     // files there are.
     const half = lists.data().contentRect().h / 2;
-    const fits_unstaged = changes_head_h + changeListHeight(0, unstaged) <= half;
-    const fits_staged = changes_head_h + changeListHeight(1, staged) <= half;
-    changesSection(@src(), "UNSTAGED", unstaged, false, 0, !(fits_unstaged and !fits_staged));
-    changesSection(@src(), "STAGED", staged, true, 1, !fits_staged);
+    // A list folded away is its title alone, and leaves the rest to the other.
+    const fits_unstaged = changes_folded_lists[0] or changes_head_h + changeListHeight(0, unstaged) <= half;
+    const fits_staged = changes_folded_lists[1] or changes_head_h + changeListHeight(1, staged) <= half;
+
+    // While a command changes them, or they are read again after one: the
+    // lists under a veil, with the dots a request's loading has — after a
+    // moment, so a small repository, done at once, never flashes one. Clicks
+    // on them wait too: what they would act on is going.
+    const waiting = changesWaiting();
+    const now = dvui.frameTimeNS();
+    if (waiting == null) changes_waiting_since = 0 else if (changes_waiting_since == 0) changes_waiting_since = now;
+    const veiled = waiting != null and now - changes_waiting_since >= CHANGES_VEIL_AFTER_NS;
+    if (waiting != null and !veiled) dvui.timer(lists.data().id, @intCast(@max(1, @divTrunc(CHANGES_VEIL_AFTER_NS - (now - changes_waiting_since), std.time.ns_per_us))));
+    if (veiled) swallowMouse(lists.data());
+
+    changesSection(@src(), "Unstaged", unstaged, false, 0, !(fits_unstaged and !fits_staged));
+    changesSection(@src(), "Staged", staged, true, 1, !fits_staged);
+    if (veiled) changesVeil(lists.data().contentRect().justSize(), waiting.?);
+}
+
+/// What the changes are waiting on, while they wait: a job that changes the
+/// working tree — staging, a stash, a commit — or the read after a command.
+fn changesWaiting() ?[]const u8 {
+    if (job != null and job_after != .remote) return job_label;
+    if (work_settling) return settling_label;
+    return null;
+}
+
+var changes_waiting_since: i128 = 0;
+const CHANGES_VEIL_AFTER_NS: i128 = 150 * std.time.ns_per_ms;
+
+/// Every mouse event over `wd` taken before the widgets in it see them.
+fn swallowMouse(wd: *dvui.WidgetData) void {
+    const r = wd.borderRectScale().r;
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        if (!dvui.eventMatch(e, .{ .id = wd.id, .r = r })) continue;
+        e.handle(@src(), wd);
+    }
+}
+
+/// The veil over the lists: the panel's own ground, see-through, and in the
+/// middle the three dots and what is being done.
+fn changesVeil(rect: dvui.Rect, what: []const u8) void {
+    var veil = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .tag = "changes_veil",
+        .rect = rect,
+        .background = true,
+        .color_fill = .{ .color = style.surface().opacity(0.85) },
+    });
+    defer veil.deinit();
+    // On a card of its own: over the rows' names, bare words read as one more.
+    var middle = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+        .background = true,
+        .color_fill = .{ .color = style.surfaceRaised() },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = style.border() },
+        .corners = style.radius.input,
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+    });
+    defer middle.deinit();
+    loadingSpinner(@src());
+    dvui.label(@src(), "{s}…", .{what}, .{
+        .font = style.small(),
+        .color_text = .{ .color = style.textMuted() },
+        .gravity_y = 0.5,
+        .padding = dvui.Rect.all(0),
+    });
 }
 
 /// Each side's list scrolls on its own. Its rows are placed by hand, only
@@ -15625,6 +15831,9 @@ var changes_scroll: [2]dvui.ScrollInfo = @splat(.{ .vertical = .given });
 
 /// A list's head — "UNSTAGED 3   Stage all" — as last laid out.
 var changes_head_h: f32 = 28;
+
+/// Each side's list folded away under its title, as a sidebar section folds.
+var changes_folded_lists: [2]bool = .{ false, false };
 
 /// The fewest rows a long list keeps while it shares the panel.
 const CHANGES_MIN_ROWS = 3;
@@ -16070,49 +16279,50 @@ fn changesSection(
     /// Takes a share of the room left, rather than just what its rows need.
     grow: bool,
 ) void {
+    const folded = &changes_folded_lists[id];
     var section = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = id,
         // An empty list is a header and one line: expanded, it would squeeze
-        // the list that has files into half the panel.
-        .expand = if (changes.len == 0 or !grow) .horizontal else .both,
+        // the list that has files into half the panel. A folded one is its
+        // header alone.
+        .expand = if (changes.len == 0 or !grow or folded.*) .horizontal else .both,
         .background = false,
         .padding = dvui.Rect.all(0),
     });
     defer section.deinit();
 
     {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = false,
-            .padding = .{
-                .x = style.space.lg,
-                .y = style.space.sm,
-                .w = style.space.md,
-                .h = style.space.xs,
-            },
-        });
+        // As a sidebar section's header, line for line: the hover and the
+        // hairline drawn by hand — a box's border, with no ground of its own,
+        // painted all of it in the hairline's colour — a button as high, set
+        // in as far, and the same face. Then the count, and the links.
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer head.deinit();
+        const head_rect = head.data().borderRectScale().r;
+        if (head_rect.contains(dvui.currentWindow().mouse_pt)) head_rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
+        if (id > 0) sectionHairline(head.data());
 
-        dvui.label(@src(), "{s}", .{caption}, .{
-            .font = style.section(),
-            .color_text = .{ .color = style.textFaint() },
-            .gravity_y = 0.5,
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{ .draw_focus = false }, .{
+            .tag = if (staged) "fold:staged" else "fold:unstaged",
+            .expand = .horizontal,
+            .min_size_content = .{ .h = SECTION_HEAD_H },
+            .background = false,
+            .margin = dvui.Rect.all(0),
             .padding = dvui.Rect.all(0),
         });
+        bw.processEvents();
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both, .background = false, .padding = .{ .x = style.space.md } });
+            defer row.deinit();
+            sectionFace(folded.*, if (staged) dvui.entypo.check else dvui.entypo.pencil, caption, false);
+            countPill(changes.len);
+        }
+        if (bw.clicked()) folded.* = !folded.*;
+        bw.deinit();
 
-        dvui.label(@src(), "{d}", .{changes.len}, .{
-            .font = style.tiny(),
-            .color_text = .{ .color = style.textFaint() },
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .corners = style.radius.tag,
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = .{ .x = style.space.xs, .w = style.space.xs },
-        });
-
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
+        var links = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false, .padding = .{ .w = style.space.md } });
+        defer links.deinit();
         const side: git.DiffSide = if (staged) .staged else .unstaged;
         const n = pickedIn(side, changes);
         if (n > 0) {
@@ -16133,6 +16343,7 @@ fn changesSection(
         }
         changes_head_h = head.data().rect.h;
     }
+    if (folded.*) return;
 
     if (changes.len == 0) {
         dvui.label(@src(), "{s}", .{if (staged) "Nothing staged." else "No local changes."}, .{
@@ -16491,7 +16702,7 @@ fn ignorePath(path: []const u8) void {
         return setCommandError("Could not write .gitignore.");
     };
     clearCommandError();
-    reloadWork();
+    workChanged("Ignoring");
 }
 
 /// Hand a file in the working tree to the desktop, without waiting for it.
@@ -16530,12 +16741,7 @@ fn commitBox() void {
         });
         defer head.deinit();
 
-        dvui.label(@src(), "COMMIT", .{}, .{
-            .font = style.section(),
-            .color_text = .{ .color = style.textFaint() },
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
+        panelTitle("Commit", null, null);
         // The length of the line git will get, prefix and all: 50 is the
         // convention, 72 where most tools start cutting.
         if (commit_summary.items.len > 0) {
@@ -16958,7 +17164,6 @@ fn statusBar() void {
     }
     panelToggle(@src(), &show_sidebar, dvui.entypo.align_left, "Branches panel — Ctrl+B", "status:sidebar");
     panelToggle(@src(), &show_detail, dvui.entypo.align_right, "Changes panel — Ctrl+J", "status:detail");
-    if (iconButtonTagged(@src(), "status_focus", "Focus mode — Ctrl+Shift+F", dvui.entypo.resize_full_screen, if (focus_mode) style.accent() else style.textFaint(), "status:focus")) toggleFocus();
 
     // The version, at the far end: a click shows what this one can do.
     _ = dvui.separator(@src(), .{
@@ -17035,7 +17240,6 @@ const features = [_]Feature{
         "Tabs and groups, dragged, kept on restart",
         "Open, clone or start a repository",
         "Command palette — Ctrl+P",
-        "Focus mode — Ctrl+Shift+F",
         "Dark and light, its own window frame",
         "Every shortcut, from the keyboard button",
     } },
@@ -17714,8 +17918,8 @@ fn resetUiGlobals() void {
     redo_from = null;
     clearFoldedDirs();
     commit_all_files = false;
-    focus_mode = false;
     changes_scroll = @splat(.{ .vertical = .given });
+    changes_folded_lists = .{ false, false };
     branch_width = 0;
     clearSearchHits();
     reapSearchFetches(true);
@@ -21646,6 +21850,14 @@ test "a long list of changes is built a screenful at a time, scrolls, and leaves
     _ = try tagCenter("unstaged:src/f-0000.txt");
     try expectNoTag("unstaged:src/f-0599.txt");
 
+    // Its title folds it, as a sidebar section's does, and opens it again;
+    // the staged list stays.
+    try clickAt(try tagCenter("fold:unstaged"));
+    try expectNoTag("unstaged:src/f-0000.txt");
+    _ = try tagCenter("staged:staged.txt");
+    try clickAt(try tagCenter("fold:unstaged"));
+    _ = try tagCenter("unstaged:src/f-0000.txt");
+
     // Scrolled to the end: the last file, and the commit box where it was.
     changes_scroll[0].viewport.y = changes_scroll[0].scrollMax(.vertical);
     try dvui.testing.settle(frameArrowCursor);
@@ -22699,4 +22911,3 @@ test "a commit date reads as a date, and fits its column" {
     try std.testing.expectEqual(@as(u8, ':'), text[13]);
     try std.testing.expect(style.graphMono().textSize("2026-10-21 18:05").w <= style.time_column);
 }
-

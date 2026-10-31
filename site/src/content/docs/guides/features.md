@@ -56,7 +56,6 @@ never freezes it.
 - Tabs and tab groups, restored at start. Right-click a tab to group it; a
   click on a group's label folds it.
 - The command palette, `Ctrl+P`: any action, branch or repository.
-- Focus mode, `Ctrl+Shift+F`: the graph alone, until `Esc`.
 - Dark and light themes.
 - A terminal in the repository's folder, `Ctrl+Shift+T`.
 
