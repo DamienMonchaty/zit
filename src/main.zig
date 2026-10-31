@@ -291,6 +291,7 @@ fn loadWorkspace() void {
     graph_show_remote = loaded.file.show_remote_branches;
     graph_first_parent = loaded.file.first_parent;
     graph_width = loaded.file.graph_width;
+    branch_width = loaded.file.branch_width;
     // The file's strings die with `loaded`.
     commit_template.clearRetainingCapacity();
     commit_template.appendSlice(gpa, commit_prefs.template) catch {};
@@ -374,6 +375,7 @@ fn writeWorkspace() bool {
         .show_remote_branches = graph_show_remote,
         .first_parent = graph_first_parent,
         .graph_width = graph_width,
+        .branch_width = branch_width,
         .remember_tabs = remember_tabs,
         .default_branch = default_branch.items,
         .prune = prune_on_fetch,
@@ -11781,7 +11783,20 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
         defer bar.deinit();
 
         if (with_lanes) {
-            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = lane_w }, .max_size_content = .width(lane_w), .gravity_y = 0.5, .background = false });
+            // GitKraken's heads: the branch column's, then the graph's.
+            {
+                const bw = branchColumn();
+                var cell = dvui.box(@src(), .{}, .{ .tag = "header:branches", .min_size_content = .{ .w = bw }, .max_size_content = .width(bw), .gravity_y = 0.5, .background = false });
+                defer cell.deinit();
+                var buf: [MAX_SHOWN_LINE]u8 = undefined;
+                dvui.label(@src(), "{s}", .{fitText(&buf, "BRANCH / TAG", style.section(), bw - HEADER_INSET - style.space.sm)}, .{
+                    .font = style.section(),
+                    .color_text = .{ .color = style.textFaint() },
+                    .gravity_y = 0.5,
+                    .padding = .{ .x = HEADER_INSET },
+                });
+            }
+            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = lane_w - branchColumn() }, .max_size_content = .width(lane_w - branchColumn()), .gravity_y = 0.5, .background = false, .padding = .{ .x = style.space.xs } });
             defer cell.deinit();
             // Which branches it draws, at the head of the graph they shape.
             graphBranchMenu(@src());
@@ -11804,6 +11819,13 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
             columnHandleDir(@src(), 3, rs.r.x + graphRuleX() * rs.s, rs, &graph_width_drag, 1, GRAPH_MIN_W, GRAPH_MAX_W);
             if (graph_width_drag != before) {
                 graph_width = graph_width_drag;
+                saveWorkspace();
+            }
+            // The branch column's right edge: wider shows more of each name.
+            branch_width_drag = branchColumn();
+            columnHandleDir(@src(), 4, rs.r.x + branchColumn() * rs.s, rs, &branch_width_drag, 1, BRANCH_MIN_W, BRANCH_MAX_W);
+            if (branch_width_drag != branchColumn()) {
+                branch_width = branch_width_drag;
                 saveWorkspace();
             }
         }
@@ -12014,8 +12036,9 @@ fn columnRules(rs: dvui.RectScale, with_lanes: bool) void {
     // The full border colour: the subtle one vanishes on the rows' ground.
     const color = style.border();
     const xs = [_]?f32{
-        // The graph's edge too, where the lanes are drawn: it is a column
-        // like the others, and its rule is where its resize handle is.
+        // The branch column's and the graph's edges too, where the lanes are
+        // drawn: columns like the others, each rule where its handle is.
+        if (with_lanes) r.x + branchColumn() * s else null,
         if (with_lanes) r.x + graphRuleX() * s else null,
         if (cols.author) edges.author else null,
         if (cols.sha) edges.sha - style.space.xs * s else null,
@@ -12536,7 +12559,7 @@ fn wipRow(src: std.builtin.SourceLocation, width: f32) void {
             .min_size_content = .{ .w = style.avatar, .h = style.avatar },
             .max_size_content = .size(.{ .w = style.avatar, .h = style.avatar }),
             .gravity_y = 0.5,
-            .margin = .{ .x = BRANCH_COL_W + laneX(0) - style.avatar / 2 - style.space.lg },
+            .margin = .{ .x = branchColumn() + laneX(0) - style.avatar / 2 - style.space.lg },
             .padding = dvui.Rect.all(0),
         });
         defer node.deinit();
@@ -12647,7 +12670,7 @@ fn commitRow(
     // Only under the pointer, as GitComet has it: the lines alone say which
     // branch is which.
     if (lane) |l| if (!selected and hovered) {
-        const x0 = style.space.lg + BRANCH_COL_W + laneX(l.lane);
+        const x0 = style.space.lg + branchColumn() + laneX(l.lane);
         const x1 = style.space.lg + graphRuleX();
         // The branch the commit is on, lit the way GitKraken lights it.
         rs.rectToPhysical(.{ .x = x0, .y = 0, .w = x1 - x0, .h = rh - 1 })
@@ -12655,28 +12678,27 @@ fn commitRow(
     };
 
     // Where the lanes are drawn, the branch names have a column of their own
-    // before the graph, as GitComet lays it out, dotted across to the node.
-    // A search shows no lanes, so its names stay in front of the message.
+    // before the graph, as GitKraken lays it out: read from the column's
+    // left, and joined to the node by a line of its colour. A search shows
+    // no lanes, so its names stay in front of the message.
     if (lanes_drawn) {
         var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BRANCH_COL_W, .h = rh },
-            .max_size_content = .width(BRANCH_COL_W),
+            .min_size_content = .{ .w = branchColumn(), .h = rh },
+            .max_size_content = .width(branchColumn()),
             .background = false,
-            .padding = .{ .w = style.space.xs },
+            .padding = .{ .w = style.space.sm },
         });
-        var chips = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = 0.5, .background = false });
+        var chips = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
         const shown = refTags(h, commit, row_index, 1, hue);
+        const chips_end = chips.data().borderRectScale().r;
         chips.deinit();
         cell.deinit();
         if (shown) if (lane) |l| {
-            // GitComet's leader: dots from the names to the node.
-            const from = style.space.lg + BRANCH_COL_W - style.space.xs;
-            const to = style.space.lg + BRANCH_COL_W + laneX(l.lane) - style.avatar / 2 - 2;
-            var x = from;
-            while (x + 1.5 <= to) : (x += 4) {
-                rs.rectToPhysical(.{ .x = x, .y = rh / 2 - 0.75, .w = 1.5, .h = 1.5 })
-                    .fill(.{}, .{ .color = .{ .color = hue.? }, .fade = 0 });
-            }
+            // From the last tag's edge, not the margin after it.
+            const from = (chips_end.x + chips_end.w - rs.r.x) / rs.s - style.space.sm;
+            const to = style.space.lg + branchColumn() + laneX(l.lane) - style.avatar / 2 - 1;
+            if (to > from) rs.rectToPhysical(.{ .x = from, .y = rh / 2 - 0.75, .w = to - from, .h = 1.5 })
+                .fill(.{}, .{ .color = .{ .color = hue.? }, .fade = 0 });
         };
         // The lanes are painted over this gap by `drawLanes`.
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = graphColumn() + style.graph.gap } });
@@ -13117,27 +13139,56 @@ fn sameOnRemote(h: git.History, ref: git.Ref) bool {
 /// any was drawn. A branch and its remote copy at the same commit say one
 /// thing: one tag, marked as on the remote too.
 fn refTags(h: git.History, commit: git.Commit, row_index: usize, most: usize, lane: ?dvui.Color) bool {
+    // Counted first: in the branch column the names share its width with the
+    // "+N" after them, so how much each gets depends on how many there are.
+    var count: usize = 0;
+    for (h.refs) |ref| {
+        if (!git.oidEql(ref.target, commit.id)) continue;
+        if (ref.kind == .remote and sameOnRemote(h, ref)) continue;
+        count += 1;
+    }
+    const hidden = count -| most;
+    const room: ?f32 = if (lane == null) null else (branchColumn() - style.space.sm - (if (hidden > 0) moreRefsWidth(hidden) else 0)) /
+        @as(f32, @floatFromInt(@max(1, @min(count, most))));
+
     var drawn: usize = 0;
-    var hidden: usize = 0;
     for (h.refs, 0..) |ref, i| {
+        if (drawn >= most) break;
         if (!git.oidEql(ref.target, commit.id)) continue;
         const synced = sameOnRemote(h, ref);
         if (synced and ref.kind == .remote) continue;
-        if (drawn >= most) {
-            hidden += 1;
-            continue;
-        }
-        refTag(@src(), ref, i, synced, true, lane);
+        refTag(@src(), ref, i, synced, true, lane, room);
         drawn += 1;
     }
     if (hidden > 0) moreRefs(@src(), commit, hidden, row_index);
     return drawn > 0;
 }
 
+/// The "+N" after a commit's names, margin included.
+fn moreRefsWidth(hidden: usize) f32 {
+    var buf: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "+{d}", .{hidden}) catch "+";
+    return style.space.sm + 2 + 2 * style.space.xs + style.tiny().textSize(text).w;
+}
+
+/// What a ref's tag shows besides its name, in width: the cloud, the
+/// distance from its upstream, the request's number.
+fn refExtrasWidth(ref: git.Ref, synced: bool) f32 {
+    var buf: [24]u8 = undefined;
+    var w: f32 = 0;
+    if (synced) w += 11 + style.space.xs;
+    inline for (.{ ref.tracking.ahead, ref.tracking.behind }) |n| {
+        if (n > 0) w += style.space.xs + 9 + style.tiny().textSize(std.fmt.bufPrint(&buf, "{d}", .{n}) catch "").w;
+    }
+    if (requestFor(ref)) |req| w += style.space.xs + style.tinyBold().textSize(std.fmt.bufPrint(&buf, "#{d}", .{req.number}) catch "").w;
+    return w;
+}
+
 /// `lane`: the colour of the graph line the ref's commit sits on. A branch
 /// takes it, as GitKraken colours one, so a name is matched to its line at a
-/// glance; a tag keeps its own.
-fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool, draggable: bool, lane: ?dvui.Color) void {
+/// glance; a tag keeps its own. `room`: the width the whole tag may take, in
+/// the branch column; null elsewhere, where a name is cut at 140.
+fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool, draggable: bool, lane: ?dvui.Color, room: ?f32) void {
     const color = switch (ref.kind) {
         .local => lane orelse style.accent(),
         .remote => lane orelse style.get().blue,
@@ -13170,12 +13221,15 @@ fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.xs },
     });
-    dvui.label(@src(), "{s}", .{ref.name}, .{
-        .font = if (ref.head or picked) style.smallBold() else style.small(),
+    // In the branch column, as much of the name as the column leaves once
+    // the tag's own parts are counted: its padding, icon, border and margin.
+    const font = if (ref.head or picked) style.smallBold() else style.small();
+    const name_room = if (room) |r| r - (3 * style.space.sm + 10 + style.space.xs + 2) - refExtrasWidth(ref, synced) else 140;
+    var name_buf: [MAX_SHOWN_LINE]u8 = undefined;
+    dvui.label(@src(), "{s}", .{fitText(&name_buf, ref.name, font, @max(name_room, 12))}, .{
+        .font = font,
         .color_text = .{ .color = ink },
         .gravity_y = 0.5,
-        // In the branch column, cut to fit it with the "+N" after.
-        .max_size_content = .width(if (lane != null) 72 else 140),
         .padding = dvui.Rect.all(0),
     });
     if (synced) dvui.icon(@src(), "synced", dvui.entypo.cloud, .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
@@ -13371,7 +13425,7 @@ fn drawLanes(
 
     var canvas = dvui.box(src, .{}, .{
         .rect = .{
-            .x = style.space.lg + BRANCH_COL_W,
+            .x = style.space.lg + branchColumn(),
             .y = 0,
             .w = graphColumn(),
             .h = graph_scroll.virtual_size.h,
@@ -13537,14 +13591,23 @@ fn graphRuleX() f32 {
     return graphLead() - style.space.sm;
 }
 
-/// GitComet's branch column, left of the graph: a commit's branch names,
-/// dotted across to its node, rather than in front of its message.
-const BRANCH_COL_W: f32 = 130;
+/// GitKraken's BRANCH / TAG column, left of the graph: a commit's branch
+/// names, joined by a line to its node, rather than in front of its message.
+fn branchColumn() f32 {
+    return if (branch_width > 0) branch_width else BRANCH_DEFAULT_W;
+}
+
+/// The branch column as dragged in its header; 0 for its default.
+var branch_width: f32 = 0;
+var branch_width_drag: f32 = 0;
+const BRANCH_DEFAULT_W: f32 = 160;
+const BRANCH_MIN_W: f32 = 60;
+const BRANCH_MAX_W: f32 = 400;
 
 /// What comes before the message where the lanes are drawn: the branch
 /// column, the graph, and the gap after it.
 fn graphLead() f32 {
-    return BRANCH_COL_W + graphColumn() + style.graph.gap;
+    return branchColumn() + graphColumn() + style.graph.gap;
 }
 
 /// Where lane `lane` runs, from the graph column's left edge.
@@ -15011,7 +15074,7 @@ fn commitDetail(id: git.Oid) void {
                 if (!git.oidEql(ref.target, id)) continue;
                 const synced = sameOnRemote(h, ref);
                 if (synced and ref.kind == .remote) continue;
-                refTag(@src(), ref, i, synced, false, null);
+                refTag(@src(), ref, i, synced, false, null, null);
             };
         }
 
@@ -17229,6 +17292,7 @@ fn resetUiGlobals() void {
     clearFoldedDirs();
     commit_all_files = false;
     focus_mode = false;
+    branch_width = 0;
     clearSearchHits();
     reapSearchFetches(true);
     clearGraphPrefs();
@@ -21116,6 +21180,57 @@ test "dragging a branch's tag in the graph onto another raises the drop bar" {
     try clickAt(try tagCenter("ref:feat"));
     try std.testing.expect(drop == null);
     try std.testing.expectEqualStrings("on feat", commitSummary(selection.commit));
+}
+
+test "a branch's name sits in the branch column, and dragging the column's edge shows more of it" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    const name = "feature/a-branch-with-a-name-longer-than-its-column";
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try expectGit(dir, &.{ "checkout", "-q", "-b", name });
+    try expectGit(dir, &.{ "commit", "-q", "--allow-empty", "-m", "on the branch" });
+    try expectGit(dir, &.{ "checkout", "-q", "main" });
+    openRepo(dir);
+    defer closeRepo();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    // In the column, from its left, cut to it.
+    const head = (dvui.tagGet("header:branches") orelse return error.TagNotFound).rect;
+    const before = (dvui.tagGet("ref:" ++ name) orelse return error.TagNotFound).rect;
+    try std.testing.expect(before.x >= head.x and before.x - head.x < 8);
+    try std.testing.expect(before.x + before.w <= head.x + head.w);
+
+    // The column's right edge, dragged to the right.
+    const from: dvui.Point.Physical = .{ .x = head.x + head.w, .y = head.y + head.h / 2 };
+    const cw = dvui.currentWindow();
+    _ = try cw.addEventMouseMotion(.{ .pt = from });
+    _ = try cw.addEventMouseButton(.left, .press);
+    _ = try dvui.testing.step(frameArrowCursor);
+    for (1..9) |i| {
+        _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = from.x + 15 * @as(f32, @floatFromInt(i)), .y = from.y } });
+        _ = try dvui.testing.step(frameArrowCursor);
+    }
+    _ = try cw.addEventMouseButton(.left, .release);
+    try dvui.testing.settle(frameArrowCursor);
+
+    try std.testing.expect(branch_width > BRANCH_DEFAULT_W + 60);
+    const after = (dvui.tagGet("ref:" ++ name) orelse return error.TagNotFound).rect;
+    try std.testing.expect(after.w > before.w + 60);
+    const wider = (dvui.tagGet("header:branches") orelse return error.TagNotFound).rect;
+    try std.testing.expect(after.x + after.w <= wider.x + wider.w);
 }
 
 test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the menu" {
