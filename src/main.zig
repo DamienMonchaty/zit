@@ -918,6 +918,8 @@ const Confirm = struct {
         abort_operation,
         /// The commit a rebase stopped on, left out of it.
         skip_step,
+        /// The open conflicted file put back as git left it, picks and all.
+        restart_file,
     };
 };
 
@@ -1051,6 +1053,29 @@ var picked_lines: std.ArrayList(bool) = .empty;
 /// `conflicts` points into it — so the two are always freed together.
 var conflict_text: []u8 = &.{};
 var conflicts: []git.Conflict = &.{};
+/// The same file merged again in diff3 style, which the regions' bases point
+/// into when git wrote plain markers; freed with them.
+var conflict_base_text: []u8 = &.{};
+/// Each region's `git.autoResolve` answer, if it has one: why it is safe to
+/// resolve without asking.
+var conflict_autos: []?git.AutoReason = &.{};
+/// How the open path came to be conflicted, and whether it is binary.
+var conflict_kind: git.ConflictKind = .none;
+var conflict_binary = false;
+/// The region the keys act on, in the file named here: another file starts
+/// at its first region, with nothing to undo.
+var conflict_focus: usize = 0;
+var conflict_path: std.ArrayList(u8) = .empty;
+/// Bring the focused region into view on the next frame.
+var conflict_reveal = false;
+/// The file as it was before each pick made in it, newest last: U and
+/// Ctrl+Z put the last one back.
+var resolve_undo: std.ArrayList([]u8) = .empty;
+
+fn clearResolveUndo() void {
+    for (resolve_undo.items) |old| gpa.free(old);
+    resolve_undo.clearRetainingCapacity();
+}
 
 /// Biggest conflicted file Zit will read. Past this it is not a merge you
 /// resolve by clicking.
@@ -1177,6 +1202,12 @@ fn clearConflicts() void {
     conflicts = &.{};
     if (conflict_text.len > 0) gpa.free(conflict_text);
     conflict_text = &.{};
+    if (conflict_base_text.len > 0) gpa.free(conflict_base_text);
+    conflict_base_text = &.{};
+    if (conflict_autos.len > 0) gpa.free(conflict_autos);
+    conflict_autos = &.{};
+    conflict_kind = .none;
+    conflict_binary = false;
 }
 
 /// Status of the selected path on its side, from the work snapshot. Null once
@@ -1229,19 +1260,73 @@ fn loadBlame() void {
 fn loadConflicts() void {
     clearConflicts();
 
+    // Another file: its own first region, and its own undo.
+    if (!std.mem.eql(u8, conflict_path.items, selected_path.items)) {
+        conflict_path.clearRetainingCapacity();
+        conflict_path.appendSlice(gpa, selected_path.items) catch {};
+        conflict_focus = 0;
+        clearResolveUndo();
+    }
+
+    const r = repo orelse return;
+    conflict_kind = r.conflictKind(selected_path.items);
+
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs = selectedAbsPath(&path_buf) orelse return;
 
     conflict_text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch {
         conflict_text = &.{};
-        setCommandError("Could not read that conflicted file.");
+        // Deleted on one side: there may be nothing on disk, and that is
+        // the conflict, answered below.
+        if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) setCommandError("Could not read that conflicted file.");
         return;
     };
+    // Read as text, a binary file is noise: its two versions are picked
+    // whole instead.
+    conflict_binary = std.mem.indexOfScalar(u8, conflict_text[0..@min(conflict_text.len, 8000)], 0) != null;
+    if (conflict_binary) return;
 
     conflicts = git.parseConflicts(gpa, conflict_text) catch {
         clearConflicts();
         return;
     };
+
+    // A base for each region where git wrote plain markers, its default:
+    // merged again from the index, diff3 style, and matched side by side.
+    const missing = for (conflicts) |region| {
+        if (!region.has_base) break true;
+    } else false;
+    if (missing and conflict_kind == .both_modified) {
+        if (r.mergedWithBase(gpa, selected_path.items)) |merged| {
+            conflict_base_text = merged;
+            if (git.parseConflicts(gpa, merged)) |with_base| {
+                defer gpa.free(with_base);
+                git.attachBases(conflicts, with_base);
+            } else |_| {}
+        }
+    }
+
+    conflict_autos = gpa.alloc(?git.AutoReason, conflicts.len) catch &.{};
+    for (conflict_autos, conflicts) |*auto, region| {
+        auto.* = null;
+        const got = (git.autoResolve(gpa, region) catch null) orelse continue;
+        gpa.free(got.text);
+        auto.* = got.reason;
+    }
+    conflict_focus = @min(conflict_focus, conflicts.len -| 1);
+}
+
+/// A conflict answered by picking a whole file — a binary one, or one a side
+/// deleted — rather than region by region.
+fn wholeFileConflict() bool {
+    return conflict_binary or conflict_kind == .deleted_by_us or conflict_kind == .deleted_by_them;
+}
+
+/// How many regions resolve on their own, safely.
+fn safeConflicts() usize {
+    var n: usize = 0;
+    for (conflict_autos) |auto| n += @intFromBool(auto != null);
+    return n;
 }
 
 /// Re-read the diff if what it was taken from is gone. Called at the top of the
@@ -2812,6 +2897,14 @@ const Action = enum {
     confirmed,
     prompt,
     resolve,
+    /// Every region that resolves on its own, in the open file.
+    resolve_safe,
+    /// The open file as it was before its last pick.
+    undo_resolve,
+    /// The open file whole, as `action_side` has it, staged.
+    take_file,
+    /// The open file staged, nothing left in it, and on to the next.
+    stage_next,
     rebase,
     network,
     tabs,
@@ -2918,6 +3011,10 @@ fn runAction() bool {
         .confirmed => runConfirmed(),
         .prompt => runPrompt(),
         .resolve => runResolve(),
+        .resolve_safe => runResolveSafe(),
+        .undo_resolve => runUndoResolve(),
+        .take_file => runTakeFile(),
+        .stage_next => runStageNext(),
         .rebase => runRebase(),
         .network => startJob(),
         .tabs => runTabAction(),
@@ -3591,35 +3688,113 @@ fn requestResolve(index: usize, side: git.ConflictSide) void {
 /// resolved is a separate, deliberate click — same as resolving in an editor.
 fn runResolve() void {
     if (action_conflict >= conflicts.len) return;
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs = selectedAbsPath(&path_buf) orelse return;
-
-    // The file as it is now, against the copy the regions were read from:
-    // "Open this file" invites an edit in another editor, and writing the
-    // older copy back would lose it without a word.
-    const on_disk = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch null;
-    defer if (on_disk) |d| gpa.free(d);
-    if (on_disk == null or !std.mem.eql(u8, on_disk.?, conflict_text)) {
-        diff_stale = true;
-        return setCommandError("The file changed on disk since it was shown: here it is as it is now. Pick again.");
-    }
-
     const next = git.resolveConflict(gpa, conflict_text, conflicts[action_conflict], action_side) catch {
         setCommandError("Out of memory resolving that conflict.");
         return;
     };
     defer gpa.free(next);
+    _ = writeConflictFile(next, true);
+}
 
+/// Every region that resolves on its own, at once: each keeps the side that
+/// changed it, line by line at the finest. From the last region up, so the
+/// offsets of those before it still hold.
+fn runResolveSafe() void {
+    var text = gpa.dupe(u8, conflict_text) catch return;
+    defer gpa.free(text);
+    var i = conflicts.len;
+    while (i > 0) {
+        i -= 1;
+        const auto = (git.autoResolve(gpa, conflicts[i]) catch null) orelse continue;
+        defer gpa.free(auto.text);
+        const next = git.replaceRegion(gpa, text, conflicts[i], &.{auto.text}) catch return;
+        gpa.free(text);
+        text = next;
+    }
+    _ = writeConflictFile(text, true);
+}
+
+/// U and Ctrl+Z in a conflicted file: the file as it was before the last pick.
+fn runUndoResolve() void {
+    const previous = resolve_undo.pop() orelse return;
+    defer gpa.free(previous);
+    _ = writeConflictFile(previous, false);
+}
+
+/// Write `next` over the open conflicted file, keeping what it was for U to
+/// put back. Refused when the file changed on disk since it was shown:
+/// "Open this file" invites an edit in another editor, and writing the
+/// older copy over it would lose that edit without a word.
+fn writeConflictFile(next: []const u8, keep_undo: bool) bool {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = selectedAbsPath(&path_buf) orelse return false;
+
+    const on_disk = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch null;
+    defer if (on_disk) |d| gpa.free(d);
+    if (on_disk == null or !std.mem.eql(u8, on_disk.?, conflict_text)) {
+        diff_stale = true;
+        setCommandError("The file changed on disk since it was shown: here it is as it is now. Pick again.");
+        return false;
+    }
+
+    if (keep_undo) {
+        const copy = gpa.dupe(u8, conflict_text) catch return false;
+        resolve_undo.append(gpa, copy) catch {
+            gpa.free(copy);
+            return false;
+        };
+    }
     std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = abs, .data = next }) catch {
         setCommandError("Could not write that file back.");
-        return;
+        return false;
     };
 
     clearCommandError();
     // The offsets of every region after the one just resolved have moved, so
     // the list is rebuilt rather than patched.
     diff_stale = true;
+    workChanged("Resolving");
+    return true;
+}
+
+/// The whole file as one side has it, staged: `checkout --ours` or
+/// `--theirs`, then `add` — or, where that side deleted it, `rm`. The
+/// next conflicted file opens after it.
+fn runTakeFile() void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (selected_path.items.len > path_buf.len) return;
+    @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
+    const file = path_buf[0..selected_path.items.len];
+    const side = action_side;
+
+    const deleted = (conflict_kind == .deleted_by_us and side == .ours) or (conflict_kind == .deleted_by_them and side == .theirs);
+    if (deleted) {
+        gitDo(&.{ "--literal-pathspecs", "rm", "-q", "--", file });
+    } else {
+        // Deleted on the other side: what is on disk is already this one's.
+        if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) {
+            gitDo(&.{ "--literal-pathspecs", "checkout", if (side == .theirs) "--theirs" else "--ours", "--", file });
+            if (command_error != null) return;
+        }
+        gitDo(&.{ "--literal-pathspecs", "add", "--", file });
+    }
+    if (command_error != null) return;
+    clearResolveUndo();
+    open_first_conflict = true;
+    workChanged("Resolving");
+}
+
+/// A file with nothing left to resolve, staged, and the next one opened.
+fn runStageNext() void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (selected_path.items.len > path_buf.len) return;
+    @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
+    const file = path_buf[0..selected_path.items.len];
+    if (markersLeft(file)) return ask(.stage_markers, file);
+    gitDo(&.{ "--literal-pathspecs", "add", "--", file });
+    if (command_error != null) return;
+    clearResolveUndo();
+    open_first_conflict = true;
     workChanged("Resolving");
 }
 
@@ -3765,6 +3940,13 @@ fn runConfirmed() void {
             request(&.{ "--literal-pathspecs", "add", "--", c.arg }),
         .abort_operation => if (operationCommand()) |cmd| request(&.{ cmd, "--abort" }),
         .skip_step => if (operationCommand()) |cmd| requestLocal("Skipping", &.{ cmd, "--skip" }),
+        // `checkout -m` writes the conflict again from the index's three
+        // stages: every pick made in the file goes.
+        .restart_file => {
+            gitDo(&.{ "--literal-pathspecs", "checkout", "-m", "--", c.arg });
+            if (command_error == null) clearResolveUndo();
+            diff_stale = true;
+        },
     }
     clearConfirm();
 }
@@ -6264,6 +6446,13 @@ fn shortcuts() void {
         };
         if (ke.action == .up) continue;
 
+        // In a conflicted file the keys answer it — before the history's
+        // arrows below, which would otherwise take ↑ and ↓.
+        if (isConflictView() and !typing() and conflictKey(ke)) {
+            e.handled = true;
+            continue;
+        }
+
         // Up and down walk the history the way they walk a mail list: the pane
         // on the right follows, which is the whole point of reading a diff.
         // The only keys held down to repeat. Not over the pull requests,
@@ -6408,6 +6597,61 @@ fn shortcuts() void {
             run_it();
         }
     }
+}
+
+/// The conflict view's keys, GitComet's way: ↑ ↓ or F2 F3 from region to
+/// region, 1 2 3 keep the left side, the right one or both, U or Ctrl+Z take
+/// the last pick back, Enter stages a file with nothing left in it and goes
+/// to the next, F4 goes to the next conflicted file. True when one was it.
+fn conflictKey(ke: dvui.Event.Key) bool {
+    const step: i2 = if (pressed(ke, .down, false) or pressed(ke, .f3, false) or pressed(ke, .j, false))
+        1
+    else if (pressed(ke, .up, false) or pressed(ke, .f2, false) or pressed(ke, .k, false))
+        -1
+    else
+        0;
+    if (step != 0) {
+        moveConflictFocus(step);
+        return true;
+    }
+    // Picks and stages once per press: a held key is not five picks.
+    if (ke.action != .down) return false;
+    if (pressed(ke, .one, false) or pressed(ke, .kp_1, false)) return pickFocused(.ours);
+    if (pressed(ke, .two, false) or pressed(ke, .kp_2, false)) return pickFocused(.theirs);
+    if (pressed(ke, .three, false) or pressed(ke, .kp_3, false)) return pickFocused(.both);
+    if (pressed(ke, .u, false) or pressed(ke, .z, true)) {
+        // Ctrl+Z here never reaches the reflog's undo: mid-merge it would
+        // reset under it.
+        if (resolve_undo.items.len > 0) requestAction(.undo_resolve);
+        return true;
+    }
+    if ((pressed(ke, .enter, false) or pressed(ke, .kp_enter, false)) and conflicts.len == 0 and !conflict_binary and
+        conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them)
+    {
+        requestAction(.stage_next);
+        return true;
+    }
+    if (pressed(ke, .f4, false)) {
+        openNextConflict();
+        return true;
+    }
+    return false;
+}
+
+fn moveConflictFocus(step: i2) void {
+    if (conflicts.len == 0) return;
+    if (step > 0) {
+        conflict_focus = @min(conflict_focus + 1, conflicts.len - 1);
+    } else {
+        conflict_focus -|= 1;
+    }
+    conflict_reveal = true;
+}
+
+fn pickFocused(side: git.ConflictSide) bool {
+    if (conflict_focus >= conflicts.len) return false;
+    requestResolve(conflict_focus, side);
+    return true;
 }
 
 /// The tab `delta` along from the one shown, across groups, round the ends.
@@ -7801,6 +8045,16 @@ fn keysDialog() void {
         defer card.deinit();
         shortcutRow(@src(), "Ctrl+Enter", "Commit what is staged");
         shortcutRow(@src(), "Ctrl+Enter", "Continue a merge or rebase, its conflicts resolved");
+    }
+    settingsGroup(@src(), 0, "Conflicts");
+    {
+        var card = shortcutCard(@src(), 5);
+        defer card.deinit();
+        shortcutRow(@src(), "↑ ↓, F2 F3", "Previous / next conflict in the file");
+        shortcutRow(@src(), "1, 2, 3", "Keep the left side, the right one, or both");
+        shortcutRow(@src(), "U, Ctrl+Z", "Take the last pick back");
+        shortcutRow(@src(), "Enter", "Stage a resolved file and open the next");
+        shortcutRow(@src(), "F4", "Next conflicted file");
     }
     settingsGroup(@src(), 0, "Panels");
     {
@@ -9790,6 +10044,7 @@ fn confirmBar() void {
             std.fmt.bufPrint(&buf, "Stage {s} with its conflict markers still in it? git would take them as the resolution.", .{c.arg}),
         .abort_operation => abortText(&buf),
         .skip_step => "Skip the commit the rebase stopped on? It is left out of the rebased branch.",
+        .restart_file => std.fmt.bufPrint(&buf, "Start {s} over? Every pick made in it goes, and its conflicts come back as git left them.", .{c.arg}),
         .remove_worktree => std.fmt.bufPrint(&buf, "Remove the worktree at {s}, and its folder?", .{c.arg}),
         .delete_remote_branch, .delete_remote_tag => std.fmt.bufPrint(&buf, "Delete {s} on the remote, for everyone?", .{c.arg}),
         .restore_file => std.fmt.bufPrint(&buf, "Replace your copy of {s} with this commit's?", .{
@@ -14690,21 +14945,22 @@ fn diffHeader() void {
                 // The answers for a conflict nobody needs to read. `checkout`
                 // rewrites the file; the index stays conflicted until it is
                 // staged, which is what "resolved" means to git.
-                const names = sideNames();
-                var ours_buf: [96]u8 = undefined;
-                var theirs_buf: [96]u8 = undefined;
-                if (linkButton(@src(), allCaption(&ours_buf, names.ours), style.success())) {
-                    request(&.{ "--literal-pathspecs", "checkout", "--ours", "--", selected_path.items });
+                // Taking back a pick, and starting the file over, while there
+                // is something to take back.
+                if (resolve_undo.items.len > 0) {
+                    if (linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) requestAction(.undo_resolve);
+                    if (linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) ask(.restart_file, selected_path.items);
                 }
-                if (linkButton(@src(), allCaption(&theirs_buf, names.theirs), style.get().blue)) {
-                    request(&.{ "--literal-pathspecs", "checkout", "--theirs", "--", selected_path.items });
+                // The whole file as one side has it, staged in the same click.
+                // Not for one deleted on a side: its panel asks that plainly.
+                if (!wholeFileConflict()) {
+                    const names = sideNames();
+                    var ours_buf: [96]u8 = undefined;
+                    var theirs_buf: [96]u8 = undefined;
+                    if (linkButtonTagged(@src(), allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) takeFile(.ours);
+                    if (linkButtonTagged(@src(), allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) takeFile(.theirs);
                 }
-                if (linkButton(@src(), "Mark resolved", style.accent())) {
-                    if (markersLeft(selected_path.items))
-                        ask(.stage_markers, selected_path.items)
-                    else
-                        request(&.{ "--literal-pathspecs", "add", "--", selected_path.items });
-                }
+                if (linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) requestAction(.stage_next);
                 return;
             }
 
@@ -15061,6 +15317,9 @@ fn isConflictView() bool {
 /// The three-pane merge: each conflict's two sides next to each other on top,
 /// and underneath, the file they are being resolved into.
 fn conflictBody() void {
+    // A binary file, or one deleted on a side, has nothing to read in an
+    // output pane: its question takes the whole of it.
+    if (wholeFileConflict()) return conflictRegions();
     var split = dvui.paned(@src(), .{
         .direction = .vertical,
         .collapsed_size = 360,
@@ -15177,11 +15436,16 @@ fn outputLine(src: std.builtin.SourceLocation, n: usize, text: ?[]const u8, regi
             .padding = dvui.Rect.all(0),
         });
     } else {
-        dvui.label(@src(), "conflict {d}: pick a side above", .{region + 1}, .{
+        dvui.label(@src(), "conflict {d}: pick a side above — click to go to it", .{region + 1}, .{
             .font = style.mono(),
             .color_text = .{ .color = style.get().yellow },
             .padding = dvui.Rect.all(0),
         });
+        if (row.data().borderRectScale().r.contains(dvui.currentWindow().mouse_pt)) dvui.cursorSet(.hand);
+        if (dvui.clicked(row.data(), .{})) {
+            conflict_focus = region;
+            conflict_reveal = true;
+        }
     }
 }
 
@@ -15193,28 +15457,115 @@ fn conflictRegions() void {
     });
     defer scroll.deinit();
 
+    // What has no regions to pick from: a file deleted on one side, a binary
+    // one. Each a plain question.
+    if (conflict_kind == .deleted_by_us or conflict_kind == .deleted_by_them) return deletedConflict();
+    if (conflict_binary) return binaryConflict();
+
     if (conflicts.len == 0) {
         // No markers left, but git still has the file down as conflicted: what
         // is missing is the click that says so.
-        dvui.label(@src(), "No conflict markers left. Mark it resolved to stage it.", .{}, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.textMuted() },
+        var done = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .margin = .{ .y = style.space.xl } });
+        defer done.deinit();
+        dvui.label(@src(), "Nothing left to resolve in this file.", .{}, .{
+            .font = style.body(),
+            .color_text = .{ .color = style.text() },
             .gravity_x = 0.5,
-            .margin = .{ .y = style.space.lg },
+            .padding = dvui.Rect.all(0),
+            .margin = .{ .h = style.space.md },
         });
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+        defer row.deinit();
+        if (opButton(@src(), "Stage it and open the next — Enter", "conflict:stage_next")) requestAction(.stage_next);
         return;
     }
+
+    const safe = safeConflicts();
+    if (safe > 0) safeBar(safe);
 
     for (conflicts, 0..) |region, i| conflictBlock(@src(), region, i);
 }
 
+/// "2 of 3 conflicts can be resolved safely": one click for every region
+/// where one side alone changed things, line by line at the finest.
+fn safeBar(safe: usize) void {
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.tint(style.success()) },
+        .border = .{ .x = 3 },
+        .color_border = .{ .color = style.success() },
+        .corners = style.radius.input,
+        .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+    });
+    defer bar.deinit();
+    dvui.icon(@src(), "safe_icon", dvui.entypo.check, .{ .fill_color = .{ .color = style.success() } }, .{
+        .min_size_content = .{ .w = 13, .h = 13 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    dvui.label(@src(), "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, plural(conflicts.len) }, .{
+        .font = style.small(),
+        .color_text = .{ .color = style.text() },
+        .gravity_y = 0.5,
+        .expand = .horizontal,
+        .max_size_content = .width(0),
+        .padding = dvui.Rect.all(0),
+    });
+    var buf: [48]u8 = undefined;
+    const caption = if (safe == 1) "Resolve it" else std.fmt.bufPrint(&buf, "Resolve these {d}", .{safe}) catch "Resolve them";
+    if (opButton(@src(), caption, "conflict:resolve_safe")) requestAction(.resolve_safe);
+}
+
+/// A file one side deleted and the other changed: keep it, or let it go.
+fn deletedConflict() void {
+    const names = sideNames();
+    const by_us = conflict_kind == .deleted_by_us;
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .margin = .{ .y = style.space.xl } });
+    defer box.deinit();
+    dvui.label(@src(), "{s} deleted this file; {s} changed it.", .{ if (by_us) names.ours else names.theirs, if (by_us) names.theirs else names.ours }, .{
+        .font = style.body(),
+        .color_text = .{ .color = style.text() },
+        .gravity_x = 0.5,
+        .padding = dvui.Rect.all(0),
+        .margin = .{ .h = style.space.md },
+    });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+    defer row.deinit();
+    // The side that still has it, and the side that deleted it.
+    if (dialogButton(@src(), "Keep the file", true)) takeFile(if (by_us) .theirs else .ours);
+    if (dialogButton(@src(), "Delete it", false)) takeFile(if (by_us) .ours else .theirs);
+}
+
+/// A binary file: no lines to pick between, one version or the other.
+fn binaryConflict() void {
+    const names = sideNames();
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .margin = .{ .y = style.space.xl } });
+    defer box.deinit();
+    dvui.label(@src(), "A binary file: keep one side's version of it.", .{}, .{
+        .font = style.body(),
+        .color_text = .{ .color = style.text() },
+        .gravity_x = 0.5,
+        .padding = dvui.Rect.all(0),
+        .margin = .{ .h = style.space.md },
+    });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+    defer row.deinit();
+    var ours_buf: [96]u8 = undefined;
+    var theirs_buf: [96]u8 = undefined;
+    if (dialogButton(@src(), keepCaption(&ours_buf, names.ours), false)) takeFile(.ours);
+    if (dialogButton(@src(), keepCaption(&theirs_buf, names.theirs), false)) takeFile(.theirs);
+}
+
 fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: usize) void {
+    const focused = index == conflict_focus;
     var block = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = index,
         .expand = .horizontal,
         .background = false,
         .padding = dvui.Rect.all(0),
-        .margin = .{ .h = style.space.md },
+        .margin = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.md, .h = style.space.sm },
     });
     defer block.deinit();
 
@@ -15222,45 +15573,132 @@ fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: u
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = true,
-            .color_fill = .{ .color = style.surface() },
+            .color_fill = .{ .color = if (focused) style.accentDim() else style.surface() },
+            .corners = .{ .tl = style.radius.input.tl, .tr = style.radius.input.tr },
             .min_size_content = .{ .h = style.toolbar_cell },
-            .padding = .{ .x = style.space.md, .w = style.space.md },
+            .padding = .{ .x = style.space.md, .w = style.space.sm },
         });
         defer head.deinit();
 
         dvui.label(@src(), "Conflict {d} of {d}", .{ index + 1, conflicts.len }, .{
             .font = style.smallBold(),
-            .color_text = .{ .color = style.text() },
+            .color_text = .{ .color = if (focused) style.accent() else style.text() },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
+        // Why it would resolve on its own, where it would.
+        if (index < conflict_autos.len) if (conflict_autos[index]) |reason| {
+            var why_buf: [160]u8 = undefined;
+            dvui.label(@src(), "{s}", .{autoText(&why_buf, reason)}, .{
+                .font = style.tiny(),
+                .color_text = .{ .color = style.success() },
+                .gravity_y = 0.5,
+                .margin = .{ .x = style.space.md },
+                .padding = dvui.Rect.all(0),
+            });
+        };
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
+        // Each with the key that does the same, on the one the keys act on.
         const names = sideNames();
         var ours_buf: [96]u8 = undefined;
         var theirs_buf: [96]u8 = undefined;
-        if (linkButton(@src(), keepCaption(&ours_buf, names.ours), style.success())) requestResolve(index, .ours);
-        if (linkButton(@src(), keepCaption(&theirs_buf, names.theirs), style.get().blue)) requestResolve(index, .theirs);
-        if (linkButton(@src(), "Keep both", style.textMuted())) requestResolve(index, .both);
+        if (keyedLink(@src(), if (focused) "1" else "", keepCaption(&ours_buf, names.ours), style.success())) requestResolve(index, .ours);
+        if (keyedLink(@src(), if (focused) "2" else "", keepCaption(&theirs_buf, names.theirs), style.get().blue)) requestResolve(index, .theirs);
+        if (keyedLink(@src(), if (focused) "3" else "", "Keep both", style.textMuted())) requestResolve(index, .both);
     }
 
-    if (region.base.len > 0) {
-        conflictSide(@src(), 0, "base — before either side changed it", region.base, style.rowHover(), null);
+    if (region.has_base) {
+        conflictSide(@src(), 0, "base — before either side changed it", region.base, style.rowHover());
     }
 
-    // Side by side, the way they are compared: one column each, and the
-    // button that takes it at its head.
-    var sides = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
-        .expand = .horizontal,
-        .background = false,
-    });
-    defer sides.deinit();
+    {
+        // Side by side, the way they are compared: one column each.
+        var sides = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
+            .expand = .horizontal,
+            .background = false,
+        });
+        defer sides.deinit();
+        const names = sideNames();
+        var ours_buf: [160]u8 = undefined;
+        var theirs_buf: [160]u8 = undefined;
+        conflictSide(@src(), 1, std.fmt.bufPrint(&ours_buf, "{s} — {s}", .{ names.ours, names.ours_role }) catch "ours", region.ours, style.diffAddedFill());
+        conflictSide(@src(), 2, std.fmt.bufPrint(&theirs_buf, "{s} — {s}", .{ names.theirs, names.theirs_role }) catch "theirs", region.theirs, style.get().blue.lerp(style.background(), 0.86));
+    }
+
+    // A click anywhere in it — past the buttons, which take theirs first —
+    // makes it the one the keys act on.
+    if (dvui.clicked(block.data(), .{})) conflict_focus = index;
+    const rs = block.data().borderRectScale();
+    if (focused) {
+        rs.r.stroke(dvui.CornerRect.Physical.all(6 * rs.s), .{ .thickness = 1.5 * rs.s, .color = .{ .color = style.accent() }, .closed = true });
+        if (conflict_reveal) {
+            conflict_reveal = false;
+            dvui.scrollTo(.{ .screen_rect = rs.r });
+        }
+    }
+}
+
+/// Why a region resolves on its own, in its sides' names.
+fn autoText(buf: []u8, reason: git.AutoReason) []const u8 {
     const names = sideNames();
-    var ours_buf: [160]u8 = undefined;
-    var theirs_buf: [160]u8 = undefined;
-    conflictSide(@src(), 1, std.fmt.bufPrint(&ours_buf, "{s} — {s}", .{ names.ours, names.ours_role }) catch "ours", region.ours, style.diffAddedFill(), .{ index, .ours });
-    conflictSide(@src(), 2, std.fmt.bufPrint(&theirs_buf, "{s} — {s}", .{ names.theirs, names.theirs_role }) catch "theirs", region.theirs, style.get().blue.lerp(style.background(), 0.86), .{ index, .theirs });
+    return switch (reason) {
+        .same => "safe: the same change on both sides",
+        .only_ours => std.fmt.bufPrint(buf, "safe: only {s} changed it", .{names.ours}) catch "safe",
+        .only_theirs => std.fmt.bufPrint(buf, "safe: only {s} changed it", .{names.theirs}) catch "safe",
+        .lines_apart => "safe: each side changed different lines",
+    };
+}
+
+/// A pick's link with the key that does the same before it — none where
+/// `key` is empty.
+fn keyedLink(src: std.builtin.SourceLocation, key: []const u8, caption: []const u8, color: dvui.Color) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{ .draw_focus = false }, .{
+        .gravity_y = 0.5,
+        .background = false,
+        .margin = dvui.Rect.all(0),
+        .padding = .{ .x = style.space.sm, .y = 2, .w = style.space.sm, .h = 2 },
+        .corners = style.radius.input,
+    });
+    defer bw.deinit();
+    bw.processEvents();
+    {
+        var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .both,
+            .background = bw.hovered(),
+            .color_fill = .{ .color = style.rowHover() },
+            .corners = style.radius.input,
+            .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
+        });
+        defer cell.deinit();
+        if (key.len > 0) dvui.label(@src(), "{s}", .{key}, .{
+            .font = style.tinyBold(),
+            .color_text = .{ .color = style.textMuted() },
+            .background = true,
+            .color_fill = .{ .color = style.surfaceRaised() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = dvui.CornerRect.all(3),
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.xs },
+            .padding = .{ .x = 4, .w = 4 },
+        });
+        dvui.label(@src(), "{s}", .{caption}, .{
+            .font = style.small(),
+            .color_text = .{ .color = if (bw.hovered()) style.text() else color },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+    }
+    return bw.clicked();
+}
+
+fn takeFile(side: git.ConflictSide) void {
+    if (action != .none) return;
+    action_side = side;
+    action = .take_file;
 }
 
 /// "All of main": the whole file as one side has it.
@@ -15283,9 +15721,6 @@ fn conflictSide(
     caption: []const u8,
     text: []const u8,
     fill: dvui.Color,
-    /// The region and side its "Take" button resolves to; null for the base,
-    /// which is shown, never taken.
-    take: ?struct { usize, git.ConflictSide },
 ) void {
     var side = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = id,
@@ -15305,11 +15740,9 @@ fn conflictSide(
             .color_text = .{ .color = style.textMuted() },
             .gravity_y = 0.5,
             .expand = .horizontal,
+            .max_size_content = .width(0),
             .padding = dvui.Rect.all(0),
         });
-        if (take) |t| {
-            if (linkButton(@src(), "Take this", style.accent())) requestResolve(t[0], t[1]);
-        }
     }
 
     // A side with nothing in it is a real answer — one branch deleted what the
@@ -18637,6 +19070,12 @@ fn resetUiGlobals() void {
     clearRecent();
     recent.deinit(gpa);
     recent = .empty;
+    clearResolveUndo();
+    resolve_undo.deinit(gpa);
+    resolve_undo = .empty;
+    conflict_path.deinit(gpa);
+    conflict_path = .empty;
+    conflict_focus = 0;
     clearForget();
     identity_name.deinit(gpa);
     identity_name = .empty;
@@ -19486,6 +19925,140 @@ test "after a rebase, Push is a force push that says what it replaces" {
     const text = forcePushText(&buf);
     try std.testing.expect(std.mem.indexOf(u8, text, "origin/feat") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "1 commit there") != null);
+}
+
+// The conflict view driven by the keys alone, as GitComet's is: 2 keeps the
+// right side, U takes it back, 1 keeps the left, Enter stages the file.
+test "a conflicted file is answered from the keys: a pick, its undo, Enter to stage" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    try style.applyEmbedded(gpa, true);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeConflictedPair(&tmp, dir);
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(isConflictView());
+    try std.testing.expectEqual(@as(usize, 1), conflicts.len);
+
+    try pressFrame(.two, .none);
+    try std.testing.expectEqual(@as(usize, 0), conflicts.len);
+    try std.testing.expectEqual(@as(usize, 1), resolve_undo.items.len);
+    {
+        const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(4096));
+        defer gpa.free(now);
+        try std.testing.expect(std.mem.startsWith(u8, now, "other"));
+    }
+
+    try pressFrame(.u, .none);
+    try std.testing.expectEqual(@as(usize, 1), conflicts.len);
+    try std.testing.expectEqual(@as(usize, 0), resolve_undo.items.len);
+
+    try pressFrame(.one, .none);
+    try std.testing.expectEqual(@as(usize, 0), conflicts.len);
+    try pressFrame(.enter, .none);
+    try std.testing.expectEqual(@as(usize, 0), conflictCount());
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+    const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(4096));
+    defer gpa.free(now);
+    try std.testing.expect(std.mem.startsWith(u8, now, "main"));
+}
+
+// git wrote plain markers, as it does by default: the base comes from the
+// index, and a conflict where each side changed different lines resolves
+// in one click, each line from the side that changed it.
+test "a conflict of changes on neighbouring lines is resolved safely, with its base" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "n.txt", "a = 1\nb = 2\nc = 3\n");
+    try expectGit(dir, &.{ "switch", "-qc", "other" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "n.txt", .data = "a = 1\nb = 20\nc = 3\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "b" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "n.txt", .data = "a = 10\nb = 2\nc = 30\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "a and c" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "-c", "merge.conflictStyle=merge", "merge", "--no-edit", "other" });
+    try std.testing.expectEqualStrings("n.txt", selected_path.items);
+    loadConflicts();
+    try std.testing.expectEqual(@as(usize, 1), conflicts.len);
+    try std.testing.expect(conflicts[0].has_base);
+    try std.testing.expect(git.sameText("a = 1\nb = 2\nc = 3\n", conflicts[0].base));
+    try std.testing.expectEqual(@as(?git.AutoReason, .lines_apart), conflict_autos[0]);
+
+    requestAction(.resolve_safe);
+    _ = runAction();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    const now = try tmp.dir.readFileAlloc(app_io, "n.txt", gpa, .limited(4096));
+    defer gpa.free(now);
+    try std.testing.expect(git.sameText("a = 10\nb = 20\nc = 30\n", now));
+}
+
+// A file one side deleted and the other changed: no regions, a question —
+// keep it or let it go — answered and staged in one click.
+test "a file deleted on one side is kept or deleted in one click" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "notes.txt", "notes\n");
+    try expectGit(dir, &.{ "switch", "-qc", "other" });
+    try expectGit(dir, &.{ "rm", "-q", "notes.txt" });
+    try expectGit(dir, &.{ "commit", "-qm", "no notes" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "notes.txt", .data = "notes, edited\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "edited notes" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    try std.testing.expectEqualStrings("notes.txt", selected_path.items);
+    loadConflicts();
+    try std.testing.expectEqual(git.ConflictKind.deleted_by_them, conflict_kind);
+    try std.testing.expect(wholeFileConflict());
+
+    // "Delete it": the side that deleted it.
+    takeFile(.theirs);
+    _ = runAction();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(usize, 0), conflictCount());
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(app_io, "notes.txt", .{}));
 }
 
 test "a review written for one pull request is not carried to another" {

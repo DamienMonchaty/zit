@@ -35,6 +35,18 @@ action without a key of its own is in the command palette, `Ctrl+P`.
 | --- | --- |
 | `Ctrl+Enter` | Commit what is staged — or, mid-merge or rebase with every conflict resolved, continue it |
 
+## Conflicts
+
+In a conflicted file, outside a text field:
+
+| Keys | Does |
+| --- | --- |
+| `↑` `↓`, `F2` `F3` | Previous / next conflict in the file |
+| `1` `2` `3` | Keep the left side, the right one, or both |
+| `U`, `Ctrl+Z` | Take the last pick back |
+| `Enter` | Stage a file with nothing left to resolve, and open the next |
+| `F4` | Next conflicted file |
+
 ## Panels
 
 | Keys | Does |

@@ -23,6 +23,22 @@ Every release of Zit, newest first. Downloads are on the
   or Skip a commit its resolution left empty. Abort and Skip sit beside it;
   Skip now works for cherry-picks and reverts too. The sidebar lists the
   conflicted files, each a click away.
+- The conflict view works from the keys, as GitComet's: one region at a time
+  is the active one, framed, with `↑` `↓` (or `F2` `F3`) to move, `1` `2` `3`
+  to keep the left side, the right one or both, `U` or `Ctrl Z` to take the
+  last pick back, `Enter` to stage a file with nothing left in it and open
+  the next, `F4` for the next conflicted file. A click on an unresolved line
+  of the output goes to its region.
+- Each region shows its base — what the file had before either side
+  changed it — even when git wrote plain markers, its default: Zit merges
+  the file again from the index to find it. Regions that resolve on their
+  own are marked — both sides made the same change, only one side changed
+  it, or each changed different lines next to each other — and one click
+  resolves them all, each line from the side that changed it.
+- "All of main" and "All of feature/x" stage the file in the same click and
+  open the next one; Undo pick and Start over take a file back. A file
+  deleted on one side asks plainly — keep it, or delete it — and a binary
+  file offers one side's version or the other's, instead of a page of noise.
 - A conflict's sides are named: "Keep main", "Keep feature/x", with what each
   is — during a rebase, where git's "ours" is the base and "theirs" your
   own commit, the buttons say so instead of the reverse.
