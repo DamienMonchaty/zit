@@ -15,6 +15,73 @@ Every release of Zit, newest first. Downloads are on the
   when it is not 100 % — a click there resets it.
 
 ### Changed
+- A merge, rebase, cherry-pick or revert under way has one bar, which says
+  what it is in the branches' names — "Rebasing feat onto main" — with the
+  step it is at, the commit it stopped on and how many files are left, and
+  the next thing to do as its one filled button: resolve the conflicts, go
+  to the next conflicted file, Continue (also `Ctrl Enter` and the palette),
+  or Skip a commit its resolution left empty. Abort and Skip sit beside it;
+  Skip now works for cherry-picks and reverts too. The sidebar lists the
+  conflicted files, each a click away.
+- The conflict view works from the keys, as GitComet's: one region at a time
+  is the active one, framed, with `↑` `↓` (or `F2` `F3`) to move, `1` `2` `3`
+  to keep the left side, the right one or both, `U` or `Ctrl Z` to take the
+  last pick back, `Enter` to stage a file with nothing left in it and open
+  the next, `F4` for the next conflicted file. A click on an unresolved line
+  of the output goes to its region.
+- Each region shows its base — what the file had before either side
+  changed it — even when git wrote plain markers, its default: Zit merges
+  the file again from the index to find it. Regions that resolve on their
+  own are marked — both sides made the same change, only one side changed
+  it, or each changed different lines next to each other — and one click
+  resolves them all, each line from the side that changed it.
+- "All of main" and "All of feature/x" stage the file in the same click and
+  open the next one; Undo pick and Start over take a file back. A file
+  deleted on one side asks plainly — keep it, or delete it — and a binary
+  file offers one side's version or the other's, instead of a page of noise.
+- A pull request takes the whole pane, with GitHub's sidebar on its right:
+  who reviews and where each stands, who it is assigned to, its labels.
+  Each section's head drops the list to change it — the people who can be
+  asked, the repository's labels with their colours — and each tick is sent
+  at once. The pictures and the icons down its timeline are one size. Its
+  list's filters — open, to review, mine, drafts, merged, closed — are a
+  select beside the search, each with how many it holds. Its comments and reviews fold like an accordion: a click on one's
+  head folds or opens it, a folded one keeps its first line; a long
+  conversation opens on the description and the last three, with Expand all
+  and Collapse all. Its actions are icons on its title's line — check out,
+  open on GitHub, edit, back to draft, read again — and its readiness line
+  ends with the one thing to do next: rebase it onto its base here (or merge
+  the base in) when it conflicts, Update branch when it is behind, the
+  failing checks, Ready for review for a draft, or Merge.
+- Checking out a pull request works as `gh pr checkout`: its branch tracks
+  the remote's, and a branch already here is brought up to date rather than
+  left behind. A fork's request goes on `pr/N`, never onto a branch of yours
+  of the same name. Update branch and Merge name the commit they were shown
+  at, so GitHub refuses rather than act on a branch that moved; the request
+  is read again once GitHub has updated it.
+- In the pull requests, `↑` `↓` (or `K` `J`) walk the list in its order, `1`
+  to `4` open its tabs, `Ctrl Enter` sends the review box as a comment, and
+  the checked-out branch's request is the one open to begin with.
+- The create and edit pull request dialogs keep a form's width, however long
+  the template and the commits filled into the description are.
+- A new pull request is filled in from lists, as on GitHub: the branch it
+  goes into and the one it comes from, the reviewers and the assignees from
+  the people who can be asked on the repository, its labels with their
+  colours, and whether it opens ready for review or as a draft — each list
+  with a field to narrow it. Reviewers, assignees and labels are set on it
+  as soon as GitHub has made it. A branch not on the remote yet is pushed
+  from the dialog. The dialog waits while GitHub makes it, then gives way to
+  the new request, open in the list. The edit dialog is the same form,
+  filled in with the request as it is.
+- A conflict's sides are named: "Keep main", "Keep feature/x", with what each
+  is — during a rebase, where git's "ours" is the base and "theirs" your
+  own commit, the buttons say so instead of the reverse.
+- After a rebase, Push becomes Force push (with lease), which says how many
+  commits on the remote it replaces, and Pull stops counting the old
+  commits it would merge back in.
+- Merging, rebasing, cherry-picking and reverting are not offered while
+  another one is under way; Continue and Skip run without freezing the
+  window when hooks or signing take a while.
 - Zit is roomier, towards GitComet's comfortable density: text a point
   larger throughout, taller rows in the lists, the history and the sidebar,
   wider menus with taller items, larger fields, buttons and tabs, and the
@@ -59,6 +126,26 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- Merges, rebases and conflicts are harder to break by accident:
+  - Staging a conflicted file that still has its conflict markers — with +,
+    a double-click, Mark resolved, Stage all or the palette — asks first.
+  - Abort and Skip ask first, saying what is lost.
+  - Undo is refused while a merge, rebase, cherry-pick or revert is under
+    way, where it used to reset under it; Amend is hidden then.
+  - A pick in a conflicted file no longer writes over the file when it was
+    edited elsewhere since it was shown.
+  - An operation that stops at a conflict is no longer shown as an error:
+    the first conflicted file opens instead.
+  - An interactive rebase git refuses to start keeps its plan on screen,
+    and its todo file is no longer left in the repository.
+  - A merge stopped on a conflict in a terminal now brings up the banner.
+- Every confirmation bar showed its buttons without its question; the
+  question is back.
+- In the pull requests: ↑ and ↓ no longer move the hidden history, Ctrl+F
+  searches the requests, a review written for one request is not carried to
+  the next, Approve and Request changes are not offered on your own request,
+  and a request GitHub has not yet checked reads "still working out whether
+  it can merge…", asked again every few seconds, rather than "Ready to merge".
 - In the Connect GitHub dialog, the loading dots no longer sit beside the
   buttons as if part of the last one: they say what is being waited on, on a
   line of their own — "Waiting for your approval on github.com" — and come

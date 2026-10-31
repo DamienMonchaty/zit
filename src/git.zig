@@ -333,6 +333,46 @@ pub const State = enum {
     }
 };
 
+/// The branch a rebase replays, from its `head-name` file:
+/// "refs/heads/feat" -> "feat". Null for a detached HEAD, which git writes
+/// as "detached HEAD".
+pub fn headName(text: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    const prefix = "refs/heads/";
+    if (!std.mem.startsWith(u8, t, prefix) or t.len == prefix.len) return null;
+    return t[prefix.len..];
+}
+
+/// What a merge brings in, from the first line of MERGE_MSG: the branch in
+/// "Merge branch 'feat'" — "into main" or "of <url>" after it — the
+/// remote's in "Merge remote-tracking branch 'origin/feat'", the commit in
+/// "Merge commit 'a1b2c3d'". Null when git wrote something else.
+pub fn mergeSource(msg: []const u8) ?[]const u8 {
+    const line = std.mem.trim(u8, msg[0 .. std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len], " \t\r");
+    for ([_][]const u8{ "Merge branch '", "Merge remote-tracking branch '", "Merge commit '", "Merge tag '" }) |prefix| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        const end = std.mem.indexOfScalar(u8, rest, '\'') orelse return null;
+        if (end == 0) return null;
+        return rest[0..end];
+    }
+    return null;
+}
+
+test "headName and mergeSource read git's own files" {
+    try std.testing.expectEqualStrings("feat/x", headName("refs/heads/feat/x\n").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), headName("detached HEAD\n"));
+    try std.testing.expectEqual(@as(?[]const u8, null), headName("refs/heads/"));
+
+    try std.testing.expectEqualStrings("feature/greeting", mergeSource("Merge branch 'feature/greeting'\n\n# Conflicts:\n").?);
+    try std.testing.expectEqualStrings("feat", mergeSource("Merge branch 'feat' into main").?);
+    try std.testing.expectEqualStrings("main", mergeSource("Merge branch 'main' of github.com:o/r").?);
+    try std.testing.expectEqualStrings("origin/feat", mergeSource("Merge remote-tracking branch 'origin/feat'").?);
+    try std.testing.expectEqualStrings("a1b2c3d", mergeSource("Merge commit 'a1b2c3d'").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), mergeSource("Merge branches 'a' and 'b'"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mergeSource(""));
+}
+
 // === Remotes ===
 
 pub const Remote = struct {
@@ -385,12 +425,29 @@ pub const Conflict = struct {
     ours: []const u8,
     theirs: []const u8,
     /// The common ancestor, there only when `merge.conflictStyle` is diff3 or
-    /// zdiff3. Shown when present, because it is what makes a conflict
-    /// readable, and never required.
+    /// zdiff3 — or when `attachBases` found it. Shown when present, because
+    /// it is what makes a conflict readable, and never required.
     base: []const u8,
+    /// Whether `base` is known: an empty one is a real answer — both sides
+    /// added lines where there were none — and not the same as no base.
+    has_base: bool = false,
 };
 
 pub const ConflictSide = enum { ours, theirs, both };
+
+/// How a path came to be conflicted.
+pub const ConflictKind = enum {
+    /// Both sides changed it: resolved region by region.
+    both_modified,
+    /// Both added it, with nothing in common to start from.
+    both_added,
+    /// We deleted it; they changed it.
+    deleted_by_us,
+    /// They deleted it; we changed it.
+    deleted_by_them,
+    /// Not conflicted in the index, or not readable.
+    none,
+};
 
 const OURS_MARK = "<<<<<<<";
 const BASE_MARK = "|||||||";
@@ -463,6 +520,7 @@ pub fn parseConflicts(gpa: std.mem.Allocator, text: []const u8) error{OutOfMemor
             .ours = text[ours_start..ours_end],
             .theirs = text[lineEnd(text, split)..close],
             .base = if (base_at) |at| text[lineEnd(text, at)..split] else "",
+            .has_base = base_at != null,
         }) catch return error.OutOfMemory;
 
         pos = end;
@@ -481,21 +539,190 @@ pub fn resolveConflict(
     conflict: Conflict,
     side: ConflictSide,
 ) error{OutOfMemory}![]u8 {
+    return switch (side) {
+        .ours => replaceRegion(gpa, text, conflict, &.{conflict.ours}),
+        .theirs => replaceRegion(gpa, text, conflict, &.{conflict.theirs}),
+        .both => replaceRegion(gpa, text, conflict, &.{ conflict.ours, conflict.theirs }),
+    };
+}
+
+/// `text` with one region, markers and all, replaced by `parts` end to end.
+pub fn replaceRegion(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    conflict: Conflict,
+    parts: []const []const u8,
+) error{OutOfMemory}![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-
     try out.appendSlice(gpa, text[0..conflict.start]);
-    switch (side) {
-        .ours => try out.appendSlice(gpa, conflict.ours),
-        .theirs => try out.appendSlice(gpa, conflict.theirs),
-        .both => {
-            try out.appendSlice(gpa, conflict.ours);
-            try out.appendSlice(gpa, conflict.theirs);
-        },
-    }
+    for (parts) |part| try out.appendSlice(gpa, part);
     try out.appendSlice(gpa, text[conflict.end..]);
-
     return out.toOwnedSlice(gpa);
+}
+
+/// Equal but for carriage returns: the working copy has CRLF where
+/// `core.autocrlf` put them, the index's copies LF.
+pub fn sameText(a: []const u8, b: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (true) {
+        while (i < a.len and a[i] == '\r') i += 1;
+        while (j < b.len and b[j] == '\r') j += 1;
+        if (i == a.len or j == b.len) return i == a.len and j == b.len;
+        if (a[i] != b[j]) return false;
+        i += 1;
+        j += 1;
+    }
+}
+
+/// Give `regions` — parsed from the working copy, plain markers — their
+/// bases from `with_base`, the same file merged again in diff3 style. A
+/// region takes the base of the next one there with the same two sides;
+/// one with no match is left without, which is how it was.
+pub fn attachBases(regions: []Conflict, with_base: []const Conflict) void {
+    var from: usize = 0;
+    for (regions) |*region| {
+        if (region.has_base) continue;
+        var k = from;
+        while (k < with_base.len) : (k += 1) {
+            const other = with_base[k];
+            if (!other.has_base) continue;
+            if (sameText(region.ours, other.ours) and sameText(region.theirs, other.theirs)) {
+                region.base = other.base;
+                region.has_base = true;
+                from = k + 1;
+                break;
+            }
+        }
+    }
+}
+
+/// Why a region can be resolved without asking, and is safe to.
+pub const AutoReason = enum {
+    /// Both sides made the same change.
+    same,
+    /// Only one side changed these lines: the other is still the base.
+    only_ours,
+    only_theirs,
+    /// Each side changed different lines, next to each other — which git
+    /// calls a conflict, and each line on its own is not.
+    lines_apart,
+};
+
+/// What a region resolves to on its own, and why; null when a person has
+/// to choose. Never guesses: a side wins only where the other is untouched,
+/// line by line at the finest. `text` is owned by `gpa`.
+pub fn autoResolve(gpa: std.mem.Allocator, region: Conflict) error{OutOfMemory}!?struct { reason: AutoReason, text: []u8 } {
+    if (sameText(region.ours, region.theirs)) return .{ .reason = .same, .text = try gpa.dupe(u8, region.ours) };
+    if (!region.has_base) return null;
+    if (sameText(region.ours, region.base)) return .{ .reason = .only_theirs, .text = try gpa.dupe(u8, region.theirs) };
+    if (sameText(region.theirs, region.base)) return .{ .reason = .only_ours, .text = try gpa.dupe(u8, region.ours) };
+
+    // Line by line, where the three have as many lines: each line from the
+    // side that changed it, refused at the first line both changed.
+    const n = lineCount(region.base);
+    if (n == 0 or lineCount(region.ours) != n or lineCount(region.theirs) != n) return null;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var o = LineIter{ .text = region.ours };
+    var t = LineIter{ .text = region.theirs };
+    var b = LineIter{ .text = region.base };
+    while (b.next()) |base_line| {
+        const ours_line = o.next().?;
+        const theirs_line = t.next().?;
+        const line = if (sameText(ours_line, theirs_line))
+            ours_line
+        else if (sameText(ours_line, base_line))
+            theirs_line
+        else if (sameText(theirs_line, base_line))
+            ours_line
+        else {
+            out.deinit(gpa);
+            return null;
+        };
+        try out.appendSlice(gpa, line);
+    }
+    return .{ .reason = .lines_apart, .text = try out.toOwnedSlice(gpa) };
+}
+
+/// Lines in `text`, a last one without a newline counted.
+fn lineCount(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    return std.mem.count(u8, text, "\n") + @intFromBool(text[text.len - 1] != '\n');
+}
+
+/// Each line with its own ending, so what is put back keeps CRLF or LF as
+/// the side had it.
+const LineIter = struct {
+    text: []const u8,
+    at: usize = 0,
+
+    fn next(self: *LineIter) ?[]const u8 {
+        if (self.at >= self.text.len) return null;
+        const end = if (std.mem.indexOfScalarPos(u8, self.text, self.at, '\n')) |nl| nl + 1 else self.text.len;
+        defer self.at = end;
+        return self.text[self.at..end];
+    }
+};
+
+test "sameText ignores carriage returns, and only those" {
+    try std.testing.expect(sameText("a\r\nb\r\n", "a\nb\n"));
+    try std.testing.expect(!sameText("a\nb\n", "a\nc\n"));
+    try std.testing.expect(!sameText("a\n", "a\nb\n"));
+    try std.testing.expect(sameText("", "\r"));
+}
+
+test "autoResolve takes a side only where the other is untouched" {
+    const gpa = std.testing.allocator;
+    const Case = struct { ours: []const u8, theirs: []const u8, base: ?[]const u8, want: ?AutoReason, text: []const u8 = "" };
+    const cases = [_]Case{
+        .{ .ours = "x\n", .theirs = "x\n", .base = null, .want = .same, .text = "x\n" },
+        .{ .ours = "a\n", .theirs = "b\n", .base = null, .want = null },
+        .{ .ours = "base\n", .theirs = "new\n", .base = "base\n", .want = .only_theirs, .text = "new\n" },
+        .{ .ours = "mine\n", .theirs = "base\n", .base = "base\n", .want = .only_ours, .text = "mine\n" },
+        // Adjacent edits: each line from the side that changed it.
+        .{ .ours = "X\n2\nZ\n", .theirs = "1\nY\n3\n", .base = "1\n2\n3\n", .want = .lines_apart, .text = "X\nY\nZ\n" },
+        // A line both changed is a real conflict.
+        .{ .ours = "X\n2\n", .theirs = "W\nY\n", .base = "1\n2\n", .want = null },
+        // Not as many lines: a person decides.
+        .{ .ours = "X\n2\n3\n", .theirs = "1\n", .base = "1\n2\n", .want = null },
+        // The working copy's CRLF is kept where its lines are taken.
+        .{ .ours = "X\r\n2\r\n", .theirs = "1\r\nY\r\n", .base = "1\n2\n", .want = .lines_apart, .text = "X\r\nY\r\n" },
+        // An empty base is a base: both added, differently.
+        .{ .ours = "a\n", .theirs = "b\n", .base = "", .want = null },
+    };
+    for (cases) |case| {
+        const region: Conflict = .{ .start = 0, .end = 0, .ours = case.ours, .theirs = case.theirs, .base = case.base orelse "", .has_base = case.base != null };
+        const got = try autoResolve(gpa, region);
+        if (case.want) |want| {
+            const g = got orelse return error.ExpectedResolution;
+            defer gpa.free(g.text);
+            try std.testing.expectEqual(want, g.reason);
+            try std.testing.expectEqualStrings(case.text, g.text);
+        } else {
+            if (got) |g| gpa.free(g.text);
+            try std.testing.expect(got == null);
+        }
+    }
+}
+
+test "attachBases gives a region the base of its match, in order" {
+    var regions = [_]Conflict{
+        .{ .start = 0, .end = 1, .ours = "a\r\n", .theirs = "b\r\n", .base = "" },
+        .{ .start = 2, .end = 3, .ours = "c\n", .theirs = "d\n", .base = "" },
+        .{ .start = 4, .end = 5, .ours = "e\n", .theirs = "f\n", .base = "" },
+    };
+    const with_base = [_]Conflict{
+        .{ .start = 0, .end = 0, .ours = "a\n", .theirs = "b\n", .base = "o\n", .has_base = true },
+        .{ .start = 0, .end = 0, .ours = "e\n", .theirs = "f\n", .base = "", .has_base = true },
+    };
+    attachBases(&regions, &with_base);
+    try std.testing.expect(regions[0].has_base);
+    try std.testing.expectEqualStrings("o\n", regions[0].base);
+    try std.testing.expect(!regions[1].has_base);
+    try std.testing.expect(regions[2].has_base);
+    try std.testing.expectEqualStrings("", regions[2].base);
 }
 
 // === Undo ===
@@ -1284,6 +1511,52 @@ pub const Repo = struct {
             }) catch return &.{};
         }
         return out.toOwnedSlice(arena) catch &.{};
+    }
+
+    /// How `path` came to be conflicted, from which of its three stages the
+    /// index holds: the base (1), ours (2), theirs (3).
+    pub fn conflictKind(self: Repo, path: []const u8) ConflictKind {
+        var index: ?*c.git_index = null;
+        if (c.git_repository_index(&index, self.ptr) < 0) return .none;
+        defer c.git_index_free(index);
+        _ = c.git_index_read(index, 0);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return .none;
+        var ancestor: ?*const c.git_index_entry = null;
+        var ours: ?*const c.git_index_entry = null;
+        var theirs: ?*const c.git_index_entry = null;
+        if (c.git_index_conflict_get(&ancestor, &ours, &theirs, index, path_z) < 0) return .none;
+        if (ours == null and theirs == null) return .none;
+        if (ours == null) return .deleted_by_us;
+        if (theirs == null) return .deleted_by_them;
+        if (ancestor == null) return .both_added;
+        return .both_modified;
+    }
+
+    /// The conflicted file merged again from its three stages, diff3 style:
+    /// each region with its base, which the working copy lacks when git
+    /// wrote plain markers — its default. Null where a stage is missing.
+    pub fn mergedWithBase(self: Repo, gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
+        var index: ?*c.git_index = null;
+        if (c.git_repository_index(&index, self.ptr) < 0) return null;
+        defer c.git_index_free(index);
+        _ = c.git_index_read(index, 0);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return null;
+        var ancestor: ?*const c.git_index_entry = null;
+        var ours: ?*const c.git_index_entry = null;
+        var theirs: ?*const c.git_index_entry = null;
+        if (c.git_index_conflict_get(&ancestor, &ours, &theirs, index, path_z) < 0) return null;
+        if (ancestor == null or ours == null or theirs == null) return null;
+
+        var opts: c.git_merge_file_options = undefined;
+        if (c.git_merge_file_options_init(&opts, c.GIT_MERGE_FILE_OPTIONS_VERSION) < 0) return null;
+        opts.flags = @intCast(c.GIT_MERGE_FILE_STYLE_ZDIFF3);
+        var result: c.git_merge_file_result = std.mem.zeroes(c.git_merge_file_result);
+        if (c.git_merge_file_from_index(&result, self.ptr, ancestor, ours, theirs, &opts) < 0) return null;
+        defer c.git_merge_file_result_free(&result);
+        const ptr = result.ptr orelse return null;
+        return gpa.dupe(u8, ptr[0..result.len]) catch null;
     }
 
     /// A commit's whole message, trimmed, copied into `arena`; empty when the

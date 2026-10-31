@@ -911,6 +911,15 @@ const Confirm = struct {
         close_request,
         /// `arg` is the GitHub login.
         sign_out,
+        /// A conflicted file — or, empty, everything — staged with conflict
+        /// markers still in it: git takes them as the resolution.
+        stage_markers,
+        /// The merge, rebase, cherry-pick or revert under way, called off.
+        abort_operation,
+        /// The commit a rebase stopped on, left out of it.
+        skip_step,
+        /// The open conflicted file put back as git left it, picks and all.
+        restart_file,
     };
 };
 
@@ -1044,6 +1053,29 @@ var picked_lines: std.ArrayList(bool) = .empty;
 /// `conflicts` points into it — so the two are always freed together.
 var conflict_text: []u8 = &.{};
 var conflicts: []git.Conflict = &.{};
+/// The same file merged again in diff3 style, which the regions' bases point
+/// into when git wrote plain markers; freed with them.
+var conflict_base_text: []u8 = &.{};
+/// Each region's `git.autoResolve` answer, if it has one: why it is safe to
+/// resolve without asking.
+var conflict_autos: []?git.AutoReason = &.{};
+/// How the open path came to be conflicted, and whether it is binary.
+var conflict_kind: git.ConflictKind = .none;
+var conflict_binary = false;
+/// The region the keys act on, in the file named here: another file starts
+/// at its first region, with nothing to undo.
+var conflict_focus: usize = 0;
+var conflict_path: std.ArrayList(u8) = .empty;
+/// Bring the focused region into view on the next frame.
+var conflict_reveal = false;
+/// The file as it was before each pick made in it, newest last: U and
+/// Ctrl+Z put the last one back.
+var resolve_undo: std.ArrayList([]u8) = .empty;
+
+fn clearResolveUndo() void {
+    for (resolve_undo.items) |old| gpa.free(old);
+    resolve_undo.clearRetainingCapacity();
+}
 
 /// Biggest conflicted file Zit will read. Past this it is not a merge you
 /// resolve by clicking.
@@ -1170,6 +1202,12 @@ fn clearConflicts() void {
     conflicts = &.{};
     if (conflict_text.len > 0) gpa.free(conflict_text);
     conflict_text = &.{};
+    if (conflict_base_text.len > 0) gpa.free(conflict_base_text);
+    conflict_base_text = &.{};
+    if (conflict_autos.len > 0) gpa.free(conflict_autos);
+    conflict_autos = &.{};
+    conflict_kind = .none;
+    conflict_binary = false;
 }
 
 /// Status of the selected path on its side, from the work snapshot. Null once
@@ -1222,19 +1260,73 @@ fn loadBlame() void {
 fn loadConflicts() void {
     clearConflicts();
 
+    // Another file: its own first region, and its own undo.
+    if (!std.mem.eql(u8, conflict_path.items, selected_path.items)) {
+        conflict_path.clearRetainingCapacity();
+        conflict_path.appendSlice(gpa, selected_path.items) catch {};
+        conflict_focus = 0;
+        clearResolveUndo();
+    }
+
+    const r = repo orelse return;
+    conflict_kind = r.conflictKind(selected_path.items);
+
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs = selectedAbsPath(&path_buf) orelse return;
 
     conflict_text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch {
         conflict_text = &.{};
-        setCommandError("Could not read that conflicted file.");
+        // Deleted on one side: there may be nothing on disk, and that is
+        // the conflict, answered below.
+        if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) setCommandError("Could not read that conflicted file.");
         return;
     };
+    // Read as text, a binary file is noise: its two versions are picked
+    // whole instead.
+    conflict_binary = std.mem.indexOfScalar(u8, conflict_text[0..@min(conflict_text.len, 8000)], 0) != null;
+    if (conflict_binary) return;
 
     conflicts = git.parseConflicts(gpa, conflict_text) catch {
         clearConflicts();
         return;
     };
+
+    // A base for each region where git wrote plain markers, its default:
+    // merged again from the index, diff3 style, and matched side by side.
+    const missing = for (conflicts) |region| {
+        if (!region.has_base) break true;
+    } else false;
+    if (missing and conflict_kind == .both_modified) {
+        if (r.mergedWithBase(gpa, selected_path.items)) |merged| {
+            conflict_base_text = merged;
+            if (git.parseConflicts(gpa, merged)) |with_base| {
+                defer gpa.free(with_base);
+                git.attachBases(conflicts, with_base);
+            } else |_| {}
+        }
+    }
+
+    conflict_autos = gpa.alloc(?git.AutoReason, conflicts.len) catch &.{};
+    for (conflict_autos, conflicts) |*auto, region| {
+        auto.* = null;
+        const got = (git.autoResolve(gpa, region) catch null) orelse continue;
+        gpa.free(got.text);
+        auto.* = got.reason;
+    }
+    conflict_focus = @min(conflict_focus, conflicts.len -| 1);
+}
+
+/// A conflict answered by picking a whole file — a binary one, or one a side
+/// deleted — rather than region by region.
+fn wholeFileConflict() bool {
+    return conflict_binary or conflict_kind == .deleted_by_us or conflict_kind == .deleted_by_them;
+}
+
+/// How many regions resolve on their own, safely.
+fn safeConflicts() usize {
+    var n: usize = 0;
+    for (conflict_autos) |auto| n += @intFromBool(auto != null);
+    return n;
 }
 
 /// Re-read the diff if what it was taken from is gone. Called at the top of the
@@ -1718,9 +1810,11 @@ fn appDeinit(win: *dvui.Window) void {
     clearApiQueue();
     api_queue.deinit(gpa);
     api_reviewers.deinit(gpa);
+    api_assignees.deinit(gpa);
+    api_labels.deinit(gpa);
     repo_slug.deinit(gpa);
-    clearJobThen();
-    job_then.deinit(gpa);
+    clearJobSteps();
+    job_steps.deinit(gpa);
     closeConnect();
     for ([_]*std.ArrayList(u8){ &connect_code, &connect_device, &connect_uri, &connect_note }) |l| l.deinit(gpa);
     github.deinit();
@@ -2174,6 +2268,7 @@ fn collectHistoryLoad() bool {
         load.lanes = null;
         history_seq +%= 1;
         dropStaleSelection();
+        readOpInfo();
         if (file_history.items.len > 0) markFileHistory();
         trimHeap();
     }
@@ -2634,6 +2729,7 @@ fn reloadHistory() void {
     _ = &next_lanes;
     history_seq +%= 1;
     dropStaleSelection();
+    readOpInfo();
 
     if (file_history.items.len > 0) markFileHistory();
     // The old snapshot just went: give its pages back now rather than at the
@@ -2652,6 +2748,16 @@ fn swapWork(next: git.Work) void {
     if (work) |*w| w.deinit();
     work = next;
     work_version +%= 1;
+
+    if (open_first_conflict) {
+        open_first_conflict = false;
+        for (next.unstaged) |change| {
+            if (change.status != .conflicted) continue;
+            active_view = .graph;
+            selectChange(change.path, .unstaged);
+            break;
+        }
+    }
 
     // A commit's diff cannot change, so only the working-tree side is worth
     // re-reading — and this runs on the poll timer.
@@ -2722,7 +2828,11 @@ fn poll() void {
     else
         move_known != null;
 
-    if (moved or switched or logged) refreshHistory();
+    // A merge stopped on a conflict in a terminal moves none of the three:
+    // only the repository's state says it is under way.
+    const state_changed = if (history) |h| r.state() != h.state else false;
+
+    if (moved or switched or logged or state_changed) refreshHistory();
 }
 
 /// The quiet fetch, when it is due and nothing else is running.
@@ -2789,6 +2899,14 @@ const Action = enum {
     confirmed,
     prompt,
     resolve,
+    /// Every region that resolves on its own, in the open file.
+    resolve_safe,
+    /// The open file as it was before its last pick.
+    undo_resolve,
+    /// The open file whole, as `action_side` has it, staged.
+    take_file,
+    /// The open file staged, nothing left in it, and on to the next.
+    stage_next,
     rebase,
     network,
     tabs,
@@ -2895,6 +3013,10 @@ fn runAction() bool {
         .confirmed => runConfirmed(),
         .prompt => runPrompt(),
         .resolve => runResolve(),
+        .resolve_safe => runResolveSafe(),
+        .undo_resolve => runUndoResolve(),
+        .take_file => runTakeFile(),
+        .stage_next => runStageNext(),
         .rebase => runRebase(),
         .network => startJob(),
         .tabs => runTabAction(),
@@ -2968,8 +3090,11 @@ var api_label: []const u8 = "";
 var api_then: ApiThen = .none;
 /// The calls waiting behind the one out.
 var api_queue: std.ArrayList(ApiCall) = .empty;
-/// For `.ask_reviewers`: the JSON list, owned.
+/// For `.ask_reviewers`: the JSON lists, owned — whom to ask, whom to
+/// assign, which labels.
 var api_reviewers: std.ArrayList(u8) = .empty;
+var api_assignees: std.ArrayList(u8) = .empty;
+var api_labels: std.ArrayList(u8) = .empty;
 /// Fetch once the run succeeds: it moved branches on the remote.
 var api_fetch_after = false;
 
@@ -3051,6 +3176,9 @@ fn collectApi() void {
     if (failed) |why| {
         clearApiQueue();
         setCommandError(why);
+        // The dialog stays, with what went wrong, to try again.
+        pr_creating = false;
+        pr_created = 0;
         return;
     }
     switch (api_then) {
@@ -3063,6 +3191,19 @@ fn collectApi() void {
         .ask_reviewers => askReviewers(github.split(w.out).body),
     }
     if (api_queue.items.len > 0) return startNextApi();
+    // A request just made, its reviewers and labels set: open it, in the
+    // list read again with it.
+    if (pr_created != 0) {
+        const n = pr_created;
+        pr_created = 0;
+        pr_creating = false;
+        pr_new_open = false;
+        new_tab_open = false;
+        pr_filter = .open;
+        active_view = .pulls;
+        refreshRequests();
+        return selectRequest(n);
+    }
     refreshRequests();
     if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
     if (api_fetch_after) {
@@ -3072,17 +3213,34 @@ fn collectApi() void {
     }
 }
 
-/// After a request was created: its reviewers, by the number GitHub gave it.
+/// After a request was created: its reviewers, assignees and labels, by the
+/// number GitHub gave it.
 fn askReviewers(body: []const u8) void {
-    if (api_reviewers.items.len == 0) return;
-    defer api_reviewers.clearRetainingCapacity();
+    defer {
+        api_reviewers.clearRetainingCapacity();
+        api_assignees.clearRetainingCapacity();
+        api_labels.clearRetainingCapacity();
+    }
     var a: std.heap.ArenaAllocator = .init(gpa);
     defer a.deinit();
     const made = std.json.parseFromSliceLeaky(struct { number: u32 = 0 }, a.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
     if (made.number == 0) return;
+    // Opened once the calls below are done, with what they set on it.
+    pr_created = made.number;
+    if (api_reviewers.items.len + api_assignees.items.len + api_labels.items.len == 0) return;
     var path: [512]u8 = undefined;
-    const reviewers = std.fmt.allocPrint(a.allocator(), "{{\"reviewers\":{s}}}", .{api_reviewers.items}) catch return;
-    requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{made.number}), reviewers, .none);
+    if (api_reviewers.items.len > 0) {
+        const reviewers = std.fmt.allocPrint(a.allocator(), "{{\"reviewers\":{s}}}", .{api_reviewers.items}) catch return;
+        requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{made.number}), reviewers, .none);
+    }
+    if (api_assignees.items.len > 0) {
+        const assignees = std.fmt.allocPrint(a.allocator(), "{{\"assignees\":{s}}}", .{api_assignees.items}) catch return;
+        requestApi("Assigning", "POST", apiPath(&path, "/issues/{d}/assignees", .{made.number}), assignees, .none);
+    }
+    if (api_labels.items.len > 0) {
+        const labels = std.fmt.allocPrint(a.allocator(), "{{\"labels\":{s}}}", .{api_labels.items}) catch return;
+        requestApi("Labelling", "POST", apiPath(&path, "/issues/{d}/labels", .{made.number}), labels, .none);
+    }
 }
 
 /// `{"k":"v",…}` from pairs of strings; into `a`.
@@ -3114,41 +3272,104 @@ fn jsonList(a: std.mem.Allocator, text: []const u8) []const u8 {
     return out.items;
 }
 
-/// A request checked out: its branch fetched from GitHub — `pull/N/head`,
-/// which a fork's has too — into a local one of its name, then switched to.
-fn checkoutRequest(number: u32, branch: []const u8) void {
+/// A request checked out, as `gh pr checkout` does it.
+///
+/// From this repository: its branch fetched, then a local one tracking it —
+/// made, or switched to and fast-forwarded, so an old checkout is brought up
+/// to date rather than left behind. From a fork: fetched by the request's
+/// own ref into `pr/N`, never into a branch of yours of the same name — a
+/// fork's `main` is not your `main`.
+fn checkoutRequest(number: u32, branch: []const u8, fork: bool) void {
     if (branch.len == 0) return setCommandError("GitHub did not say which branch that request is.");
     const remote = defaultRemote() orelse return setCommandError("There is no remote to fetch it from.");
-    var spec_buf: [512]u8 = undefined;
-    const spec = std.fmt.bufPrint(&spec_buf, "pull/{d}/head:{s}", .{ number, branch }) catch return;
-    // Already the branch here: switched to, then brought up to date.
-    if (isLocalBranch(branch)) {
-        requestNetwork("Checking out", &.{ "switch", branch });
-        return;
+    if (midOperation()) return setCommandError("Finish or abort what is under way first.");
+    if (fork) {
+        var spec_buf: [32]u8 = undefined;
+        requestNetwork("Fetching", &.{ "fetch", remote, std.fmt.bufPrint(&spec_buf, "pull/{d}/head", .{number}) catch return });
+        queueRequestBranch(number, branch, remote, true);
+    } else {
+        requestNetwork("Fetching", &.{ "fetch", remote, branch });
+        queueRequestBranch(number, branch, remote, false);
     }
-    requestNetwork("Checking out", &.{ "fetch", remote, spec });
-    setJobThen(&.{ "switch", branch });
 }
 
-/// A git command to run once the job out has succeeded, owned.
-var job_then: std.ArrayList([]u8) = .empty;
+/// After the fetch: onto the request's branch, made or fast-forwarded.
+fn queueRequestBranch(number: u32, branch: []const u8, remote: []const u8, fork: bool) void {
+    var local_buf: [32]u8 = undefined;
+    const local = if (fork) std.fmt.bufPrint(&local_buf, "pr/{d}", .{number}) catch return else branch;
+    var tip_buf: [512]u8 = undefined;
+    const tip = if (fork) "FETCH_HEAD" else std.fmt.bufPrint(&tip_buf, "{s}/{s}", .{ remote, branch }) catch return;
+    if (isLocalBranch(local)) {
+        queueStep("Checking out", &.{ "switch", local });
+        queueStep("Bringing it up to date", &.{ "merge", "--ff-only", tip });
+    } else if (fork) {
+        queueStep("Checking out", &.{ "switch", "-c", local, tip });
+    } else {
+        queueStep("Checking out", &.{ "switch", "-c", local, "--track", tip });
+    }
+}
 
-fn setJobThen(args: []const []const u8) void {
-    clearJobThen();
+/// A request with conflicts, or behind its base, brought up to date here:
+/// its branch checked out as above, its base fetched, then rebased onto it
+/// or merged into it. A conflict stops it in the conflict view, with the
+/// bar to go on from; after a rebase, Push is a force push.
+fn resolveRequestLocally(d: pr.Detail, rebase: bool) void {
+    if (d.fork) return setCommandError("Its branch is in a fork: check it out and bring the base in by hand.");
+    const remote = defaultRemote() orelse return setCommandError("There is no remote to fetch it from.");
+    if (midOperation()) return setCommandError("Finish or abort what is under way first.");
+    if (work) |w| if (w.staged.len > 0 or hasTrackedChanges(w)) {
+        return setCommandError("Commit or stash your changes first: the branch is about to change under them.");
+    };
+    requestNetwork("Fetching", &.{ "fetch", remote, d.base, d.head });
+    queueRequestBranch(d.number, d.head, remote, false);
+    var base_buf: [512]u8 = undefined;
+    const base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ remote, d.base }) catch return;
+    if (rebase) {
+        queueStep("Rebasing", &.{ "rebase", base });
+    } else {
+        queueStep("Merging", &.{ "merge", "--no-edit", base });
+    }
+}
+
+/// Changes to tracked files — what a switch or a rebase refuses to run over.
+/// Untracked ones are not: git leaves those where they are.
+fn hasTrackedChanges(w: git.Work) bool {
+    // Unstaged and added is untracked: a new file git does not know yet.
+    for (w.unstaged) |change| if (change.status != .added) return true;
+    return false;
+}
+
+/// What to run once the job out has succeeded, in order: a request fetched,
+/// then switched to, then brought up to date. Dropped at the first step
+/// that fails — or stops, as a rebase does at a conflict.
+const JobStep = struct { label: []const u8, argv: [][]u8 };
+var job_steps: std.ArrayList(JobStep) = .empty;
+
+fn queueStep(label: []const u8, args: []const []const u8) void {
     // Only behind a job that was queued.
-    if (action != .network) return;
-    for (args) |arg| {
-        const owned = gpa.dupe(u8, arg) catch return clearJobThen();
-        job_then.append(gpa, owned) catch {
-            gpa.free(owned);
-            return clearJobThen();
+    if (action != .network) return clearJobSteps();
+    const argv = gpa.alloc([]u8, args.len) catch return clearJobSteps();
+    for (args, 0..) |arg, i| {
+        argv[i] = gpa.dupe(u8, arg) catch {
+            for (argv[0..i]) |done| gpa.free(done);
+            gpa.free(argv);
+            return clearJobSteps();
         };
     }
+    job_steps.append(gpa, .{ .label = label, .argv = argv }) catch {
+        freeStep(.{ .label = label, .argv = argv });
+        clearJobSteps();
+    };
 }
 
-fn clearJobThen() void {
-    for (job_then.items) |arg| gpa.free(arg);
-    job_then.clearRetainingCapacity();
+fn freeStep(step: JobStep) void {
+    for (step.argv) |arg| gpa.free(arg);
+    gpa.free(step.argv);
+}
+
+fn clearJobSteps() void {
+    for (job_steps.items) |step| freeStep(step);
+    job_steps.clearRetainingCapacity();
 }
 
 /// Open `url` in the browser.
@@ -3302,11 +3523,15 @@ fn collectJob() void {
         .commit => return commitLanded(),
         .remote => {},
     }
-    // The second half of what was asked — a request fetched, then switched
-    // to — once the first went well.
-    if (job_then.items.len > 0) {
-        defer clearJobThen();
-        if (succeeded) startNetwork("Checking out", @ptrCast(job_then.items));
+    // The rest of what was asked — a request fetched, then switched to,
+    // then brought up to date — a step at a time, each once the one before
+    // went well.
+    if (job_steps.items.len > 0) {
+        if (succeeded) {
+            const step = job_steps.orderedRemove(0);
+            defer freeStep(step);
+            startNetwork(step.label, @ptrCast(step.argv));
+        } else clearJobSteps();
     }
     // Whatever went to the remote may have opened, merged or closed one.
     refreshRequests();
@@ -3324,6 +3549,11 @@ fn applyOutcome(outcome: ?run.Outcome) void {
 
     if (result.ok) {
         clearCommandError();
+    } else if (stoppedAtConflict(result.message)) {
+        // The operation doing what it should: the banner says what is under
+        // way, and the first conflicted file opens once the changes are read.
+        clearCommandError();
+        open_first_conflict = true;
     } else {
         setCommandError(if (result.message.len > 0) result.message else "git failed.");
     }
@@ -3336,6 +3566,21 @@ fn applyOutcome(outcome: ?run.Outcome) void {
     workChanged(command_label);
     command_label = "Reading the changes";
 }
+
+/// Whether a failed command stopped a merge, rebase, cherry-pick or revert
+/// at a conflict — git's way of handing it over — rather than failing.
+fn stoppedAtConflict(message: []const u8) bool {
+    const r = repo orelse return false;
+    if (r.state() == .none) return false;
+    for ([_][]const u8{ "CONFLICT", "could not apply", "fix conflicts" }) |sign| {
+        if (std.mem.indexOf(u8, message, sign) != null) return true;
+    }
+    return false;
+}
+
+/// Set when an operation stopped at a conflict: the first conflicted file
+/// is opened as soon as the changes are read again.
+var open_first_conflict = false;
 
 /// Run a git command in the repository and fold the result back into the UI.
 fn gitDo(args: []const []const u8) void {
@@ -3476,8 +3721,13 @@ fn runRebase() void {
         gitDo(&.{ "-c", "core.editor=true", "-c", cfg, "rebase", "-i", rebase_base[0..rebase_base_len] });
     }
 
-    // It either finished or stopped on a conflict, and the banner takes it from
-    // there. Either way the composed list has done its job.
+    // git has its own copy of the list by now, if it started at all.
+    std.Io.Dir.cwd().deleteFile(app_io, todo_path) catch {};
+
+    // Refused before it began — a dirty tree, say: the plan stays on screen,
+    // to run again once that is sorted. Otherwise it finished or stopped on
+    // a conflict, the banner takes it from there, and the list is done.
+    if (command_error != null and r.state() == .none) return;
     clearSelection();
 }
 
@@ -3543,19 +3793,65 @@ fn requestResolve(index: usize, side: git.ConflictSide) void {
 /// resolved is a separate, deliberate click — same as resolving in an editor.
 fn runResolve() void {
     if (action_conflict >= conflicts.len) return;
-
     const next = git.resolveConflict(gpa, conflict_text, conflicts[action_conflict], action_side) catch {
         setCommandError("Out of memory resolving that conflict.");
         return;
     };
     defer gpa.free(next);
+    _ = writeConflictFile(next, true);
+}
 
+/// Every region that resolves on its own, at once: each keeps the side that
+/// changed it, line by line at the finest. From the last region up, so the
+/// offsets of those before it still hold.
+fn runResolveSafe() void {
+    var text = gpa.dupe(u8, conflict_text) catch return;
+    defer gpa.free(text);
+    var i = conflicts.len;
+    while (i > 0) {
+        i -= 1;
+        const auto = (git.autoResolve(gpa, conflicts[i]) catch null) orelse continue;
+        defer gpa.free(auto.text);
+        const next = git.replaceRegion(gpa, text, conflicts[i], &.{auto.text}) catch return;
+        gpa.free(text);
+        text = next;
+    }
+    _ = writeConflictFile(text, true);
+}
+
+/// U and Ctrl+Z in a conflicted file: the file as it was before the last pick.
+fn runUndoResolve() void {
+    const previous = resolve_undo.pop() orelse return;
+    defer gpa.free(previous);
+    _ = writeConflictFile(previous, false);
+}
+
+/// Write `next` over the open conflicted file, keeping what it was for U to
+/// put back. Refused when the file changed on disk since it was shown:
+/// "Open this file" invites an edit in another editor, and writing the
+/// older copy over it would lose that edit without a word.
+fn writeConflictFile(next: []const u8, keep_undo: bool) bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs = selectedAbsPath(&path_buf) orelse return;
+    const abs = selectedAbsPath(&path_buf) orelse return false;
 
+    const on_disk = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch null;
+    defer if (on_disk) |d| gpa.free(d);
+    if (on_disk == null or !std.mem.eql(u8, on_disk.?, conflict_text)) {
+        diff_stale = true;
+        setCommandError("The file changed on disk since it was shown: here it is as it is now. Pick again.");
+        return false;
+    }
+
+    if (keep_undo) {
+        const copy = gpa.dupe(u8, conflict_text) catch return false;
+        resolve_undo.append(gpa, copy) catch {
+            gpa.free(copy);
+            return false;
+        };
+    }
     std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = abs, .data = next }) catch {
         setCommandError("Could not write that file back.");
-        return;
+        return false;
     };
 
     clearCommandError();
@@ -3563,11 +3859,56 @@ fn runResolve() void {
     // the list is rebuilt rather than patched.
     diff_stale = true;
     workChanged("Resolving");
+    return true;
+}
+
+/// The whole file as one side has it, staged: `checkout --ours` or
+/// `--theirs`, then `add` — or, where that side deleted it, `rm`. The
+/// next conflicted file opens after it.
+fn runTakeFile() void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (selected_path.items.len > path_buf.len) return;
+    @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
+    const file = path_buf[0..selected_path.items.len];
+    const side = action_side;
+
+    const deleted = (conflict_kind == .deleted_by_us and side == .ours) or (conflict_kind == .deleted_by_them and side == .theirs);
+    if (deleted) {
+        gitDo(&.{ "--literal-pathspecs", "rm", "-q", "--", file });
+    } else {
+        // Deleted on the other side: what is on disk is already this one's.
+        if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) {
+            gitDo(&.{ "--literal-pathspecs", "checkout", if (side == .theirs) "--theirs" else "--ours", "--", file });
+            if (command_error != null) return;
+        }
+        gitDo(&.{ "--literal-pathspecs", "add", "--", file });
+    }
+    if (command_error != null) return;
+    clearResolveUndo();
+    open_first_conflict = true;
+    workChanged("Resolving");
+}
+
+/// A file with nothing left to resolve, staged, and the next one opened.
+fn runStageNext() void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (selected_path.items.len > path_buf.len) return;
+    @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
+    const file = path_buf[0..selected_path.items.len];
+    if (markersLeft(file)) return ask(.stage_markers, file);
+    gitDo(&.{ "--literal-pathspecs", "add", "--", file });
+    if (command_error != null) return;
+    clearResolveUndo();
+    open_first_conflict = true;
+    workChanged("Resolving");
 }
 
 /// Take back whatever last moved HEAD, as the reflog tells it.
 fn requestUndo() void {
     const h = history orelse return;
+    // Mid-rebase the reflog's last move is a step of it, and resetting there
+    // leaves the rebase replaying onto the wrong commit: Abort is the undo.
+    if (h.state != .none) return setCommandError("Finish or abort what is under way first: an undo in the middle of it would break it.");
     const move = h.last_move orelse return setCommandError("Nothing to undo yet.");
     var sha: [41]u8 = undefined;
     var argv: [4][]const u8 = undefined;
@@ -3682,7 +4023,13 @@ fn runConfirmed() void {
             const number = std.fmt.parseInt(u32, c.arg, 10) catch return clearConfirm();
             // In the dropdown's order: a merge commit, squash, rebase.
             const method = ([_][]const u8{ "merge", "squash", "rebase" })[@min(pr_merge_method, 2)];
-            const body = std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\"}}", .{method}) catch return clearConfirm();
+            // With the commit it was shown at: GitHub refuses if the branch
+            // moved since, rather than merge what nobody looked at.
+            const sha = if (pr.detail) |d| (if (d.number == number) d.head_sha else "") else "";
+            const body = (if (sha.len > 0)
+                std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\",\"sha\":\"{s}\"}}", .{ method, sha })
+            else
+                std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\"}}", .{method})) catch return clearConfirm();
             requestApi("Merging", "PUT", apiPath(&path, "/pulls/{d}/merge", .{number}), body, .none);
             // Its branch after it, as the toggle asked: GitHub's ref, by name —
             // unless it lives in a fork, which is not this repository's to delete.
@@ -3698,8 +4045,40 @@ fn runConfirmed() void {
             requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .none);
         },
         .sign_out => signOutGithub(c.arg),
+        .stage_markers => if (c.arg.len == 0)
+            requestLocal("Staging", &.{ "add", "-A" })
+        else
+            request(&.{ "--literal-pathspecs", "add", "--", c.arg }),
+        .abort_operation => if (operationCommand()) |cmd| request(&.{ cmd, "--abort" }),
+        .skip_step => if (operationCommand()) |cmd| requestLocal("Skipping", &.{ cmd, "--skip" }),
+        // `checkout -m` writes the conflict again from the index's three
+        // stages: every pick made in the file goes.
+        .restart_file => {
+            gitDo(&.{ "--literal-pathspecs", "checkout", "-m", "--", c.arg });
+            if (command_error == null) clearResolveUndo();
+            diff_stale = true;
+        },
     }
     clearConfirm();
+}
+
+/// The subcommand of the operation under way — `rebase`, `merge`… — whose
+/// `--continue`, `--skip` and `--abort` apply; null with none.
+fn operationCommand() ?[]const u8 {
+    const h = history orelse return null;
+    return h.state.command();
+}
+
+/// Abort and Skip, each asked first: an abort throws away every conflict
+/// resolved so far, and a skipped commit is gone from the branch.
+fn requestAbortOperation() void {
+    if (operationCommand() == null) return;
+    ask(.abort_operation, "");
+}
+
+fn requestSkipStep() void {
+    if (operationCommand() == null) return;
+    ask(.skip_step, "");
 }
 
 fn askName(kind: Prompt.Kind, arg: []const u8) void {
@@ -4216,6 +4595,7 @@ fn appFrame() !dvui.App.Result {
     if (avatars.pump()) dvui.refresh(null, @src(), null);
     if (pr.pump()) dvui.refresh(null, @src(), null);
     if (pr.pumpIssues()) dvui.refresh(null, @src(), null);
+    if (pr.pumpMeta()) dvui.refresh(null, @src(), null);
     if (pr.pumpDetail()) dvui.refresh(null, @src(), null);
     if (pr.ciPump()) dvui.refresh(null, @src(), null);
     askCi();
@@ -4393,6 +4773,8 @@ var pr_reply_id: std.ArrayList(u8) = .empty;
 var pr_reply: std.ArrayList(u8) = .empty;
 
 fn selectRequest(number: u32) void {
+    // A review written for one request is never sent to another.
+    if (pr_selected != number) pr_comment.clearRetainingCapacity();
     pr_selected = number;
     pr_reply_id.clearRetainingCapacity();
     pr_reply.clearRetainingCapacity();
@@ -4470,10 +4852,7 @@ fn requestList() void {
     loadMe();
     if (pr.pumpPast()) dvui.refresh(null, @src(), null);
 
-    const source: []const pr.Request = switch (pr_filter) {
-        .merged, .closed => pr.past,
-        else => pr.list,
-    };
+    const source = requestSource();
     {
         var head = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
@@ -4493,31 +4872,6 @@ fn requestList() void {
             if (chipButton(@src(), dvui.entypo.chevron_left, "History — Esc", false)) closePulls();
             dvui.label(@src(), "Pull requests", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
         }
-        // The filters, each with how many it holds.
-        {
-            var tabs = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
-            defer tabs.deinit();
-            var drafts: usize = 0;
-            var mine: usize = 0;
-            for (pr.list) |e| {
-                drafts += @intFromBool(e.draft);
-                mine += @intFromBool(me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(e.author, me_gh.items));
-            }
-            const items = [_]struct { PrFilter, []const u8, ?usize }{
-                .{ .open, "Open", pr.list.len },
-                .{ .review, "To review", requestsToReview() },
-                .{ .mine, "Mine", mine },
-                .{ .drafts, "Drafts", drafts },
-                .{ .merged, "Merged", null },
-                .{ .closed, "Closed", null },
-            };
-            for (items, 0..) |it, i| {
-                if (filterChip(i, it[1], it[2], pr_filter == it[0], it[0] == .review)) {
-                    pr_filter = it[0];
-                    if (it[0] == .merged or it[0] == .closed) pr.refreshPast(repo_path.items, if (it[0] == .merged) .merged else .closed);
-                }
-            }
-        }
         // The search, the order, and the two buttons.
         {
             var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.xs } });
@@ -4527,6 +4881,7 @@ fn requestList() void {
                 defer cell.deinit();
                 _ = searchField(@src(), &pr_search, "Search title, #, author, branch…", "pr_search", dvui.Rect.all(0));
             }
+            prFilterMenu();
             prSortMenu();
             if (iconButton(@src(), "pr_new", "Create one for this branch", dvui.entypo.plus, style.textMuted())) requestCreateRequest();
             if (iconButton(@src(), "pr_refresh", "Refresh", dvui.entypo.ccw, style.textMuted())) {
@@ -4545,62 +4900,135 @@ fn requestList() void {
         .failed => if (pr_filter == .merged or pr_filter == .closed) sidebarNote(@src(), "Could not list them.") else requestsError(),
         .ready, .idle => {},
     }
-    // The ones let through, in the order picked.
-    var order: std.ArrayList(u32) = .empty;
-    defer order.deinit(gpa);
-    for (source, 0..) |entry, i| if (requestShown(entry)) order.append(gpa, @intCast(i)) catch break;
-    const Cmp = struct {
-        list: []const pr.Request,
-        fn lt(ctx: @This(), x: u32, y: u32) bool {
-            const a = ctx.list[x];
-            const b = ctx.list[y];
-            return switch (pr_sort) {
-                .updated => a.updated > b.updated,
-                .created => a.created > b.created,
-                .size => a.additions + a.deletions > b.additions + b.deletions,
-            };
-        }
-    };
-    std.sort.pdq(u32, order.items, Cmp{ .list = source }, Cmp.lt);
-    if (order.items.len == 0 and status == .ready) sidebarNote(@src(), switch (pr_filter) {
+    // From the same list as `source`, read once: a filter clicked further
+    // up this function switches `requestSource()` to the merged or closed
+    // ones, and indexes from one list read out of the other ran past its end.
+    const order = shownRequests(dvui.currentWindow().arena(), source);
+    // None picked yet: the checked-out branch's own, else the first.
+    if (pr_selected == null and order.len > 0) {
+        const head = if (history) |h| h.head orelse "" else "";
+        var pick = source[order[0]].number;
+        for (order) |i| if (head.len > 0 and std.mem.eql(u8, source[i].branch, head)) {
+            pick = source[i].number;
+            break;
+        };
+        selectRequest(pick);
+    }
+    if (order.len == 0 and status == .ready) sidebarNote(@src(), switch (pr_filter) {
         .review => "Nothing waits on your review.",
         .mine => "None of yours open.",
         .drafts => "No drafts.",
         else => "None.",
     });
-    for (order.items, 0..) |i, n| requestListRow(@src(), source[i], n);
+    for (order, 0..) |i, n| requestListRow(@src(), source[i], n);
 }
 
-/// One of the list's filters: its name and count, lit while picked. `urgent`
-/// colours a count that is waiting on you.
-fn filterChip(id: usize, caption: []const u8, count: ?usize, on: bool, urgent: bool) bool {
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{ .draw_focus = false }, .{
-        .id_extra = id,
-        .tag = frameTag("prfilter", caption),
-        .background = true,
-        .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
-        .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = if (on) style.accent().opacity(0.4) else style.border() },
-        .corners = .all(100),
-        .margin = .{ .w = style.space.xs, .y = 2, .h = 2 },
-        .padding = .{ .x = style.space.md, .y = 2, .w = style.space.md, .h = 2 },
-    });
-    bw.processEvents();
-    bw.drawBackground();
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-        defer row.deinit();
-        dvui.label(@src(), "{s}", .{caption}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = if (on) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        if (count) |n| if (n > 0) {
-            const hue = if (urgent) style.get().orange else style.accent();
-            dvui.label(@src(), "{d}", .{n}, .{ .font = style.tinyBold(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs }, .padding = dvui.Rect.all(0) });
-        };
+/// The list the filter, the search and the sort leave, as indexes into
+/// `source`, in `a`: what is drawn, and what ↑ and ↓ walk.
+fn shownRequests(a: std.mem.Allocator, source: []const pr.Request) []u32 {
+    var order: std.ArrayList(u32) = .empty;
+    for (source, 0..) |entry, i| if (requestShown(entry)) order.append(a, @intCast(i)) catch break;
+    const Cmp = struct {
+        list: []const pr.Request,
+        fn lt(ctx: @This(), x: u32, y: u32) bool {
+            const l = ctx.list[x];
+            const r = ctx.list[y];
+            return switch (pr_sort) {
+                .updated => l.updated > r.updated,
+                .created => l.created > r.created,
+                .size => l.additions + l.deletions > r.additions + r.deletions,
+            };
+        }
+    };
+    std.sort.pdq(u32, order.items, Cmp{ .list = source }, Cmp.lt);
+    return order.items;
+}
+
+/// The open requests, or the merged and closed ones, as the filter says.
+fn requestSource() []const pr.Request {
+    return switch (pr_filter) {
+        .merged, .closed => pr.past,
+        else => pr.list,
+    };
+}
+
+/// The request `delta` along the list from the one picked: ↑ and ↓.
+fn stepRequest(delta: i2) void {
+    const source = requestSource();
+    const order = shownRequests(dvui.currentWindow().arena(), source);
+    if (order.len == 0) return;
+    var at: ?usize = null;
+    if (pr_selected) |n| for (order, 0..) |i, k| if (source[i].number == n) {
+        at = k;
+        break;
+    };
+    const next = if (at) |k|
+        (if (delta > 0) @min(k + 1, order.len - 1) else k -| 1)
+    else
+        0;
+    selectRequest(source[order[next]].number);
+}
+
+/// Which requests the list shows, as a select beside the search: open,
+/// waiting on your review, yours, drafts, merged, closed — each with how
+/// many it holds, where that is known without asking.
+fn prFilterMenu() void {
+    var drafts: usize = 0;
+    var mine: usize = 0;
+    for (pr.list) |e| {
+        drafts += @intFromBool(e.draft);
+        mine += @intFromBool(me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(e.author, me_gh.items));
     }
-    const clicked = bw.clicked();
-    bw.deinit();
-    return clicked;
+    const items = [_]struct { PrFilter, []const u8, ?usize }{
+        .{ .open, "Open", pr.list.len },
+        .{ .review, "To review", requestsToReview() },
+        .{ .mine, "Mine", mine },
+        .{ .drafts, "Drafts", drafts },
+        .{ .merged, "Merged", null },
+        .{ .closed, "Closed", null },
+    };
+    const current = for (items) |it| {
+        if (it[0] == pr_filter) break it;
+    } else items[0];
+
+    const button = DropButton.begin(@src(), .{
+        .tag = "pr:filter",
+        .gravity_y = 0.5,
+        .background = false,
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .corners = style.radius.input,
+        .margin = .{ .x = style.space.xs },
+        .padding = dvui.Rect.all(0),
+    });
+    {
+        const lit = button.item.show_active or button.item.mouse_over;
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.md, .y = 5, .w = style.space.sm, .h = 5 },
+        });
+        defer face.deinit();
+        dvui.label(@src(), "{s}", .{current[1]}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        if (current[2]) |n| countPill(n);
+        dvui.icon(@src(), "filter_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs } });
+    }
+    const menu = button.open();
+    defer button.end(menu);
+    const m = menu orelse return;
+    for (items, 0..) |it, i| {
+        var count_buf: [16]u8 = undefined;
+        const count = if (it[2]) |n| std.fmt.bufPrint(&count_buf, "{d}", .{n}) catch "" else "";
+        if (pickRow(i, it[1], count, pr_filter == it[0], null)) {
+            pr_filter = it[0];
+            if (it[0] == .merged or it[0] == .closed) pr.refreshPast(repo_path.items, if (it[0] == .merged) .merged else .closed);
+            m.close();
+            // The keys back to the list: the closed menu would keep ↑ and ↓.
+            dvui.focusWidget(null, dvui.currentWindow().data().id, null);
+        }
+    }
 }
 
 /// The list's order, as a menu.
@@ -4808,25 +5236,56 @@ fn requestDetail() void {
     // Refreshing frees what `d` points into: done once the pane is drawn.
     var reload = false;
     defer if (reload) selectRequest(d.number);
+    if (pr_reread_at != 0) {
+        if (frame_now_s >= pr_reread_at) {
+            pr_reread_at = 0;
+            pr.loadDetail(repo_path.items, d.number);
+        } else dvui.timer(panel.data().id, PR_REREAD_S * std.time.us_per_s);
+    }
 
-    requestHeader(d, &reload);
-    requestTabs(d);
+    // The whole pane, and where there is the room GitHub's sidebar on its
+    // right: who reviews, who it is assigned to, its labels.
+    const total = @max(320, panel.data().contentRect().w - 2 * style.space.xl);
+    const side = total >= PR_SIDE_FROM;
+    const main_w = if (side) total - PR_SIDE_W - style.space.xl else total;
+    {
+        var head = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .gravity_x = 0.5,
+            .min_size_content = .{ .w = total },
+            .max_size_content = .width(total),
+            .background = false,
+        });
+        defer head.deinit();
+        requestHeader(d, &reload, !side);
+        requestTabs(d);
+    }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     {
-        var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .gravity_x = 0.5,
+            .min_size_content = .{ .w = total },
+            .max_size_content = .width(total),
             .background = false,
-            .padding = dvui.Rect.all(style.space.xl),
+            .padding = .{ .y = style.space.xl, .h = style.space.xl },
         });
-        defer body.deinit();
+        defer row.deinit();
+        {
+            var body = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .min_size_content = .{ .w = main_w },
+                .max_size_content = .width(main_w),
+                .background = false,
+            });
+            defer body.deinit();
 
-        switch (pr_tab) {
-            .conversation => requestConversation(d),
-            .commits => requestCommits(d),
-            .files => requestFiles(d),
-            .checks => requestChecks(d),
+            switch (pr_tab) {
+                .conversation => requestConversation(d),
+                .commits => requestCommits(d),
+                .files => requestFiles(d),
+                .checks => requestChecks(d),
+            }
         }
+        if (side) requestSidebar(d);
     }
     scroll.deinit();
 }
@@ -4850,11 +5309,28 @@ fn requestConversation(d: pr.Detail) void {
     if (pr_runs_for != d.number) {
         pr_runs_for = d.number;
         pr_runs_open = 0;
+        pr_cards.clearRetainingCapacity();
+        pr_cards_all = null;
+    }
+    // Expand all, Collapse all: for a long conversation, where only the
+    // last few are open to begin with.
+    if (d.comments.len + d.reviews.len > CARDS_OPEN_AT_END) {
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
+        defer bar.deinit();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (linkButtonTagged(@src(), "Expand all", style.textMuted(), "pr:expand_all")) {
+            pr_cards.clearRetainingCapacity();
+            pr_cards_all = true;
+        }
+        if (linkButtonTagged(@src(), "Collapse all", style.textMuted(), "pr:collapse_all")) {
+            pr_cards.clearRetainingCapacity();
+            pr_cards_all = false;
+        }
     }
     var timeline = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
     {
         defer timeline.deinit();
-        timelineCard(0, d.author, "opened this", d.created, "", if (d.body.len > 0) d.body else "", true);
+        timelineCard(0, d.author, "opened this", d.created, "", if (d.body.len > 0) d.body else "", true, true);
 
         // Comments and reviews merged by time, then read in runs: three or
         // more in a row from one person fold to their first and last.
@@ -4890,7 +5366,9 @@ fn requestConversation(d: pr.Detail) void {
                     continue;
                 }
                 const e = events.items[k];
-                if (e.review) reviewEvent(k + 1, e.note) else timelineCard(k + 1, e.note.author, "commented", pr.isoSeconds(e.note.when), "", e.note.body, false);
+                // A long conversation is read from its end: the last few open.
+                const open = k + CARDS_OPEN_AT_END >= events.items.len;
+                if (e.review) reviewEvent(k + 1, e.note, open) else timelineCard(k + 1, e.note.author, "commented", pr.isoSeconds(e.note.when), "", e.note.body, false, open);
             }
             i = end;
         }
@@ -4899,6 +5377,178 @@ fn requestConversation(d: pr.Detail) void {
     reviewThreads(d);
     requestComposer();
     requestMergeCard(d);
+}
+
+/// The cards of a conversation opened or folded by a click on their head,
+/// by their id; the rest as `pr_cards_all` says, or open where they are
+/// among the last few. For the request in `pr_runs_for`.
+var pr_cards: std.AutoHashMapUnmanaged(usize, bool) = .empty;
+var pr_cards_all: ?bool = null;
+const CARDS_OPEN_AT_END = 3;
+/// The sidebar beside it, and the width of pane it needs to be there.
+const PR_SIDE_W: f32 = 220;
+const PR_SIDE_FROM: f32 = 700;
+
+/// GitHub's sidebar: who is asked to review and where each stands, who it
+/// is assigned to, its labels — each head dropping the list to change it.
+fn requestSidebar(d: pr.Detail) void {
+    var col = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .min_size_content = .{ .w = PR_SIDE_W },
+        .max_size_content = .width(PR_SIDE_W),
+        .background = false,
+        .margin = .{ .x = style.space.xl },
+    });
+    defer col.deinit();
+
+    sideHeading(.reviewers, d);
+    if (d.reviewers.len == 0) sideNone(0, "No reviews yet");
+    for (d.reviewers, 0..) |r, i| sideReviewer(i, r);
+    sideRule(0);
+
+    sideHeading(.assignees, d);
+    if (d.assignees.len == 0) sideNone(1, "No one assigned");
+    for (d.assignees, 0..) |login, i| {
+        // Numbered past the reviewers, on the same column.
+        var line = sidePerson(100 + i, login);
+        line.deinit();
+    }
+    sideRule(1);
+
+    sideHeading(.labels, d);
+    if (d.labels.len == 0) sideNone(2, "None yet");
+    if (d.labels.len > 0) {
+        var wrap = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal });
+        defer wrap.deinit();
+        for (d.labels, 0..) |l, i| {
+            var cell = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false, .margin = .{ .y = 2, .h = 2 } });
+            defer cell.deinit();
+            tinyBadge(@src(), 0, l.name, labelColor(l.color));
+        }
+    }
+}
+
+const SideKind = enum { reviewers, assignees, labels };
+
+/// The list a sidebar section's picker works on while it is open: who, or
+/// which labels, as on the request when it opened, each click since.
+var side_list: std.ArrayList(u8) = .empty;
+
+/// A sidebar section's head, GitHub's way: its name and a gear, the whole
+/// line a button that drops the section's list. Each tick goes to GitHub at
+/// once; the request is read again after.
+fn sideHeading(kind: SideKind, d: pr.Detail) void {
+    const id: usize = 10 + @as(usize, @intFromEnum(kind));
+    const caption: []const u8 = switch (kind) {
+        .reviewers => "Reviewers",
+        .assignees => "Assignees",
+        .labels => "Labels",
+    };
+    const editable = requestOpen(d);
+    var button = DropButton.begin(@src(), .{
+        .id_extra = id,
+        .tag = frameTag("side", caption),
+        .expand = .horizontal,
+        .gravity_y = 0,
+        .background = false,
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .corners = style.radius.input,
+        .margin = .{ .h = style.space.xs },
+        .padding = .{ .x = 4, .y = 3, .w = 4, .h = 3 },
+    });
+    button.min_w = 260;
+    {
+        const lit = editable and (button.item.show_active or button.item.mouse_over);
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer line.deinit();
+        dvui.label(@src(), "{s}", .{caption}, .{ .font = style.smallBold(), .color_text = .{ .color = if (lit) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (editable) dvui.icon(@src(), "side_gear", dvui.entypo.cog, .{ .fill_color = .{ .color = if (lit) style.accent() else style.textFaint() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5 });
+    }
+    const menu = button.open();
+    defer button.end(menu);
+    const m = menu orelse {
+        if (pick_open == id) pick_open = null;
+        return;
+    };
+    if (!editable) return m.close();
+    // Opened: the list as the request has it, and who can be asked read.
+    if (pick_open != id) {
+        pick_open = id;
+        pick_filter.clearRetainingCapacity();
+        side_list.clearRetainingCapacity();
+        switch (kind) {
+            .reviewers => for (d.reviewers) |r| listToggle(&side_list, r.login),
+            .assignees => for (d.assignees) |login| listToggle(&side_list, login),
+            .labels => for (d.labels) |l| listToggle(&side_list, l.name),
+        }
+        pr.loadMeta(repo_path.items);
+    }
+
+    const a = dvui.currentWindow().arena();
+    var path: [512]u8 = undefined;
+    switch (kind) {
+        .reviewers => if (peopleRows(&side_list, true)) |login| {
+            const body = std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, login)}) catch return;
+            if (listHas(side_list.items, login))
+                requestApi("Asking for a review", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none)
+            else
+                requestApi("Withdrawing a review", "DELETE", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none);
+        },
+        .assignees => if (peopleRows(&side_list, false)) |_| {
+            const body = std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{jsonList(a, side_list.items)}) catch return;
+            requestApi("Assigning", "PATCH", apiPath(&path, "/issues/{d}", .{d.number}), body, .none);
+        },
+        .labels => if (labelRows(&side_list)) |_| {
+            const body = std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{jsonCommaList(a, side_list.items)}) catch return;
+            requestApi("Labelling", "PUT", apiPath(&path, "/issues/{d}/labels", .{d.number}), body, .none);
+        },
+    }
+}
+
+fn sideNone(id: usize, text: []const u8) void {
+    dvui.label(@src(), "{s}", .{text}, .{ .id_extra = id, .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2, .h = style.space.xs } });
+}
+
+fn sideRule(id: usize) void {
+    var line = dvui.box(@src(), .{}, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .min_size_content = .{ .h = 1 },
+        .max_size_content = .height(1),
+        .background = true,
+        .color_fill = .{ .color = style.border() },
+        .margin = .{ .y = style.space.md, .h = style.space.md },
+    });
+    line.deinit();
+}
+
+/// A reviewer: who, and where they stand, as an icon of its colour.
+fn sideReviewer(id: usize, r: pr.Reviewer) void {
+    const icon: []const u8, const hue: dvui.Color = if (std.mem.eql(u8, r.state, "APPROVED"))
+        .{ dvui.entypo.check, style.success() }
+    else if (std.mem.eql(u8, r.state, "CHANGES_REQUESTED"))
+        .{ dvui.entypo.cross, style.danger() }
+    else if (std.mem.eql(u8, r.state, "COMMENTED"))
+        .{ dvui.entypo.chat, style.textMuted() }
+    else
+        .{ dvui.entypo.dot_single, style.get().orange };
+    var line = sidePerson(id, r.login);
+    defer line.deinit();
+    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+    dvui.icon(@src(), "review_state", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5 });
+}
+
+/// A person on a line of the sidebar: their picture and login. The line
+/// is left open for what follows on it.
+fn sidePerson(id: usize, login: []const u8) *dvui.BoxWidget {
+    const line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .y = 3, .h = 3 } });
+    avatarSized(@src(), 0, requestAuthor(login), null, null, 20);
+    dvui.label(@src(), "{s}", .{login}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    return line;
+}
+
+fn cardOpen(id: usize, default: bool) bool {
+    return pr_cards.get(id) orelse pr_cards_all orelse default;
 }
 
 /// One step of the timeline: the rail on the left with `marker` drawn on
@@ -4944,8 +5594,12 @@ const TimelineRow = struct {
 };
 
 fn railAvatar(login: []const u8) void {
-    avatarSized(@src(), 0, requestAuthor(login), null, null, 28);
+    avatarSized(@src(), 0, requestAuthor(login), null, null, RAIL_DOT);
 }
+
+/// What sits on the timeline's rail — a picture, an icon on a disc — all
+/// one size, so the rail reads as one line of marks.
+const RAIL_DOT: f32 = 24;
 
 /// An icon on a disc of `hue`'s tint, for an event with no words.
 const RailIcon = struct { icon: []const u8, hue: dvui.Color };
@@ -4957,9 +5611,9 @@ fn railIcon(arg: RailIcon) void {
         .color_fill = .{ .color = style.tint(arg.hue) },
         .border = dvui.Rect.all(1),
         .color_border = .{ .color = arg.hue.opacity(0.5) },
-        .corners = .all(12),
-        .min_size_content = .{ .w = 24, .h = 24 },
-        .max_size_content = .size(.{ .w = 24, .h = 24 }),
+        .corners = .all(RAIL_DOT / 2),
+        .min_size_content = .{ .w = RAIL_DOT, .h = RAIL_DOT },
+        .max_size_content = .size(.{ .w = RAIL_DOT, .h = RAIL_DOT }),
         .padding = dvui.Rect.all(0),
     });
     defer disc.deinit();
@@ -4976,11 +5630,12 @@ fn verdictOf(state: []const u8) struct { icon: []const u8, hue: dvui.Color, word
 
 /// A comment, or the description: the author's picture on the rail, a card
 /// with who, what and when on its head and the words under it.
-fn timelineCard(id: usize, author: []const u8, what: []const u8, when: i64, verdict: []const u8, body: []const u8, first: bool) void {
+fn timelineCard(id: usize, author: []const u8, what: []const u8, when: i64, verdict: []const u8, body: []const u8, first: bool, default_open: bool) void {
     var row = TimelineRow.begin(id);
     row.rail(railAvatar, author);
     defer row.end();
     const accent: ?dvui.Color = if (verdict.len > 0) verdictOf(verdict).hue else null;
+    const open = cardOpen(id, default_open);
     var card = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .background = true,
@@ -4995,21 +5650,42 @@ fn timelineCard(id: usize, author: []const u8, what: []const u8, when: i64, verd
             .expand = .horizontal,
             .background = true,
             .color_fill = .{ .color = if (first) style.accentDim() else style.surfaceRaised() },
-            .border = .{ .h = 1 },
+            .border = .{ .h = if (open) 1 else 0 },
             .color_border = .{ .color = style.borderSubtle() },
-            .corners = .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr },
-            .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+            .corners = if (open) .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr } else style.radius.row,
+            .padding = .{ .x = style.space.sm, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
         });
         defer head.deinit();
+        // An accordion's head: the chevron says which way it is.
+        dvui.icon(@src(), "card_fold", if (open) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.xs },
+        });
         dvui.label(@src(), "{s}", .{author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         const words = if (verdict.len > 0) verdictOf(verdict).words else what;
         dvui.label(@src(), "{s}", .{words}, .{ .font = style.small(), .color_text = .{ .color = accent orelse style.textMuted() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        // Folded, the first line of what it says, so a long thread can be
+        // skimmed without opening each one.
+        if (!open and body.len > 0) {
+            dvui.label(@src(), "{s}", .{previewLine(body)}, .{
+                .font = style.small(),
+                .color_text = .{ .color = style.textFaint() },
+                .gravity_y = 0.5,
+                .expand = .horizontal,
+                .max_size_content = .width(0),
+                .margin = .{ .x = style.space.xs, .w = style.space.sm },
+                .padding = dvui.Rect.all(0),
+            });
+        } else _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (when > 0) {
             var buf: [32]u8 = undefined;
             dvui.label(@src(), "{s}", .{relativeTime(&buf, when)}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         }
+        if (head.data().borderRectScale().r.contains(dvui.currentWindow().mouse_pt)) dvui.cursorSet(.hand);
+        if (dvui.clicked(head.data(), .{})) pr_cards.put(gpa, id, !open) catch {};
     }
+    if (!open) return;
     var text = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.md } });
     defer text.deinit();
     if (body.len == 0) {
@@ -5017,12 +5693,23 @@ fn timelineCard(id: usize, author: []const u8, what: []const u8, when: i64, verd
     } else markdownBody(body);
 }
 
+/// The first line of a comment worth reading, its Markdown marks left out:
+/// what a folded card shows.
+fn previewLine(body: []const u8) []const u8 {
+    var it = std.mem.splitScalar(u8, body, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r#>*-_`");
+        if (line.len > 0) return line;
+    }
+    return "";
+}
+
 /// A review: a card when it says something, one coloured line when it is
 /// only a verdict.
-fn reviewEvent(id: usize, r: pr.Note) void {
+fn reviewEvent(id: usize, r: pr.Note, open: bool) void {
     const when = pr.isoSeconds(r.when);
     const v = verdictOf(r.state);
-    if (r.body.len > 0) return timelineCard(id, r.author, "", when, r.state, r.body, false);
+    if (r.body.len > 0) return timelineCard(id, r.author, "", when, r.state, r.body, false, open);
     // A bare "commented" review has no words and no verdict: nothing to show.
     if (std.mem.eql(u8, r.state, "COMMENTED")) return;
     var row = TimelineRow.begin(id);
@@ -5166,6 +5853,9 @@ fn requestComposer() void {
     const text = std.mem.trim(u8, pr_comment.items, " \n\t");
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialogButton(@src(), "Comment", false) and text.len > 0) prAnswer(.comment);
+    // GitHub refuses a review of your own request: only a comment there.
+    const own = if (pr.detail) |d| me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(d.author, me_gh.items) else false;
+    if (own) return;
     if (dialogButton(@src(), "Request changes", false) and text.len > 0) prAnswer(.request_changes);
     if (dialogButton(@src(), "Approve", true)) prAnswer(.approve);
 }
@@ -5220,7 +5910,7 @@ var pr_tab: PrTab = .conversation;
 /// The request's head, above its tabs: where it stands as a pill, its title,
 /// who wants what merged where, who reviews it, its labels, and a line on
 /// what still stands between it and a merge.
-fn requestHeader(d: pr.Detail, reload: *bool) void {
+fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool) void {
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .background = true,
@@ -5248,6 +5938,16 @@ fn requestHeader(d: pr.Detail, reload: *bool) void {
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
         tl.addText(d.title, .{ .font = style.title(), .color_text = .{ .color = style.text() } });
         tl.deinit();
+
+        // What to do with it, short of answering it: icons at the end of
+        // its title's line, each saying itself on hover.
+        if (iconButtonTagged(@src(), "pr_checkout", "Check it out: switch to its branch, up to date", dvui.entypo.download, style.textMuted(), "pr:checkout")) checkoutRequest(d.number, d.head, d.fork);
+        if (iconButtonTagged(@src(), "pr_web", "Open it on GitHub", dvui.entypo.popup, style.textMuted(), "pr:web")) openUrl(d.url);
+        if (iconButtonTagged(@src(), "pr_edit", "Edit its title, description, reviewers and labels", dvui.entypo.pencil, style.textMuted(), "pr:edit")) openPrEdit(d);
+        if (requestOpen(d) and !d.draft) {
+            if (iconButtonTagged(@src(), "pr_draft", "Convert it back to a draft", dvui.entypo.back, style.textMuted(), "pr:draft")) requestOnRequest("Making a draft", "convertPullRequestToDraft", d.id);
+        }
+        if (iconButtonTagged(@src(), "pr_refresh", "Read it again", dvui.entypo.cw, style.textMuted(), "pr:refresh")) reload.* = true;
     }
     // Who, from where into where, when; its size on the right.
     {
@@ -5267,8 +5967,8 @@ fn requestHeader(d: pr.Detail, reload: *bool) void {
         sizeMarks(d.additions, d.deletions);
         dvui.label(@src(), "{d} file{s}", .{ d.files, plural(d.files) }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
     }
-    // Reviewers, assignees, labels.
-    if (d.reviewers.len + d.assignees.len + d.labels.len > 0) {
+    // Reviewers, assignees, labels — here only where the sidebar has no room.
+    if (people_inline and d.reviewers.len + d.assignees.len + d.labels.len > 0) {
         var line = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .margin = .{ .h = style.space.sm } });
         defer line.deinit();
         for (d.reviewers, 0..) |r, i| reviewerChip(i, r);
@@ -5280,32 +5980,6 @@ fn requestHeader(d: pr.Detail, reload: *bool) void {
         }
     }
     mergeReadiness(d);
-    // What to do with it, short of answering it.
-    {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.sm } });
-        defer line.deinit();
-        if (dialogButton(@src(), "Check out", false)) checkoutRequest(d.number, d.head);
-        if (dialogButton(@src(), "Open on the web", false)) openUrl(d.url);
-        if (dialogButton(@src(), "Edit…", false)) openPrEdit(d);
-        // A draft goes up for review; one up for review goes back to a draft.
-        if (requestOpen(d)) {
-            if (d.draft) {
-                if (dialogButton(@src(), "Ready for review", true)) requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
-            } else if (dialogButton(@src(), "Convert to draft", false)) {
-                requestOnRequest("Making a draft", "convertPullRequestToDraft", d.id);
-            }
-            // The base moved on: bring it into the branch, on GitHub.
-            if (std.mem.eql(u8, d.merge_state, "BEHIND")) {
-                if (dialogButton(@src(), "Update branch", false)) {
-                    var path: [512]u8 = undefined;
-                    requestApi("Updating the branch", "PUT", apiPath(&path, "/pulls/{d}/update-branch", .{d.number}), "{}", .none);
-                    api_fetch_after = true;
-                }
-            }
-        }
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (dialogButton(@src(), "Refresh", false)) reload.* = true;
-    }
 }
 
 /// Ask GitHub to merge it once it can, by the method picked. Deleting its
@@ -5336,18 +6010,33 @@ var pr_edit_title: std.ArrayList(u8) = .empty;
 var pr_edit_body: std.ArrayList(u8) = .empty;
 var pr_edit_reviewers: std.ArrayList(u8) = .empty;
 var pr_edit_labels: std.ArrayList(u8) = .empty;
+var pr_edit_assignees: std.ArrayList(u8) = .empty;
+var pr_edit_base: std.ArrayList(u8) = .empty;
+var pr_edit_draft = false;
 
+/// The edit dialog, filled in with the request as it is: what it says,
+/// where it goes, who reviews, who it is assigned to, its labels, its type.
 fn openPrEdit(d: pr.Detail) void {
     pr_edit_open = true;
     pr_edit_rect = .{};
-    for ([_]*std.ArrayList(u8){ &pr_edit_title, &pr_edit_body, &pr_edit_reviewers, &pr_edit_labels }) |t| t.clearRetainingCapacity();
+    for (prEditLists()) |t| t.clearRetainingCapacity();
     pr_edit_title.appendSlice(gpa, d.title) catch {};
     pr_edit_body.appendSlice(gpa, d.body) catch {};
+    pr_edit_base.appendSlice(gpa, d.base) catch {};
+    for (d.reviewers) |r| listToggle(&pr_edit_reviewers, r.login);
+    for (d.assignees) |login| listToggle(&pr_edit_assignees, login);
+    for (d.labels) |l| listToggle(&pr_edit_labels, l.name);
+    pr_edit_draft = d.draft;
+    pr.loadMeta(repo_path.items);
+}
+
+fn prEditLists() [6]*std.ArrayList(u8) {
+    return .{ &pr_edit_title, &pr_edit_body, &pr_edit_reviewers, &pr_edit_labels, &pr_edit_assignees, &pr_edit_base };
 }
 
 fn clearPrEdit() void {
     pr_edit_open = false;
-    for ([_]*std.ArrayList(u8){ &pr_edit_title, &pr_edit_body, &pr_edit_reviewers, &pr_edit_labels }) |t| {
+    for (prEditLists()) |t| {
         t.deinit(gpa);
         t.* = .empty;
     }
@@ -5364,12 +6053,23 @@ fn prEditDialog() void {
     var title_buf: [48]u8 = undefined;
     dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
 
+    const width = @min(PR_CREATE_W, win.w - 80);
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = @min(640, win.w - 80) },
+        .min_size_content = .{ .w = width },
+        .max_size_content = .width(width),
         .background = false,
         .padding = dvui.Rect.all(style.space.xl),
     });
     defer body.deinit();
+
+    // As the create dialog has it: where it goes — where it comes from is
+    // fixed once it is made — its words, who and what, its type.
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        branchPicker(0, "Into", &pr_edit_base, .remote);
+        fixedField(1, "From", if (pr.detail) |d| d.head else "");
+    }
     var entered = false;
     _ = dialogField(@src(), 0, "Title", &pr_edit_title, "What it does", false, &entered);
     dialogLabel(@src(), "Description");
@@ -5379,35 +6079,95 @@ fn prEditDialog() void {
             .multiline = true,
             .break_lines = true,
             .placeholder = "Why, and how to try it",
-        }, settingsInput().override(.{ .tag = "pr_edit:body", .min_size_content = .{ .h = 160 }, .max_size_content = .height(260), .margin = .{ .h = style.space.lg } }));
+        }, settingsInput().override(.{ .tag = "pr_edit:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
         te.deinit();
     }
-    _ = dialogField(@src(), 1, "Add reviewers", &pr_edit_reviewers, "logins, separated by commas", false, &entered);
-    _ = dialogField(@src(), 2, "Add labels", &pr_edit_labels, "bug, enhancement…", false, &entered);
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        peoplePicker(2, "Reviewers", &pr_edit_reviewers, "Ask for reviews", true, "pr_edit:reviewers");
+        peoplePicker(3, "Assignees", &pr_edit_assignees, "Assign someone", false, "pr_edit:assignees");
+        labelPicker(4, &pr_edit_labels, "pr_edit:labels");
+    }
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
+        typePicker(5, &pr_edit_draft, "pr_edit:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) pr_edit_open = false;
         if (dialogButton(@src(), "Save", true)) savePrEdit();
     }
-    if (escapePressed()) pr_edit_open = false;
+    if (escapePressed() and pick_open == null) pr_edit_open = false;
 }
 
 fn savePrEdit() void {
     const title = std.mem.trim(u8, pr_edit_title.items, " \n\t");
     if (title.len == 0) return setCommandError("A request needs a title.");
+    const d = pr.detail orelse return;
     const a = dvui.currentWindow().arena();
-    const number = pr_selected orelse return;
+    const number = d.number;
     var path: [512]u8 = undefined;
-    // Title and description, then whoever is asked to review, then labels:
-    // three calls, the later ones only after the one before went through.
-    requestApi("Saving", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_edit_body.items } }), .none);
-    const reviewers = jsonList(a, pr_edit_reviewers.items);
-    if (reviewers.len > 2) requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{reviewers}) catch return, .none);
-    const labels = jsonList(a, pr_edit_labels.items);
-    if (labels.len > 2) requestApi("Labelling", "POST", apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{labels}) catch return, .none);
+
+    // Its words, and where it goes.
+    const base = std.mem.trim(u8, pr_edit_base.items, " ");
+    requestApi("Saving", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_edit_body.items }, .{ "base", if (base.len > 0) base else d.base } }), .none);
+
+    // Reviewers newly asked, and those asked no longer — only one who has
+    // not answered can be: a review given stays given.
+    var added: std.ArrayList(u8) = .empty;
+    var removed: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, pr_edit_reviewers.items, ',');
+    while (it.next()) |raw| {
+        const login = std.mem.trim(u8, raw, " ");
+        if (login.len == 0) continue;
+        const known = for (d.reviewers) |r| {
+            if (std.ascii.eqlIgnoreCase(r.login, login)) break true;
+        } else false;
+        if (!known) listAppend(a, &added, login);
+    }
+    for (d.reviewers) |r| {
+        if (std.mem.eql(u8, r.state, "REQUESTED") and !listHas(pr_edit_reviewers.items, r.login)) listAppend(a, &removed, r.login);
+    }
+    if (added.items.len > 0) requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, added.items)}) catch return, .none);
+    if (removed.items.len > 0) requestApi("Withdrawing reviews", "DELETE", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, removed.items)}) catch return, .none);
+
+    // Assignees and labels as picked, the whole of each, where they changed.
+    if (!sameNames(pr_edit_assignees.items, d.assignees)) {
+        requestApi("Assigning", "PATCH", apiPath(&path, "/issues/{d}", .{number}), std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{jsonList(a, pr_edit_assignees.items)}) catch return, .none);
+    }
+    var label_names: std.ArrayList([]const u8) = .empty;
+    for (d.labels) |l| label_names.append(a, l.name) catch {};
+    if (!sameNames(pr_edit_labels.items, label_names.items)) {
+        requestApi("Labelling", "PUT", apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{jsonCommaList(a, pr_edit_labels.items)}) catch return, .none);
+    }
+
+    // Ready for review, or back to a draft.
+    if (pr_edit_draft != d.draft) {
+        if (pr_edit_draft) requestOnRequest("Making a draft", "convertPullRequestToDraft", d.id) else requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
+    }
     pr_edit_open = false;
+}
+
+/// `item` after the comma-separated `list`, in `a`.
+fn listAppend(a: std.mem.Allocator, list: *std.ArrayList(u8), item: []const u8) void {
+    if (list.items.len > 0) list.appendSlice(a, ", ") catch return;
+    list.appendSlice(a, item) catch {};
+}
+
+/// Whether the comma-separated `list` names exactly `names`, in any order.
+fn sameNames(list: []const u8, names: []const []const u8) bool {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |raw| {
+        const x = std.mem.trim(u8, raw, " ");
+        if (x.len == 0) continue;
+        n += 1;
+        const known = for (names) |name| {
+            if (std.mem.eql(u8, name, x)) break true;
+        } else false;
+        if (!known) return false;
+    }
+    return n == names.len;
 }
 
 /// A request's state, on a pill of its colour.
@@ -5518,23 +6278,92 @@ fn mergeReadiness(d: pr.Detail) void {
         if (t.running > 0) break :blk .{ dvui.entypo.clock, style.get().orange, std.fmt.bufPrint(&buf, "{d} check{s} still running", .{ t.running, plural(t.running) }) catch "" };
         if (d.draft) break :blk .{ dvui.entypo.pencil, style.textMuted(), "A draft: mark it ready for review to merge it" };
         if (std.mem.eql(u8, d.merge_state, "BLOCKED")) break :blk .{ dvui.entypo.lock, style.get().orange, "Blocked by the branch's protection rules" };
+        // GitHub works mergeability out after a push, a while later: until
+        // then it says UNKNOWN, which is not a yes.
+        if (mergeUnknown(d)) break :blk .{ dvui.entypo.clock, style.textMuted(), "GitHub is still working out whether it can merge…" };
         break :blk .{ dvui.entypo.check, style.success(), if (t.passed > 0) std.fmt.bufPrint(&buf, "Ready to merge: {d} check{s} passed", .{ t.passed, plural(t.passed) }) catch "" else "Ready to merge" };
     };
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .background = true,
         .color_fill = .{ .color = style.tint(hue) },
-        .border = .{ .x = 3 },
-        .color_border = .{ .color = hue },
         .corners = style.radius.input,
         .margin = .{ .y = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.xs, .h = style.space.xs },
+        .min_size_content = .{ .h = 26 },
     });
     defer bar.deinit();
     dvui.icon(@src(), "ready_icon", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 13, .h = 13 }, .gravity_y = 0.5, .margin = .{ .w = style.space.md } });
-    dvui.label(@src(), "{s}", .{text}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{s}", .{text}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
     if (d.auto_merge) tinyBadge(@src(), 0, "auto-merge on", style.accent());
+    readinessAction(d, t);
+
+    // Asked again every few seconds while GitHub has no answer yet.
+    if (mergeUnknown(d)) {
+        if (frame_now_s - pr_recheck_s >= PR_RECHECK_S) {
+            pr_recheck_s = frame_now_s;
+            pr.loadDetail(repo_path.items, d.number);
+        }
+        dvui.timer(bar.data().id, PR_RECHECK_S * std.time.us_per_s);
+    }
 }
+
+/// The one thing to do next about a request, at the end of its readiness
+/// line: resolve its conflicts here, bring it up to date on GitHub, look at
+/// the failing checks, put a draft up for review, or merge it.
+fn readinessAction(d: pr.Detail, t: anytype) void {
+    if (!requestOpen(d)) return;
+    if (std.mem.eql(u8, d.mergeable, "CONFLICTING")) {
+        // Rebased onto its base, here: the conflicts come up one by one.
+        if (!d.fork and opButton(@src(), "Rebase onto it here", "pr:resolve")) resolveRequestLocally(d, true);
+        if (!d.fork and linkButtonTagged(@src(), "or merge it in", style.textMuted(), "pr:resolve_merge")) resolveRequestLocally(d, false);
+        return;
+    }
+    if (std.mem.eql(u8, d.merge_state, "BEHIND")) {
+        if (opButton(@src(), "Update branch", "pr:update")) updateRequestBranch(d);
+        return;
+    }
+    if (t.failed > 0) {
+        if (opButton(@src(), "See the checks", "pr:see_checks")) pr_tab = .checks;
+        return;
+    }
+    if (d.draft) {
+        if (opButton(@src(), "Ready for review", "pr:ready")) requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
+        return;
+    }
+    if (mergeUnknown(d) or t.running > 0) return;
+    if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) return;
+    var num: [12]u8 = undefined;
+    if (opButton(@src(), "Merge…", "pr:merge")) ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
+}
+
+/// The base merged into the request's branch, on GitHub — refused there if
+/// the branch moved since it was shown — then the request read again once
+/// GitHub has had the time.
+fn updateRequestBranch(d: pr.Detail) void {
+    var path: [512]u8 = undefined;
+    const body = if (d.head_sha.len > 0)
+        std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"expected_head_sha\":\"{s}\"}}", .{d.head_sha}) catch "{}"
+    else
+        "{}";
+    requestApi("Updating the branch", "PUT", apiPath(&path, "/pulls/{d}/update-branch", .{d.number}), body, .none);
+    api_fetch_after = true;
+    pr_reread_at = frame_now_s + PR_REREAD_S;
+}
+
+/// When to read the open request again: GitHub answers "update branch"
+/// before it has done it. 0 for never.
+var pr_reread_at: i64 = 0;
+const PR_REREAD_S = 4;
+
+/// Whether GitHub has yet to say if the request can merge.
+fn mergeUnknown(d: pr.Detail) bool {
+    return std.mem.eql(u8, d.mergeable, "UNKNOWN") or std.mem.eql(u8, d.merge_state, "UNKNOWN");
+}
+
+/// When the open request's mergeability was last asked for again.
+var pr_recheck_s: i64 = 0;
+const PR_RECHECK_S = 3;
 
 /// The tabs under the head: the conversation, the commits, the files, the
 /// checks, each with how many.
@@ -6152,10 +6981,24 @@ fn shortcuts() void {
         };
         if (ke.action == .up) continue;
 
+        // In a conflicted file the keys answer it — before the history's
+        // arrows below, which would otherwise take ↑ and ↓. Only where it
+        // is on screen: not from the requests' view over it.
+        if (active_view == .graph and isConflictView() and !typing() and conflictKey(ke)) {
+            e.handled = true;
+            continue;
+        }
+        // Over the requests: ↑ ↓ (or k j) along the list, 1 to 4 for its tabs.
+        if (active_view == .pulls and !new_tab_open and !typing() and pullsKey(ke)) {
+            e.handled = true;
+            continue;
+        }
+
         // Up and down walk the history the way they walk a mail list: the pane
         // on the right follows, which is the whole point of reading a diff.
-        // The only keys held down to repeat.
-        if (pressed(ke, .up, false) or pressed(ke, .down, false)) {
+        // The only keys held down to repeat. Not over the pull requests,
+        // which hide the history: there they would move it out of sight.
+        if (active_view == .graph and (pressed(ke, .up, false) or pressed(ke, .down, false))) {
             e.handled = true;
             stepCommit(if (ke.code == .up) -1 else 1);
             continue;
@@ -6206,11 +7049,21 @@ fn shortcuts() void {
 
         const Run = *const fn () void;
         const chord: ?Run = blk: {
+            if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and active_view == .pulls) break :blk struct {
+                fn f() void {
+                    // The review box's text, as a comment: the button that
+                    // needs nothing more.
+                    if (std.mem.trim(u8, pr_comment.items, " \n\t").len > 0) prAnswer(.comment);
+                }
+            }.f;
             if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and canCommit()) break :blk struct {
                 fn f() void {
                     requestAction(.commit);
                 }
             }.f;
+            // With nothing to commit, the same keys go on with what is under
+            // way once its conflicts are answered.
+            if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and canContinue()) break :blk requestContinue;
             if (pressed(ke, .f5, false) or pressed(ke, .r, true)) break :blk struct {
                 fn f() void {
                     requestAction(.refresh);
@@ -6246,6 +7099,12 @@ fn shortcuts() void {
             // Ctrl+F: the commit search, where the graph is up.
             if (pressed(ke, .f, true)) break :blk struct {
                 fn f() void {
+                    // The search of what is on screen: the requests' in their
+                    // view, not the hidden graph's.
+                    if (active_view == .pulls) {
+                        if (dvui.tagGet("pr_search")) |field| dvui.focusWidget(field.id, null, null);
+                        return;
+                    }
                     search_open = true;
                     if (dvui.tagGet("commit_filter")) |field| dvui.focusWidget(field.id, null, null);
                 }
@@ -6286,6 +7145,81 @@ fn shortcuts() void {
             run_it();
         }
     }
+}
+
+/// The requests' keys: ↑ ↓ or k j along the list, held to repeat; 1 2 3 4
+/// for the conversation, the commits, the files and the checks.
+fn pullsKey(ke: dvui.Event.Key) bool {
+    if (pressed(ke, .down, false) or pressed(ke, .j, false)) {
+        stepRequest(1);
+        return true;
+    }
+    if (pressed(ke, .up, false) or pressed(ke, .k, false)) {
+        stepRequest(-1);
+        return true;
+    }
+    if (ke.action != .down) return false;
+    const tabs = [_]struct { dvui.enums.Key, PrTab }{ .{ .one, .conversation }, .{ .two, .commits }, .{ .three, .files }, .{ .four, .checks } };
+    for (tabs) |tab| if (pressed(ke, tab[0], false)) {
+        pr_tab = tab[1];
+        return true;
+    };
+    return false;
+}
+
+/// The conflict view's keys, GitComet's way: ↑ ↓ or F2 F3 from region to
+/// region, 1 2 3 keep the left side, the right one or both, U or Ctrl+Z take
+/// the last pick back, Enter stages a file with nothing left in it and goes
+/// to the next, F4 goes to the next conflicted file. True when one was it.
+fn conflictKey(ke: dvui.Event.Key) bool {
+    const step: i2 = if (pressed(ke, .down, false) or pressed(ke, .f3, false) or pressed(ke, .j, false))
+        1
+    else if (pressed(ke, .up, false) or pressed(ke, .f2, false) or pressed(ke, .k, false))
+        -1
+    else
+        0;
+    if (step != 0) {
+        moveConflictFocus(step);
+        return true;
+    }
+    // Picks and stages once per press: a held key is not five picks.
+    if (ke.action != .down) return false;
+    if (pressed(ke, .one, false) or pressed(ke, .kp_1, false)) return pickFocused(.ours);
+    if (pressed(ke, .two, false) or pressed(ke, .kp_2, false)) return pickFocused(.theirs);
+    if (pressed(ke, .three, false) or pressed(ke, .kp_3, false)) return pickFocused(.both);
+    if (pressed(ke, .u, false) or pressed(ke, .z, true)) {
+        // Ctrl+Z here never reaches the reflog's undo: mid-merge it would
+        // reset under it.
+        if (resolve_undo.items.len > 0) requestAction(.undo_resolve);
+        return true;
+    }
+    if ((pressed(ke, .enter, false) or pressed(ke, .kp_enter, false)) and conflicts.len == 0 and !conflict_binary and
+        conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them)
+    {
+        requestAction(.stage_next);
+        return true;
+    }
+    if (pressed(ke, .f4, false)) {
+        openNextConflict();
+        return true;
+    }
+    return false;
+}
+
+fn moveConflictFocus(step: i2) void {
+    if (conflicts.len == 0) return;
+    if (step > 0) {
+        conflict_focus = @min(conflict_focus + 1, conflicts.len - 1);
+    } else {
+        conflict_focus -|= 1;
+    }
+    conflict_reveal = true;
+}
+
+fn pickFocused(side: git.ConflictSide) bool {
+    if (conflict_focus >= conflicts.len) return false;
+    requestResolve(conflict_focus, side);
+    return true;
 }
 
 /// The tab `delta` along from the one shown, across groups, round the ends.
@@ -6489,14 +7423,22 @@ fn titlebar() void {
         if (toolbarButton(@src(), "Fetch", dvui.entypo.cw, 0)) {
             requestNetwork("Fetching", fetchAllArgs(false));
         }
-        if (toolbarButton(@src(), "Pull", dvui.entypo.download, tracking.behind)) {
+        // After a rebase the branch and its upstream have parted: a plain
+        // push is refused, and Pull would merge the old commits back in.
+        // Push says what it has to be, and Pull keeps its count quiet.
+        const rebased = rebasedSinceUpstream();
+        if (toolbarButton(@src(), "Pull", dvui.entypo.download, if (rebased) 0 else tracking.behind)) {
             requestNetwork("Pulling", &.{"pull"});
         }
         pullMenu();
-        if (toolbarButton(@src(), "Push", dvui.entypo.upload, tracking.ahead)) {
-            // A branch with no upstream yet gets one, on the default remote —
-            // otherwise the first push of every new branch is an error message.
-            requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+        if (toolbarButtonTagged(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, tracking.ahead, "toolbar:Push")) {
+            if (rebased) {
+                ask(.force_push, "");
+            } else {
+                // A branch with no upstream yet gets one, on the default remote —
+                // otherwise the first push of every new branch is an error message.
+                requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+            }
         }
         // After Push, what comes after pushing a branch: the repository's
         // pull requests, where it is on a host Zit speaks to.
@@ -6531,6 +7473,16 @@ fn titlebar() void {
         // Kept for the width it holds: the buttons stay centred over the
         // history, not over the window.
     }
+}
+
+/// The branch was rebased since it was last pushed: it and its upstream
+/// each have commits the other lacks, and the last thing to move it was a
+/// rebase.
+fn rebasedSinceUpstream() bool {
+    const h = history orelse return false;
+    if (h.state != .none or h.tracking.ahead == 0 or h.tracking.behind == 0) return false;
+    const move = h.last_move orelse return false;
+    return std.mem.startsWith(u8, move.message, "rebase") or std.mem.startsWith(u8, move.message, "pull --rebase");
 }
 
 /// The repository's pull requests, in the toolbar: how many are open on its
@@ -6586,9 +7538,13 @@ fn toolbarDivider(src: std.builtin.SourceLocation, id: usize) void {
 const DropButton = struct {
     bar: *dvui.MenuWidget,
     item: *dvui.MenuItemWidget,
+    /// The menu's least width: a picker's is its field's.
+    min_w: f32 = 0,
 
     fn begin(src: std.builtin.SourceLocation, opts: dvui.Options) DropButton {
-        const bar = dvui.menu(src, .horizontal, .{ .background = false, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = dvui.Rect.all(0) });
+        // Centred on the line, unless told otherwise: in a column, under a
+        // caption, a centred one would sit over it.
+        const bar = dvui.menu(src, .horizontal, .{ .id_extra = opts.id_extra, .background = false, .gravity_y = opts.gravity_y orelse 0.5, .expand = opts.expand, .padding = dvui.Rect.all(0), .margin = dvui.Rect.all(0) });
         return .{ .bar = bar, .item = dvui.menuItem(@src(), .{ .submenu = true }, opts) };
     }
 
@@ -6604,6 +7560,7 @@ const DropButton = struct {
             .color_border = .{ .color = style.border() },
             .corners = style.radius.popover,
             .padding = dvui.Rect.all(style.space.xs),
+            .min_size_content = .{ .w = self.min_w },
         });
     }
 
@@ -6649,7 +7606,9 @@ var switch_filter: std.ArrayList(u8) = .empty;
 /// every other — local first, then the remotes', a filter over them all.
 fn branchSwitcher() void {
     const detached = if (history) |h| h.head == null else false;
-    const head: []const u8 = if (history) |h| h.head orelse "detached HEAD" else "";
+    // Mid-rebase HEAD is detached, but the branch being rebased is still
+    // the one being worked on: its name, not "detached HEAD".
+    const head: []const u8 = if (history) |h| h.head orelse (if (op_info.branch.len > 0) op_info.branch else "detached HEAD") else "";
     const button = DropButton.begin(@src(), .{
         .tag = "toolbar:branch",
         .gravity_y = 0.5,
@@ -7658,6 +8617,26 @@ fn keysDialog() void {
         var card = shortcutCard(@src(), 2);
         defer card.deinit();
         shortcutRow(@src(), "Ctrl+Enter", "Commit what is staged");
+        shortcutRow(@src(), "Ctrl+Enter", "Continue a merge or rebase, its conflicts resolved");
+    }
+    settingsGroup(@src(), 0, "Conflicts");
+    {
+        var card = shortcutCard(@src(), 5);
+        defer card.deinit();
+        shortcutRow(@src(), "↑ ↓, F2 F3", "Previous / next conflict in the file");
+        shortcutRow(@src(), "1, 2, 3", "Keep the left side, the right one, or both");
+        shortcutRow(@src(), "U, Ctrl+Z", "Take the last pick back");
+        shortcutRow(@src(), "Enter", "Stage a resolved file and open the next");
+        shortcutRow(@src(), "F4", "Next conflicted file");
+    }
+    settingsGroup(@src(), 0, "Pull requests");
+    {
+        var card = shortcutCard(@src(), 6);
+        defer card.deinit();
+        shortcutRow(@src(), "↑ ↓, K J", "Previous / next request in the list");
+        shortcutRow(@src(), "1, 2, 3, 4", "Conversation, commits, files, checks");
+        shortcutRow(@src(), "Ctrl+F", "Search the requests");
+        shortcutRow(@src(), "Ctrl+Enter", "Send what is in the review box, as a comment");
     }
     settingsGroup(@src(), 0, "Panels");
     {
@@ -8111,9 +9090,14 @@ const Command = struct {
     keys: []const u8 = "",
     /// Hidden with no repository open, where it would do nothing.
     needs_repo: bool = true,
+    /// Shown only while this says it can run.
+    when: ?*const fn () bool = null,
 };
 
 const commands = [_]Command{
+    .{ .name = "Continue the merge or rebase", .icon = dvui.entypo.controller_play, .keys = "Ctrl+Enter", .when = canContinue, .run = requestContinue },
+    .{ .name = "Skip the commit it stopped on", .icon = dvui.entypo.controller_next, .when = canSkip, .run = requestSkipStep },
+    .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = midOperation, .run = requestAbortOperation },
     .{ .name = "Fetch all remotes", .icon = dvui.entypo.cw, .run = struct {
         fn f() void {
             requestNetwork("Fetching", fetchAllArgs(false));
@@ -8168,7 +9152,7 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Stage everything", .icon = dvui.entypo.squared_plus, .run = struct {
         fn f() void {
-            request(&.{ "add", "-A" });
+            requestStageAll();
         }
     }.f },
     .{ .name = "Unstage everything", .icon = dvui.entypo.squared_minus, .run = struct {
@@ -8305,6 +9289,7 @@ fn palette() void {
     for (commands, 0..) |cmd, i| {
         if (n == PALETTE_ROWS) break;
         if (cmd.needs_repo and repo == null) continue;
+        if (cmd.when) |can| if (!can()) continue;
         if (!fuzzy(cmd.name, needle)) continue;
         items[n] = .{ .command = i };
         labels[n] = cmd.name;
@@ -9419,42 +10404,184 @@ fn progressBanner() void {
     var bar = noticeBar(@src(), style.get().yellow);
     defer bar.deinit();
 
-    dvui.label(@src(), "{s}", .{h.state.label()}, .{
+    var title_buf: [256]u8 = undefined;
+    dvui.label(@src(), "{s}", .{opTitle(&title_buf)}, .{
         .font = style.smallBold(),
         .color_text = .{ .color = style.text() },
         .gravity_y = 0.5,
+        .margin = .{ .w = style.space.md },
+        .padding = dvui.Rect.all(0),
+    });
+    dvui.label(@src(), "{s}", .{opDetail()}, .{
+        .font = style.small(),
+        .color_text = .{ .color = style.textMuted() },
+        .gravity_y = 0.5,
+        .expand = .horizontal,
+        .max_size_content = .width(0),
         .padding = dvui.Rect.all(0),
     });
 
-    const pending = conflictCount();
-    if (pending > 0) {
-        dvui.label(@src(), "— {d} conflicted file{s} to resolve, then stage", .{
-            pending,
-            plural(pending),
-        }, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.textMuted() },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = dvui.Rect.all(0),
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    // Bisect and `git am` have no uniform continue/abort pair; the label alone
-    // is still worth showing for those.
+    // Bisect and `git am` have no uniform continue/abort pair; the words
+    // alone are still worth showing for those.
     const cmd = h.state.command() orelse return;
 
-    // `core.editor=true` so `--continue` does not stop on an editor with
-    // nowhere to open: `true` exits 0, and git keeps the message it already has.
-    if (linkButton(@src(), "Continue", style.accent())) {
-        request(&.{ "-c", "core.editor=true", cmd, "--continue" });
+    // Abort and Skip on the left, quieter; the next thing to do last, filled.
+    const next = opNext();
+    if (linkButtonTagged(@src(), "Abort", style.danger(), "op:abort")) requestAbortOperation();
+    if (canSkip() and next != .skip) {
+        if (linkButtonTagged(@src(), "Skip", style.textMuted(), "op:skip")) requestSkipStep();
     }
-    if (h.state == .rebase) {
-        if (linkButton(@src(), "Skip", style.textMuted())) request(&.{ cmd, "--skip" });
+    switch (next) {
+        .resolve => {
+            const viewing = viewingConflict();
+            if (!viewing or conflictCount() > 1) {
+                var buf: [64]u8 = undefined;
+                const caption = if (viewing) "Next conflicted file" else std.fmt.bufPrint(&buf, "Resolve the conflicts ({d})", .{conflictCount()}) catch "Resolve the conflicts";
+                if (opButton(@src(), caption, "op:resolve")) openNextConflict();
+            }
+        },
+        // Nothing left of the commit once its conflicts were answered: git
+        // refuses to continue with it, and skipping it loses nothing.
+        .skip => if (opButton(@src(), "Skip this empty commit", "op:skip")) requestLocal("Skipping", &.{ cmd, "--skip" }),
+        .proceed => if (opButton(@src(), "Continue — Ctrl+Enter", "op:continue")) requestContinue(),
     }
-    if (linkButton(@src(), "Abort", style.danger())) request(&.{ cmd, "--abort" });
+}
+
+/// The strip's one filled button: the next thing to do.
+fn opButton(src: std.builtin.SourceLocation, caption: []const u8, tag: []const u8) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{ .draw_focus = false }, .{
+        .tag = tag,
+        .background = true,
+        .color_fill = .{ .color = style.accent() },
+        .color_fill_hover = .{ .color = style.accentHover() },
+        .corners = style.radius.input,
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = 3, .w = style.space.md, .h = 3 },
+    });
+    defer bw.deinit();
+    bw.processEvents();
+    bw.drawBackground();
+    dvui.label(@src(), "{s}", .{caption}, .{
+        .font = style.smallBold(),
+        .color_text = .{ .color = style.textOnAccent() },
+        .padding = dvui.Rect.all(0),
+    });
+    return bw.clicked();
+}
+
+/// "Rebasing feat onto main", "Merging feature/x into main": the strip's
+/// title, in the names the branches go by.
+fn opTitle(buf: []u8) []const u8 {
+    const h = history orelse return "";
+    const o = op_info;
+    return switch (h.state) {
+        .rebase => if (o.branch.len > 0 and o.onto.len > 0)
+            std.fmt.bufPrint(buf, "Rebasing {s} onto {s}", .{ o.branch, o.onto }) catch "Rebasing"
+        else if (o.onto.len > 0)
+            std.fmt.bufPrint(buf, "Rebasing onto {s}", .{o.onto}) catch "Rebasing"
+        else
+            "Rebasing",
+        .merge => std.fmt.bufPrint(buf, "Merging {s} into {s}", .{ o.theirs, o.ours }) catch "Merging",
+        .cherrypick => if (o.commit.len > 0) std.fmt.bufPrint(buf, "Cherry-picking {s} onto {s}", .{ o.commit, o.ours }) catch "Cherry-picking" else "Cherry-picking",
+        .revert => if (o.commit.len > 0) std.fmt.bufPrint(buf, "Reverting {s} on {s}", .{ o.commit, o.ours }) catch "Reverting" else "Reverting",
+        else => h.state.label(),
+    };
+}
+
+/// After the title: how far along, which commit it stopped on, how many
+/// files wait — each where git says so. In the frame's arena.
+fn opDetail() []const u8 {
+    const h = history orelse return "";
+    const a = dvui.currentWindow().arena();
+    var out: std.ArrayList(u8) = .empty;
+    const o = op_info;
+    if (o.total > 0) out.print(a, "step {d} of {d}", .{ @min(o.step, o.total), o.total }) catch {};
+    if (h.state == .rebase and o.commit.len > 0) {
+        if (out.items.len > 0) out.appendSlice(a, "  ·  ") catch {};
+        out.print(a, "{s} {s}", .{ o.commit, o.subject }) catch {};
+    } else if ((h.state == .cherrypick or h.state == .revert) and o.subject.len > 0) {
+        if (out.items.len > 0) out.appendSlice(a, "  ·  ") catch {};
+        out.appendSlice(a, o.subject) catch {};
+    }
+    if (out.items.len > 0) out.appendSlice(a, "  ·  ") catch {};
+    const n = conflictCount();
+    if (n > 0) {
+        out.print(a, "{d} conflicted file{s}", .{ n, plural(n) }) catch {};
+    } else {
+        out.appendSlice(a, "no conflict left") catch {};
+    }
+    return out.items;
+}
+
+/// What the strip's filled button does next.
+const OpNext = enum { resolve, skip, proceed };
+
+fn opNext() OpNext {
+    if (conflictCount() > 0) return .resolve;
+    const h = history orelse return .proceed;
+    const w = work orelse return .proceed;
+    // A merge with nothing to add still makes its merge commit.
+    if (h.state != .merge and w.staged.len == 0) return .skip;
+    return .proceed;
+}
+
+/// Skip goes with the operations that replay one commit after another.
+fn canSkip() bool {
+    const h = history orelse return false;
+    return h.state == .rebase or h.state == .cherrypick or h.state == .revert;
+}
+
+/// A merge, rebase, cherry-pick or revert is under way: starting another is
+/// refused by git, and offered by nothing.
+fn midOperation() bool {
+    const h = history orelse return false;
+    return h.state.command() != null;
+}
+
+/// Continue, once every conflict is answered and there is something to go
+/// on with: the filled button, Ctrl+Enter and the palette.
+fn canContinue() bool {
+    return midOperation() and opNext() == .proceed;
+}
+
+/// `core.editor=true`: `--continue` does not stop on an editor with nowhere
+/// to open — `true` exits 0, and git keeps the message it already has. A
+/// job, as a commit is: it may run hooks and sign.
+fn requestContinue() void {
+    const cmd = operationCommand() orelse return;
+    requestLocal("Continuing", &.{ "-c", "core.editor=true", cmd, "--continue" });
+}
+
+/// Whether the file open is one of the conflicted ones.
+fn viewingConflict() bool {
+    return switch (selection) {
+        .change => |side| side == .unstaged and selectedStatus(.unstaged) == .conflicted,
+        else => false,
+    };
+}
+
+/// The conflicted file after the one open, round the end — the first when
+/// none is open.
+fn openNextConflict() void {
+    const w = work orelse return;
+    const open: []const u8 = if (viewingConflict()) selected_path.items else "";
+    var first: ?[]const u8 = null;
+    var past = open.len == 0;
+    for (w.unstaged) |change| {
+        if (change.status != .conflicted) continue;
+        if (first == null) first = change.path;
+        if (past and !std.mem.eql(u8, change.path, open)) {
+            active_view = .graph;
+            return selectChange(change.path, .unstaged);
+        }
+        if (std.mem.eql(u8, change.path, open)) past = true;
+    }
+    if (first) |p| {
+        active_view = .graph;
+        selectChange(p, .unstaged);
+    }
 }
 
 /// The shared shape of the two bars under the toolbar: a strip in a colour that
@@ -9488,29 +10615,62 @@ fn confirmBar() void {
         .reset_hard => std.fmt.bufPrint(&buf, "Reset to {s} and throw away every local change?", .{short}),
         .stash_drop => std.fmt.bufPrint(&buf, "Delete stash {s}? Nothing gets it back.", .{short}),
         .discard_hunk => "Discard this hunk from the working copy?",
-        .force_push => "Overwrite the remote branch with yours? Refused if it moved since your last fetch.",
+        .force_push => forcePushText(&buf),
         .delete_branch_force => std.fmt.bufPrint(&buf, "Delete {s}, with commits no other branch has?", .{c.arg}),
         .merge_request => std.fmt.bufPrint(&buf, "Merge #{s}? It goes into its base branch on the server, for everyone.", .{c.arg}),
         .close_request => std.fmt.bufPrint(&buf, "Close #{s} without merging it?", .{c.arg}),
         .sign_out => std.fmt.bufPrint(&buf, "Sign out of GitHub as {s}? Pull requests and issues stop until you sign in again.", .{c.arg}),
+        .stage_markers => if (c.arg.len == 0)
+            "Stage everything? Some conflicted files still have conflict markers, and git would take them as resolved."
+        else
+            std.fmt.bufPrint(&buf, "Stage {s} with its conflict markers still in it? git would take them as the resolution.", .{c.arg}),
+        .abort_operation => abortText(&buf),
+        .skip_step => "Skip the commit the rebase stopped on? It is left out of the rebased branch.",
+        .restart_file => std.fmt.bufPrint(&buf, "Start {s} over? Every pick made in it goes, and its conflicts come back as git left them.", .{c.arg}),
         .remove_worktree => std.fmt.bufPrint(&buf, "Remove the worktree at {s}, and its folder?", .{c.arg}),
         .delete_remote_branch, .delete_remote_tag => std.fmt.bufPrint(&buf, "Delete {s} on the remote, for everyone?", .{c.arg}),
         .restore_file => std.fmt.bufPrint(&buf, "Replace your copy of {s} with this commit's?", .{
             if (std.mem.indexOfScalar(u8, c.arg, ' ')) |sep| c.arg[sep + 1 ..] else c.arg,
         }),
     } catch "Are you sure? This cannot be undone.";
+    // Across what the buttons leave: no wider than that, so a long question
+    // is cut rather than pushing them off — and never narrower, or it is
+    // not there at all.
     dvui.label(@src(), "{s}", .{text}, .{
         .font = style.small(),
         .color_text = .{ .color = style.text() },
         .gravity_y = 0.5,
+        .expand = .horizontal,
         .max_size_content = .width(0),
         .padding = dvui.Rect.all(0),
     });
 
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
     if (linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
     if (linkButtonTagged(@src(), "Yes, do it", style.danger(), "confirm:yes")) requestAction(.confirmed);
+}
+
+/// What a force push replaces, in commits: after a rebase the upstream's go
+/// and the branch's own take their place.
+fn forcePushText(buf: []u8) []const u8 {
+    const plain = "Overwrite the remote branch with yours? Refused if it moved since your last fetch.";
+    const h = history orelse return plain;
+    const t = h.tracking;
+    const upstream = t.upstream orelse return plain;
+    if (t.behind == 0) return plain;
+    return std.fmt.bufPrint(buf, "Replace {s} with your branch? Its {d} commit{s} there give way to your {d}. Refused if it moved since your last fetch.", .{ upstream, t.behind, plural(t.behind), t.ahead }) catch plain;
+}
+
+/// "Abort the rebase? …": what an abort puts back, and what it loses.
+fn abortText(buf: []u8) []const u8 {
+    const h = history orelse return "Abort?";
+    const what: []const u8 = switch (h.state) {
+        .merge => "the merge",
+        .rebase => "the rebase",
+        .cherrypick => "the cherry-pick",
+        .revert => "the revert",
+        else => "it",
+    };
+    return std.fmt.bufPrint(buf, "Abort {s}? The branch goes back to where it was before, and the conflicts resolved so far are lost.", .{what}) catch "Abort?";
 }
 
 /// The one-field bar for the handful of commands that need a name first.
@@ -10170,61 +11330,216 @@ fn refsSidebar() void {
 /// A merge or rebase under way, over the branches: what it is, how much is
 /// left, and the way on — continue, skip, or abort.
 fn mergeSidebar() void {
-    const h = history orelse return;
+    const w = work orelse return;
     const pending = conflictCount();
 
-    // What is under way, and how far along.
-    {
-        var card = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .corners = style.radius.input,
-            .padding = dvui.Rect.all(style.space.md),
-            .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
-        });
-        defer card.deinit();
-        dvui.label(@src(), "{s}{s}{s}", .{ h.state.label(), if (h.head != null) " on " else "", h.head orelse "" }, .{
+    var card = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surfaceRaised() },
+        .corners = style.radius.input,
+        .padding = dvui.Rect.all(style.space.md),
+        .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
+    });
+    defer card.deinit();
+
+    if (pending > 0) {
+        dvui.label(@src(), "{d} conflicted file{s}", .{ pending, plural(pending) }, .{
             .font = style.bodyBold(),
             .color_text = .{ .color = style.text() },
-            .expand = .horizontal,
-            .max_size_content = .width(0),
+            .padding = dvui.Rect.all(0),
+            .margin = .{ .h = style.space.xs },
+        });
+    } else {
+        dvui.label(@src(), "Every conflict is resolved", .{}, .{
+            .font = style.bodyBold(),
+            .color_text = .{ .color = style.success() },
             .padding = dvui.Rect.all(0),
         });
-        if (pending > 0) {
-            dvui.label(@src(), "{d} conflict{s} left to resolve", .{ pending, plural(pending) }, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.get().yellow },
-                .margin = .{ .y = style.space.xs },
-                .padding = dvui.Rect.all(0),
-            });
-        } else {
-            dvui.label(@src(), "Every conflict is resolved", .{}, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.success() },
-                .margin = .{ .y = style.space.xs },
-                .padding = dvui.Rect.all(0),
-            });
-        }
-
-        // Continue only once nothing is left: git would refuse anyway, and
-        // a button that cannot work is not offered.
-        if (h.state.command()) |cmd| {
-            var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
-            defer line.deinit();
-            if (pending == 0) {
-                if (dialogButton(@src(), "Continue", true)) request(&.{ "-c", "core.editor=true", cmd, "--continue" });
-            }
-            if (h.state == .rebase) {
-                if (dialogButton(@src(), "Skip", false)) request(&.{ cmd, "--skip" });
-            }
-            if (dialogButton(@src(), "Abort", false)) request(&.{ cmd, "--abort" });
-        }
+        if (canContinue()) dvui.label(@src(), "Continue from the bar above — Ctrl+Enter", .{}, .{
+            .font = style.small(),
+            .color_text = .{ .color = style.textMuted() },
+            .margin = .{ .y = style.space.xs },
+            .padding = dvui.Rect.all(0),
+        });
     }
 
-    // The files themselves are in the changes list on the right — the
-    // conflicted ones unstaged, the resolved and clean ones staged — which is
-    // where they are opened and staged from.
+    // Each one a click away: the list the resolving goes down.
+    for (w.unstaged, 0..) |change, i| {
+        if (change.status != .conflicted) continue;
+        conflictFileRow(i, change.path);
+    }
+}
+
+/// A conflicted file in the sidebar's card: lit while it is the one open.
+fn conflictFileRow(id: usize, path: []const u8) void {
+    const open = viewingConflict() and std.mem.eql(u8, selected_path.items, path);
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{ .draw_focus = false }, .{
+        .id_extra = id,
+        .tag = frameTag("conflict_file", path),
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = if (open) style.accentDim() else style.surfaceRaised() },
+        .color_fill_hover = .{ .color = if (open) style.accentDim() else style.rowHover() },
+        .corners = style.radius.input,
+        .margin = .{ .y = 2 },
+        .padding = .{ .x = style.space.sm, .y = 5, .w = style.space.sm, .h = 5 },
+    });
+    defer bw.deinit();
+    bw.processEvents();
+    bw.drawBackground();
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer row.deinit();
+        dvui.icon(@src(), "conflict_icon", dvui.entypo.warning, .{ .fill_color = .{ .color = style.get().yellow } }, .{
+            .min_size_content = .{ .w = 11, .h = 11 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.sm },
+        });
+        var buf: [MAX_SHOWN_LINE]u8 = undefined;
+        dvui.label(@src(), "{s}", .{fitText(&buf, path, style.small(), 170)}, .{
+            .font = style.small(),
+            .color_text = .{ .color = if (open) style.accent() else style.text() },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+    }
+    if (bw.clicked()) selectChange(path, .unstaged);
+}
+
+// === An operation under way ===
+//
+// What git keeps on disk while a merge, rebase, cherry-pick or revert waits
+// on you, read into words: which branch, onto what, how far along, which
+// commit it stopped on — and a conflict's two sides by their names rather
+// than "ours" and "theirs", which a rebase turns round.
+
+const OpInfo = struct {
+    /// The branch a rebase replays, or the one a merge goes into.
+    branch: []const u8 = "",
+    /// Where a rebase replays onto: a branch's name where one points there.
+    onto: []const u8 = "",
+    /// 1-based, and how many in all; 0 where git keeps no count.
+    step: u32 = 0,
+    total: u32 = 0,
+    /// The commit being applied, picked, reverted or merged in: short sha
+    /// and subject.
+    commit: []const u8 = "",
+    subject: []const u8 = "",
+    /// A conflict's two sides, as the conflict view names them.
+    ours: []const u8 = "ours",
+    theirs: []const u8 = "theirs",
+    /// What "theirs" is mid-rebase: the commit being replayed.
+    theirs_role: []const u8 = "",
+};
+
+var op_info: OpInfo = .{};
+/// What `op_info`'s words live in; emptied each time it is read.
+var op_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+
+/// Read with the history, which every step of an operation reads again.
+fn readOpInfo() void {
+    _ = op_arena.reset(.retain_capacity);
+    op_info = .{};
+    const r = repo orelse return;
+    const h = history orelse return;
+    const a = op_arena.allocator();
+    const head = a.dupe(u8, h.head orelse "HEAD") catch "HEAD";
+    switch (h.state) {
+        .rebase => {
+            const dir: []const u8 = if (gitText(a, r, "rebase-merge/head-name") != null) "rebase-merge/" else "rebase-apply/";
+            const merge_backend = std.mem.eql(u8, dir, "rebase-merge/");
+            if (gitTextIn(a, r, dir, "head-name")) |t| op_info.branch = git.headName(t) orelse "";
+            if (gitTextIn(a, r, dir, "onto")) |t| if (git.oidFromHex(t[0..@min(40, t.len)])) |id| {
+                op_info.onto = refNameAt(a, id);
+            };
+            op_info.step = gitNumber(a, r, dir, if (merge_backend) "msgnum" else "next");
+            op_info.total = gitNumber(a, r, dir, if (merge_backend) "end" else "last");
+            if (gitText(a, r, "REBASE_HEAD") orelse gitTextIn(a, r, dir, "stopped-sha")) |t| setOpCommit(a, r, t);
+            op_info.ours = if (op_info.onto.len > 0) op_info.onto else "the base";
+            op_info.theirs = if (op_info.branch.len > 0) op_info.branch else if (op_info.commit.len > 0) op_info.commit else "your commit";
+            op_info.theirs_role = if (op_info.commit.len > 0)
+                std.fmt.allocPrint(a, "your commit {s}, replayed", .{op_info.commit}) catch "your commit, replayed"
+            else
+                "your commit, replayed";
+        },
+        .merge => {
+            op_info.branch = head;
+            if (gitText(a, r, "MERGE_HEAD")) |t| setOpCommit(a, r, t);
+            const source = if (gitText(a, r, "MERGE_MSG")) |m| git.mergeSource(m) else null;
+            op_info.ours = head;
+            op_info.theirs = source orelse if (op_info.commit.len > 0) op_info.commit else "theirs";
+        },
+        .cherrypick, .revert => {
+            op_info.branch = head;
+            if (gitText(a, r, if (h.state == .cherrypick) "CHERRY_PICK_HEAD" else "REVERT_HEAD")) |t| setOpCommit(a, r, t);
+            op_info.ours = head;
+            op_info.theirs = if (op_info.commit.len > 0) op_info.commit else "theirs";
+        },
+        else => {},
+    }
+}
+
+/// A small file git keeps under the repository's git directory, trimmed;
+/// null when it is not there.
+fn gitText(a: std.mem.Allocator, r: git.Repo, rel: []const u8) ?[]const u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const p = std.fmt.bufPrint(&buf, "{s}{s}", .{ r.gitdir(), rel }) catch return null;
+    const text = std.Io.Dir.cwd().readFileAlloc(app_io, p, a, .limited(64 * 1024)) catch return null;
+    return std.mem.trim(u8, text, " \t\r\n");
+}
+
+fn gitTextIn(a: std.mem.Allocator, r: git.Repo, dir: []const u8, name: []const u8) ?[]const u8 {
+    var buf: [128]u8 = undefined;
+    const rel = std.fmt.bufPrint(&buf, "{s}{s}", .{ dir, name }) catch return null;
+    return gitText(a, r, rel);
+}
+
+fn gitNumber(a: std.mem.Allocator, r: git.Repo, dir: []const u8, name: []const u8) u32 {
+    const t = gitTextIn(a, r, dir, name) orelse return 0;
+    return std.fmt.parseInt(u32, t, 10) catch 0;
+}
+
+/// The commit an operation is on, from the sha git wrote: short, with its
+/// subject.
+fn setOpCommit(a: std.mem.Allocator, r: git.Repo, text: []const u8) void {
+    const id = git.oidFromHex(text[0..@min(40, text.len)]) orelse return;
+    var short: [8]u8 = undefined;
+    op_info.commit = a.dupe(u8, git.oidShort(id, &short)) catch "";
+    const message = r.commitMessage(a, id);
+    op_info.subject = message[0 .. std.mem.indexOfScalar(u8, message, '\n') orelse message.len];
+}
+
+/// A branch's name where one points at `id` — a local one first — else its
+/// short sha.
+fn refNameAt(a: std.mem.Allocator, id: git.Oid) []const u8 {
+    const h = history orelse return "";
+    var remote: ?[]const u8 = null;
+    for (h.refs) |ref| {
+        if (!git.oidEql(ref.target, id)) continue;
+        if (ref.kind == .local) return a.dupe(u8, ref.name) catch "";
+        if (ref.kind == .remote and remote == null) remote = ref.name;
+    }
+    if (remote) |n| return a.dupe(u8, n) catch "";
+    var short: [8]u8 = undefined;
+    return a.dupe(u8, git.oidShort(id, &short)) catch "";
+}
+
+/// A conflict's sides as the conflict view says them: whose, and what that
+/// side is. During a rebase "ours" is the base and "theirs" your own commit,
+/// the reverse of what the words suggest.
+const SideNames = struct { ours: []const u8, theirs: []const u8, ours_role: []const u8, theirs_role: []const u8 };
+
+fn sideNames() SideNames {
+    const h = history orelse return .{ .ours = "ours", .theirs = "theirs", .ours_role = "already on this branch", .theirs_role = "coming in" };
+    return switch (h.state) {
+        .rebase => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "the base, rebased onto", .theirs_role = op_info.theirs_role },
+        .merge => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "your branch", .theirs_role = "merging in" },
+        .cherrypick => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "your branch", .theirs_role = "being picked" },
+        .revert => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "your branch", .theirs_role = "the revert" },
+        else => .{ .ours = "ours", .theirs = "theirs", .ours_role = "already on this branch", .theirs_role = "coming in" },
+    };
 }
 
 /// True when this click lands on the same widget as the previous one, soon
@@ -10809,6 +12124,20 @@ var pr_new_body: std.ArrayList(u8) = .empty;
 var pr_new_base: std.ArrayList(u8) = .empty;
 var pr_new_reviewers: std.ArrayList(u8) = .empty;
 var pr_new_draft = false;
+/// The branch it comes from: the one checked out, unless another is picked.
+var pr_new_head: std.ArrayList(u8) = .empty;
+/// Who it is assigned to, and its labels: comma-separated, as picked.
+var pr_new_assignees: std.ArrayList(u8) = .empty;
+var pr_new_labels: std.ArrayList(u8) = .empty;
+/// What is typed over the list of the picker open, and which one that is:
+/// another opening starts with nothing typed.
+var pick_filter: std.ArrayList(u8) = .empty;
+var pick_open: ?usize = null;
+/// The request is being made: the dialog waits on it, then gives way to it.
+var pr_creating = false;
+/// The number GitHub gave the one just made, until the calls after it —
+/// its reviewers, assignees, labels — are done and it can be opened.
+var pr_created: u32 = 0;
 
 fn openPrCreate() void {
     const h = history orelse return;
@@ -10816,7 +12145,10 @@ fn openPrCreate() void {
     pr_new_open = true;
     pr_new_rect = .{};
     pr_new_draft = false;
-    for ([_]*std.ArrayList(u8){ &pr_new_title, &pr_new_body, &pr_new_base, &pr_new_reviewers }) |t| t.clearRetainingCapacity();
+    for ([_]*std.ArrayList(u8){ &pr_new_title, &pr_new_body, &pr_new_base, &pr_new_reviewers, &pr_new_head, &pr_new_assignees, &pr_new_labels }) |t| t.clearRetainingCapacity();
+    pr_new_head.appendSlice(gpa, branch) catch {};
+    // Who can be asked, the labels: read while the form is filled in.
+    pr.loadMeta(repo_path.items);
 
     // The base: what the remote calls its HEAD, "origin/main" -> "main".
     const remote = defaultRemote() orelse "origin";
@@ -10911,47 +12243,53 @@ fn prCreateDialog() void {
     centerModal(fw.data(), win, null);
     dialogHeader(@src(), dvui.entypo.merge, "New pull request", h.head orelse "", &pr_new_open);
 
+    // A fixed width: the description comes filled in with the template and
+    // the commits, and its longest line would otherwise set the dialog's.
+    const width = @min(PR_CREATE_W, win.w - 80);
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = @min(680, win.w - 80) },
+        .min_size_content = .{ .w = width },
+        .max_size_content = .width(width),
         .background = false,
         .padding = dvui.Rect.all(style.space.xl),
     });
     defer body.deinit();
 
+    // The two branches, as GitHub's compare bar has them: into, from.
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        branchPicker(0, "Into", &pr_new_base, .remote);
+        branchPicker(1, "From", &pr_new_head, .local);
+    }
+
     // Pushed first: the host can only open one on a branch it has.
-    const pushed = h.tracking.upstream != null and h.tracking.ahead == 0;
-    if (!pushed) {
+    const head = std.mem.trim(u8, pr_new_head.items, " ");
+    const on_head = if (h.head) |name| std.mem.eql(u8, name, head) else false;
+    const pushed = if (on_head)
+        h.tracking.upstream != null and h.tracking.ahead == 0
+    else
+        remoteHas(head);
+    if (!pushed and head.len > 0) {
         var note = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = true,
             .color_fill = .{ .color = style.tint(style.get().orange) },
-            .border = .{ .x = 3 },
-            .color_border = .{ .color = style.get().orange },
             .corners = style.radius.input,
             .margin = .{ .h = style.space.lg },
             .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
         });
         defer note.deinit();
-        dvui.label(@src(), "{s}", .{if (h.tracking.upstream == null) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first."}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
-        if (dialogButton(@src(), "Push", true)) requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+        const missing = !on_head or h.tracking.upstream == null;
+        dvui.label(@src(), "{s}", .{if (missing) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first."}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
+        if (dialogButton(@src(), "Push", true)) {
+            if (on_head) {
+                requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+            } else if (defaultRemote()) |remote| requestNetwork("Pushing", &.{ "push", "-u", remote, head });
+        }
     }
 
     var entered = false;
     _ = dialogField(@src(), 0, "Title", &pr_new_title, "What it does", true, &entered);
-    {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-        defer line.deinit();
-        {
-            var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .w = style.space.md } });
-            defer cell.deinit();
-            _ = dialogField(@src(), 1, "Into", &pr_new_base, "main", false, &entered);
-        }
-        {
-            var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
-            defer cell.deinit();
-            _ = dialogField(@src(), 2, "Reviewers", &pr_new_reviewers, "logins, separated by commas", false, &entered);
-        }
-    }
     dialogLabel(@src(), "Description");
     {
         const te = textField(@src(), .{
@@ -10959,26 +12297,405 @@ fn prCreateDialog() void {
             .multiline = true,
             .break_lines = true,
             .placeholder = "Why, and how to try it",
-        }, settingsInput().override(.{ .tag = "pr_new:body", .min_size_content = .{ .h = 180 }, .max_size_content = .height(280), .margin = .{ .h = style.space.lg } }));
+        }, settingsInput().override(.{ .tag = "pr_new:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
         te.deinit();
     }
+
+    // Who, and what it is about: GitHub's sidebar, as three pickers.
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
+        defer line.deinit();
+        peoplePicker(2, "Reviewers", &pr_new_reviewers, "Ask for reviews", true, "pr_new:reviewers");
+        peoplePicker(3, "Assignees", &pr_new_assignees, "Assign someone", false, "pr_new:assignees");
+        labelPicker(4, &pr_new_labels, "pr_new:labels");
+    }
+
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
-        _ = dvui.checkbox(@src(), &pr_new_draft, "Open it as a draft", .{ .tag = "pr_new:draft", .font = style.small(), .gravity_y = 0.5 });
+        typePicker(5, &pr_new_draft, "pr_new:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (dialogButton(@src(), "Cancel", false)) pr_new_open = false;
-        if (pushed and dialogButton(@src(), "Create", true)) createRequest();
+        if (pr_creating) {
+            // Waiting on GitHub: what for, and nothing to click twice.
+            loadingSpinner(@src());
+            dvui.label(@src(), "Creating the pull request…", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        } else {
+            if (dialogButton(@src(), "Cancel", false)) pr_new_open = false;
+            if (pushed and dialogButton(@src(), if (pr_new_draft) "Create draft" else "Create pull request", true)) createRequest();
+        }
     }
-    if (escapePressed()) pr_new_open = false;
+    // What GitHub refused, where it was asked.
+    if (!pr_creating) if (command_error) |why| {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.md } });
+        tl.addText(firstLine(why), .{ .font = style.small(), .color_text = .{ .color = style.danger() } });
+        tl.deinit();
+    };
+    if (escapePressed() and pick_open == null and !pr_creating) pr_new_open = false;
+}
+
+/// The create dialog's width: two branches side by side, three pickers.
+const PR_CREATE_W: f32 = 620;
+
+/// Whether the default remote has a branch of that name, as last fetched.
+fn remoteHas(branch: []const u8) bool {
+    const h = history orelse return false;
+    const remote = defaultRemote() orelse return false;
+    for (h.refs) |ref| {
+        if (ref.kind != .remote) continue;
+        const split = splitRemoteRef(ref.name);
+        if (std.mem.eql(u8, split.remote, remote) and std.mem.eql(u8, split.branch, branch)) return true;
+    }
+    return false;
+}
+
+/// A field that drops a list to pick from: what is picked on its face, or
+/// what to do when nothing is. `end` closes it.
+const Picker = struct {
+    button: DropButton,
+    menu: ?*dvui.FloatingMenuWidget,
+    id: usize,
+
+    fn end(self: Picker) void {
+        self.button.end(self.menu);
+    }
+};
+
+fn picker(id: usize, face: []const u8, placeholder: []const u8, tag: []const u8) Picker {
+    var button = DropButton.begin(@src(), .{
+        .id_extra = id,
+        .tag = tag,
+        .expand = .horizontal,
+        .gravity_y = 0,
+        .background = false,
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .corners = style.radius.input,
+        .padding = dvui.Rect.all(0),
+    });
+    const field_w = button.item.data().rect.w;
+    button.min_w = @max(field_w, 240);
+    {
+        const lit = button.item.show_active or button.item.mouse_over;
+        var box = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+        });
+        defer box.deinit();
+        var buf: [MAX_SHOWN_LINE]u8 = undefined;
+        const text = if (face.len > 0) face else placeholder;
+        dvui.label(@src(), "{s}", .{fitText(&buf, text, style.small(), @max(40, field_w - 48))}, .{
+            .font = style.small(),
+            .color_text = .{ .color = if (face.len > 0) style.text() else style.textFaint() },
+            .gravity_y = 0.5,
+            .expand = .horizontal,
+            .max_size_content = .width(0),
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.icon(@src(), "pick_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.xs },
+        });
+    }
+    const menu = button.open();
+    // Opened afresh: nothing typed over its list yet.
+    if (menu != null and pick_open != id) {
+        pick_open = id;
+        pick_filter.clearRetainingCapacity();
+    } else if (menu == null and pick_open == id) pick_open = null;
+    return .{ .button = button, .menu = menu, .id = id };
+}
+
+/// The field typed over a picker's list, and whether `text` gets through it.
+fn pickSearch(placeholder: []const u8) void {
+    focusOnce(searchField(@src(), &pick_filter, placeholder, "pick_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
+}
+
+fn pickShown(text: []const u8, also: []const u8) bool {
+    const needle = std.mem.trim(u8, pick_filter.items, " ");
+    if (needle.len == 0) return true;
+    return std.ascii.indexOfIgnoreCase(text, needle) != null or std.ascii.indexOfIgnoreCase(also, needle) != null;
+}
+
+/// The scrolling list under a picker's search: as tall as it needs, up to
+/// a bound.
+fn pickList() *dvui.ScrollAreaWidget {
+    return dvui.scrollArea(@src(), .{}, .{
+        .expand = .horizontal,
+        .max_size_content = .height(@min(300, dvui.windowRect().h * 0.5)),
+        .background = false,
+    });
+}
+
+/// One row of a picker's list: a tick when picked, a colour where it has
+/// one, its name, what more there is to say of it.
+fn pickRow(id: usize, text: []const u8, sub: []const u8, picked: bool, hue: ?dvui.Color) bool {
+    var mi = dvui.menuItem(@src(), .{}, .{
+        .id_extra = id,
+        .tag = frameTag("pick", text),
+        .expand = .horizontal,
+        .corners = style.radius.input,
+        .color_fill_hover = .{ .color = style.accentDim() },
+        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
+    });
+    defer mi.deinit();
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+    defer row.deinit();
+    dvui.icon(@src(), "pick_tick", dvui.entypo.check, .{ .fill_color = .{ .color = if (picked) style.accent() else dvui.Color.transparent } }, .{
+        .min_size_content = .{ .w = 12, .h = 12 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    if (hue) |c| {
+        var dot = dvui.box(@src(), .{}, .{
+            .background = true,
+            .color_fill = .{ .color = c },
+            .corners = .all(5),
+            .min_size_content = .{ .w = 10, .h = 10 },
+            .max_size_content = .size(.{ .w = 10, .h = 10 }),
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.sm },
+        });
+        dot.deinit();
+    }
+    dvui.label(@src(), "{s}", .{text}, .{
+        .font = if (picked) style.smallBold() else style.small(),
+        .color_text = .{ .color = style.text() },
+        .gravity_y = 0.5,
+        .padding = dvui.Rect.all(0),
+    });
+    if (sub.len > 0) dvui.label(@src(), "{s}", .{sub}, .{
+        .font = style.tiny(),
+        .color_text = .{ .color = style.textFaint() },
+        .gravity_y = 0.5,
+        .expand = .horizontal,
+        .max_size_content = .width(0),
+        .margin = .{ .x = style.space.sm },
+        .padding = dvui.Rect.all(0),
+    });
+    return mi.activeRect() != null;
+}
+
+const BranchSide = enum { remote, local };
+
+/// A branch to pick: the remote's for where it goes, yours for where it
+/// comes from.
+fn branchPicker(id: usize, caption: []const u8, value: *std.ArrayList(u8), side: BranchSide) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .w = if (side == .remote) style.space.md else 0 } });
+    defer cell.deinit();
+    dialogLabel(@src(), caption);
+    const p = picker(id, value.items, "Pick a branch", if (side == .remote) "pr_new:base" else "pr_new:head");
+    defer p.end();
+    const m = p.menu orelse return;
+    const h = history orelse return;
+    pickSearch("Find a branch…");
+    var list = pickList();
+    defer list.deinit();
+    const remote = defaultRemote() orelse "origin";
+    var shown: usize = 0;
+    for (h.refs, 0..) |ref, i| {
+        const name = switch (side) {
+            .remote => blk: {
+                if (ref.kind != .remote) continue;
+                const split = splitRemoteRef(ref.name);
+                if (!std.mem.eql(u8, split.remote, remote) or std.mem.eql(u8, split.branch, "HEAD")) continue;
+                break :blk split.branch;
+            },
+            .local => if (ref.kind == .local) ref.name else continue,
+        };
+        if (!pickShown(name, "")) continue;
+        if (shown >= MAX_BRANCH_CHOICES) break;
+        shown += 1;
+        if (pickRow(i, name, if (side == .local and !remoteHas(name)) "not pushed" else "", std.mem.eql(u8, value.items, name), null)) {
+            value.clearRetainingCapacity();
+            value.appendSlice(gpa, name) catch {};
+            m.close();
+        }
+    }
+    if (shown == 0) dropHeading(@src(), 20, "NO BRANCH BY THAT NAME");
+}
+
+/// People to pick, from those who can be asked on the host: reviewers or
+/// assignees.
+fn peoplePicker(id: usize, caption: []const u8, list: *std.ArrayList(u8), placeholder: []const u8, reviewers: bool, tag: []const u8) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .w = style.space.md } });
+    defer cell.deinit();
+    dialogLabel(@src(), caption);
+    const p = picker(id, list.items, placeholder, tag);
+    defer p.end();
+    _ = p.menu orelse return;
+    _ = peopleRows(list, reviewers);
+}
+
+/// A people picker's list: a field to narrow it, then everyone who can be
+/// asked, ticked where they are in `list` — you are not among the
+/// reviewers of your own request. The login a click toggled, if one did.
+fn peopleRows(list: *std.ArrayList(u8), reviewers: bool) ?[]const u8 {
+    switch (pr.meta_status) {
+        .idle, .loading => {
+            dropHeading(@src(), 0, "LOADING…");
+            return null;
+        },
+        .failed => {
+            dropHeading(@src(), 0, "COULD NOT READ WHO CAN BE ASKED");
+            return null;
+        },
+        .ready => {},
+    }
+    pickSearch("Find someone…");
+    var rows = pickList();
+    defer rows.deinit();
+    var shown: usize = 0;
+    var toggled: ?[]const u8 = null;
+    for (pr.meta.people, 0..) |person, i| {
+        if (reviewers and me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(person.login, me_gh.items)) continue;
+        if (!pickShown(person.login, person.name)) continue;
+        shown += 1;
+        if (pickRow(i, person.login, person.name, listHas(list.items, person.login), null)) {
+            listToggle(list, person.login);
+            toggled = person.login;
+        }
+    }
+    if (shown == 0) dropHeading(@src(), 1, "NOBODY BY THAT NAME");
+    return toggled;
+}
+
+/// The repository's labels, each with its colour and what it is for.
+fn labelPicker(id: usize, list: *std.ArrayList(u8), tag: []const u8) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false });
+    defer cell.deinit();
+    dialogLabel(@src(), "Labels");
+    const p = picker(id, list.items, "Add labels", tag);
+    defer p.end();
+    _ = p.menu orelse return;
+    _ = labelRows(list);
+}
+
+/// A label picker's list; the label a click toggled, if one did.
+fn labelRows(list: *std.ArrayList(u8)) ?[]const u8 {
+    switch (pr.meta_status) {
+        .idle, .loading => {
+            dropHeading(@src(), 0, "LOADING…");
+            return null;
+        },
+        .failed => {
+            dropHeading(@src(), 0, "COULD NOT READ THE LABELS");
+            return null;
+        },
+        .ready => {},
+    }
+    pickSearch("Find a label…");
+    var rows = pickList();
+    defer rows.deinit();
+    var shown: usize = 0;
+    var toggled: ?[]const u8 = null;
+    for (pr.meta.labels, 0..) |label, i| {
+        if (!pickShown(label.name, label.description)) continue;
+        shown += 1;
+        if (pickRow(i, label.name, label.description, listHas(list.items, label.name), labelColor(label.color))) {
+            listToggle(list, label.name);
+            toggled = label.name;
+        }
+    }
+    if (shown == 0) dropHeading(@src(), 1, if (pr.meta.labels.len == 0) "THE REPOSITORY HAS NO LABELS" else "NO LABEL BY THAT NAME");
+    return toggled;
+}
+
+/// Ready for review, or a draft.
+fn typePicker(id: usize, draft: *bool, tag: []const u8) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .min_size_content = .{ .w = 200 }, .background = false, .gravity_y = 0.5 });
+    defer cell.deinit();
+    const p = picker(id, if (draft.*) "Draft" else "Ready for review", "", tag);
+    defer p.end();
+    const m = p.menu orelse return;
+    if (pickRow(0, "Ready for review", "reviewers are told", !draft.*, null)) {
+        draft.* = false;
+        m.close();
+    }
+    if (pickRow(1, "Draft", "nobody is asked yet", draft.*, null)) {
+        draft.* = true;
+        m.close();
+    }
+}
+
+/// A field that shows what cannot be picked here: the branch a request
+/// comes from, once it is made.
+fn fixedField(id: usize, caption: []const u8, value: []const u8) void {
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = id, .expand = .horizontal, .background = false });
+    defer cell.deinit();
+    dialogLabel(@src(), caption);
+    var box = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = style.border() },
+        .corners = style.radius.input,
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+    });
+    defer box.deinit();
+    dvui.label(@src(), "{s}", .{value}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
+}
+
+/// Whether `item` is in the comma-separated `list`.
+fn listHas(list: []const u8, item: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |raw| if (std.mem.eql(u8, std.mem.trim(u8, raw, " "), item)) return true;
+    return false;
+}
+
+/// `item` added to the comma-separated `list`, or taken out of it.
+fn listToggle(list: *std.ArrayList(u8), item: []const u8) void {
+    var next: std.ArrayList(u8) = .empty;
+    defer next.deinit(gpa);
+    var found = false;
+    var it = std.mem.splitScalar(u8, list.items, ',');
+    while (it.next()) |raw| {
+        const x = std.mem.trim(u8, raw, " ");
+        if (x.len == 0) continue;
+        if (std.mem.eql(u8, x, item)) {
+            found = true;
+            continue;
+        }
+        if (next.items.len > 0) next.appendSlice(gpa, ", ") catch return;
+        next.appendSlice(gpa, x) catch return;
+    }
+    if (!found) {
+        if (next.items.len > 0) next.appendSlice(gpa, ", ") catch return;
+        next.appendSlice(gpa, item) catch return;
+    }
+    list.clearRetainingCapacity();
+    list.appendSlice(gpa, next.items) catch {};
+}
+
+/// The comma-separated `text` as a JSON list of strings, in `a`: names
+/// with spaces in them — a label's — kept whole.
+fn jsonCommaList(a: std.mem.Allocator, text: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.append(a, '[') catch return "[]";
+    var it = std.mem.splitScalar(u8, text, ',');
+    var first = true;
+    while (it.next()) |raw| {
+        const word = std.mem.trim(u8, raw, " \t\n");
+        if (word.len == 0) continue;
+        if (!first) out.append(a, ',') catch return "[]";
+        first = false;
+        github.jsonString(a, &out, word) catch return "[]";
+    }
+    out.append(a, ']') catch return "[]";
+    return out.items;
 }
 
 fn createRequest() void {
     const title = std.mem.trim(u8, pr_new_title.items, " \n\t");
     const base = std.mem.trim(u8, pr_new_base.items, " ");
     if (title.len == 0 or base.len == 0) return setCommandError("A title and a branch to merge into are needed.");
-    const h = history orelse return;
-    const head = h.head orelse return setCommandError("Check out a branch first: a request is made from one.");
+    const head = std.mem.trim(u8, pr_new_head.items, " ");
+    if (head.len == 0) return setCommandError("Pick the branch it comes from.");
     const a = dvui.currentWindow().arena();
     var body: std.ArrayList(u8) = .empty;
     body.appendSlice(a, jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_new_body.items }, .{ "head", head }, .{ "base", base } })) catch return;
@@ -10987,12 +12704,21 @@ fn createRequest() void {
         _ = body.pop();
         body.appendSlice(a, ",\"draft\":true}") catch return;
     }
+    // Asked for, assigned and labelled once GitHub has given it a number.
     api_reviewers.clearRetainingCapacity();
     const reviewers = jsonList(a, pr_new_reviewers.items);
     if (reviewers.len > 2) api_reviewers.appendSlice(gpa, reviewers) catch {};
+    api_assignees.clearRetainingCapacity();
+    const assignees = jsonList(a, pr_new_assignees.items);
+    if (assignees.len > 2) api_assignees.appendSlice(gpa, assignees) catch {};
+    api_labels.clearRetainingCapacity();
+    const labels = jsonCommaList(a, pr_new_labels.items);
+    if (labels.len > 2) api_labels.appendSlice(gpa, labels) catch {};
     var path: [512]u8 = undefined;
     requestApi("Creating", "POST", apiPath(&path, "/pulls", .{}), body.items, .ask_reviewers);
-    pr_new_open = false;
+    // Open until it is made: then it closes, and the request opens.
+    pr_creating = api_job != null or api_queue.items.len > 0;
+    if (!pr_creating) pr_new_open = false;
 }
 
 /// One open request: its number and title, and the two things to do with one
@@ -11029,7 +12755,7 @@ fn requestRow(src: std.builtin.SourceLocation, entry: pr.Request, id: usize) voi
         selectRequest(entry.number);
     }
 
-    if (iconButton(@src(), "request_checkout", "Check it out", dvui.entypo.download, style.textMuted())) checkoutRequest(entry.number, entry.branch);
+    if (iconButton(@src(), "request_checkout", "Check it out", dvui.entypo.download, style.textMuted())) checkoutRequest(entry.number, entry.branch, false);
     if (iconButton(@src(), "request_web", "Open it on the web", dvui.entypo.popup, style.textFaint())) openOnGithub("/pull/{d}", .{entry.number});
 }
 
@@ -11557,6 +13283,10 @@ fn refArg(buf: *[512]u8, name: []const u8, kind: git.Ref.Kind) []const u8 {
 
 fn runDrop() void {
     const d = drop orelse return;
+    if (midOperation()) {
+        clearDrop();
+        return setCommandError("Finish or abort what is under way first.");
+    }
     var ref_buf: [512]u8 = undefined;
     defer clearDrop();
     switch (drop_action) {
@@ -11633,21 +13363,21 @@ fn refMenu(
         };
 
         menuSeparator(1);
-        if (menuIcon(@src(), dvui.entypo.merge, "Merge into current branch", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge into current branch", false)) {
             fw.close();
             request(&.{ "merge", "--no-edit", refArg(&ref_buf, ref.name, ref.kind) });
         }
-        if (menuIcon(@src(), dvui.entypo.merge, "Merge, always with a merge commit", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge, always with a merge commit", false)) {
             fw.close();
             request(&.{ "merge", "--no-edit", "--no-ff", refArg(&ref_buf, ref.name, ref.kind) });
         }
         // Leaves the result staged and HEAD where it was: the commit that
         // follows is yours to write, which is the point of squashing.
-        if (menuIcon(@src(), dvui.entypo.archive, "Squash into current branch, uncommitted", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.archive, "Squash into current branch, uncommitted", false)) {
             fw.close();
             request(&.{ "merge", "--squash", refArg(&ref_buf, ref.name, ref.kind) });
         }
-        if (menuIcon(@src(), dvui.entypo.level_up, "Rebase current branch onto this", false)) {
+        if (!midOperation() and menuIcon(@src(), dvui.entypo.level_up, "Rebase current branch onto this", false)) {
             fw.close();
             request(&.{ "rebase", refArg(&ref_buf, ref.name, ref.kind) });
         }
@@ -13099,7 +14829,7 @@ fn commitMenu(
     }
 
     menuSeparator(2);
-    if (menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
+    if (!midOperation() and menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
         fw.close();
         // A merge, like a revert of one: its change is the diff against the
         // first parent, the branch it was merged into.
@@ -13109,7 +14839,7 @@ fn commitMenu(
             request(&.{ "cherry-pick", sha });
         }
     }
-    if (menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
+    if (!midOperation() and menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
         fw.close();
         // A merge has no single change to undo until one parent is named; the
         // first is the branch it was merged into, which is what "undo this
@@ -13120,7 +14850,7 @@ fn commitMenu(
             request(&.{ "revert", "--no-edit", sha });
         }
     }
-    if (menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
+    if (!midOperation() and menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
         fw.close();
         // The clicked commit is replayed too, so the list starts at its parent.
         beginRebase(if (commit.parents.len > 0) commit.parents[0] else null);
@@ -14208,15 +15938,22 @@ fn diffHeader() void {
                 // The answers for a conflict nobody needs to read. `checkout`
                 // rewrites the file; the index stays conflicted until it is
                 // staged, which is what "resolved" means to git.
-                if (linkButton(@src(), "All ours", style.success())) {
-                    request(&.{ "--literal-pathspecs", "checkout", "--ours", "--", selected_path.items });
+                // Taking back a pick, and starting the file over, while there
+                // is something to take back.
+                if (resolve_undo.items.len > 0) {
+                    if (linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) requestAction(.undo_resolve);
+                    if (linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) ask(.restart_file, selected_path.items);
                 }
-                if (linkButton(@src(), "All theirs", style.get().blue)) {
-                    request(&.{ "--literal-pathspecs", "checkout", "--theirs", "--", selected_path.items });
+                // The whole file as one side has it, staged in the same click.
+                // Not for one deleted on a side: its panel asks that plainly.
+                if (!wholeFileConflict()) {
+                    const names = sideNames();
+                    var ours_buf: [96]u8 = undefined;
+                    var theirs_buf: [96]u8 = undefined;
+                    if (linkButtonTagged(@src(), allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) takeFile(.ours);
+                    if (linkButtonTagged(@src(), allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) takeFile(.theirs);
                 }
-                if (linkButton(@src(), "Mark resolved", style.accent())) {
-                    request(&.{ "--literal-pathspecs", "add", "--", selected_path.items });
-                }
+                if (linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) requestAction(.stage_next);
                 return;
             }
 
@@ -14573,6 +16310,9 @@ fn isConflictView() bool {
 /// The three-pane merge: each conflict's two sides next to each other on top,
 /// and underneath, the file they are being resolved into.
 fn conflictBody() void {
+    // A binary file, or one deleted on a side, has nothing to read in an
+    // output pane: its question takes the whole of it.
+    if (wholeFileConflict()) return conflictRegions();
     var split = dvui.paned(@src(), .{
         .direction = .vertical,
         .collapsed_size = 360,
@@ -14689,11 +16429,16 @@ fn outputLine(src: std.builtin.SourceLocation, n: usize, text: ?[]const u8, regi
             .padding = dvui.Rect.all(0),
         });
     } else {
-        dvui.label(@src(), "conflict {d}: pick a side above", .{region + 1}, .{
+        dvui.label(@src(), "conflict {d}: pick a side above — click to go to it", .{region + 1}, .{
             .font = style.mono(),
             .color_text = .{ .color = style.get().yellow },
             .padding = dvui.Rect.all(0),
         });
+        if (row.data().borderRectScale().r.contains(dvui.currentWindow().mouse_pt)) dvui.cursorSet(.hand);
+        if (dvui.clicked(row.data(), .{})) {
+            conflict_focus = region;
+            conflict_reveal = true;
+        }
     }
 }
 
@@ -14705,28 +16450,115 @@ fn conflictRegions() void {
     });
     defer scroll.deinit();
 
+    // What has no regions to pick from: a file deleted on one side, a binary
+    // one. Each a plain question.
+    if (conflict_kind == .deleted_by_us or conflict_kind == .deleted_by_them) return deletedConflict();
+    if (conflict_binary) return binaryConflict();
+
     if (conflicts.len == 0) {
         // No markers left, but git still has the file down as conflicted: what
         // is missing is the click that says so.
-        dvui.label(@src(), "No conflict markers left. Mark it resolved to stage it.", .{}, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.textMuted() },
+        var done = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .margin = .{ .y = style.space.xl } });
+        defer done.deinit();
+        dvui.label(@src(), "Nothing left to resolve in this file.", .{}, .{
+            .font = style.body(),
+            .color_text = .{ .color = style.text() },
             .gravity_x = 0.5,
-            .margin = .{ .y = style.space.lg },
+            .padding = dvui.Rect.all(0),
+            .margin = .{ .h = style.space.md },
         });
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+        defer row.deinit();
+        if (opButton(@src(), "Stage it and open the next — Enter", "conflict:stage_next")) requestAction(.stage_next);
         return;
     }
+
+    const safe = safeConflicts();
+    if (safe > 0) safeBar(safe);
 
     for (conflicts, 0..) |region, i| conflictBlock(@src(), region, i);
 }
 
+/// "2 of 3 conflicts can be resolved safely": one click for every region
+/// where one side alone changed things, line by line at the finest.
+fn safeBar(safe: usize) void {
+    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.tint(style.success()) },
+        .border = .{ .x = 3 },
+        .color_border = .{ .color = style.success() },
+        .corners = style.radius.input,
+        .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+    });
+    defer bar.deinit();
+    dvui.icon(@src(), "safe_icon", dvui.entypo.check, .{ .fill_color = .{ .color = style.success() } }, .{
+        .min_size_content = .{ .w = 13, .h = 13 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    dvui.label(@src(), "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, plural(conflicts.len) }, .{
+        .font = style.small(),
+        .color_text = .{ .color = style.text() },
+        .gravity_y = 0.5,
+        .expand = .horizontal,
+        .max_size_content = .width(0),
+        .padding = dvui.Rect.all(0),
+    });
+    var buf: [48]u8 = undefined;
+    const caption = if (safe == 1) "Resolve it" else std.fmt.bufPrint(&buf, "Resolve these {d}", .{safe}) catch "Resolve them";
+    if (opButton(@src(), caption, "conflict:resolve_safe")) requestAction(.resolve_safe);
+}
+
+/// A file one side deleted and the other changed: keep it, or let it go.
+fn deletedConflict() void {
+    const names = sideNames();
+    const by_us = conflict_kind == .deleted_by_us;
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .margin = .{ .y = style.space.xl } });
+    defer box.deinit();
+    dvui.label(@src(), "{s} deleted this file; {s} changed it.", .{ if (by_us) names.ours else names.theirs, if (by_us) names.theirs else names.ours }, .{
+        .font = style.body(),
+        .color_text = .{ .color = style.text() },
+        .gravity_x = 0.5,
+        .padding = dvui.Rect.all(0),
+        .margin = .{ .h = style.space.md },
+    });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+    defer row.deinit();
+    // The side that still has it, and the side that deleted it.
+    if (dialogButton(@src(), "Keep the file", true)) takeFile(if (by_us) .theirs else .ours);
+    if (dialogButton(@src(), "Delete it", false)) takeFile(if (by_us) .ours else .theirs);
+}
+
+/// A binary file: no lines to pick between, one version or the other.
+fn binaryConflict() void {
+    const names = sideNames();
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .margin = .{ .y = style.space.xl } });
+    defer box.deinit();
+    dvui.label(@src(), "A binary file: keep one side's version of it.", .{}, .{
+        .font = style.body(),
+        .color_text = .{ .color = style.text() },
+        .gravity_x = 0.5,
+        .padding = dvui.Rect.all(0),
+        .margin = .{ .h = style.space.md },
+    });
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+    defer row.deinit();
+    var ours_buf: [96]u8 = undefined;
+    var theirs_buf: [96]u8 = undefined;
+    if (dialogButton(@src(), keepCaption(&ours_buf, names.ours), false)) takeFile(.ours);
+    if (dialogButton(@src(), keepCaption(&theirs_buf, names.theirs), false)) takeFile(.theirs);
+}
+
 fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: usize) void {
+    const focused = index == conflict_focus;
     var block = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = index,
         .expand = .horizontal,
         .background = false,
         .padding = dvui.Rect.all(0),
-        .margin = .{ .h = style.space.md },
+        .margin = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.md, .h = style.space.sm },
     });
     defer block.deinit();
 
@@ -14734,39 +16566,144 @@ fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: u
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = true,
-            .color_fill = .{ .color = style.surface() },
+            .color_fill = .{ .color = if (focused) style.accentDim() else style.surface() },
+            .corners = .{ .tl = style.radius.input.tl, .tr = style.radius.input.tr },
             .min_size_content = .{ .h = style.toolbar_cell },
-            .padding = .{ .x = style.space.md, .w = style.space.md },
+            .padding = .{ .x = style.space.md, .w = style.space.sm },
         });
         defer head.deinit();
 
         dvui.label(@src(), "Conflict {d} of {d}", .{ index + 1, conflicts.len }, .{
             .font = style.smallBold(),
-            .color_text = .{ .color = style.text() },
+            .color_text = .{ .color = if (focused) style.accent() else style.text() },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
+        // Why it would resolve on its own, where it would.
+        if (index < conflict_autos.len) if (conflict_autos[index]) |reason| {
+            var why_buf: [160]u8 = undefined;
+            dvui.label(@src(), "{s}", .{autoText(&why_buf, reason)}, .{
+                .font = style.tiny(),
+                .color_text = .{ .color = style.success() },
+                .gravity_y = 0.5,
+                .margin = .{ .x = style.space.md },
+                .padding = dvui.Rect.all(0),
+            });
+        };
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
-        if (linkButton(@src(), "Keep ours", style.success())) requestResolve(index, .ours);
-        if (linkButton(@src(), "Keep theirs", style.get().blue)) requestResolve(index, .theirs);
-        if (linkButton(@src(), "Keep both", style.textMuted())) requestResolve(index, .both);
+        // Each with the key that does the same, on the one the keys act on.
+        const names = sideNames();
+        var ours_buf: [96]u8 = undefined;
+        var theirs_buf: [96]u8 = undefined;
+        if (keyedLink(@src(), if (focused) "1" else "", keepCaption(&ours_buf, names.ours), style.success())) requestResolve(index, .ours);
+        if (keyedLink(@src(), if (focused) "2" else "", keepCaption(&theirs_buf, names.theirs), style.get().blue)) requestResolve(index, .theirs);
+        if (keyedLink(@src(), if (focused) "3" else "", "Keep both", style.textMuted())) requestResolve(index, .both);
     }
 
-    if (region.base.len > 0) {
-        conflictSide(@src(), 0, "base — before either side changed it", region.base, style.rowHover(), null);
+    if (region.has_base) {
+        conflictSide(@src(), 0, "base — before either side changed it", region.base, style.rowHover());
     }
 
-    // Side by side, the way they are compared: one column each, and the
-    // button that takes it at its head.
-    var sides = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
-        .expand = .horizontal,
+    {
+        // Side by side, the way they are compared: one column each.
+        var sides = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
+            .expand = .horizontal,
+            .background = false,
+        });
+        defer sides.deinit();
+        const names = sideNames();
+        var ours_buf: [160]u8 = undefined;
+        var theirs_buf: [160]u8 = undefined;
+        conflictSide(@src(), 1, std.fmt.bufPrint(&ours_buf, "{s} — {s}", .{ names.ours, names.ours_role }) catch "ours", region.ours, style.diffAddedFill());
+        conflictSide(@src(), 2, std.fmt.bufPrint(&theirs_buf, "{s} — {s}", .{ names.theirs, names.theirs_role }) catch "theirs", region.theirs, style.get().blue.lerp(style.background(), 0.86));
+    }
+
+    // A click anywhere in it — past the buttons, which take theirs first —
+    // makes it the one the keys act on.
+    if (dvui.clicked(block.data(), .{})) conflict_focus = index;
+    const rs = block.data().borderRectScale();
+    if (focused) {
+        rs.r.stroke(dvui.CornerRect.Physical.all(6 * rs.s), .{ .thickness = 1.5 * rs.s, .color = .{ .color = style.accent() }, .closed = true });
+        if (conflict_reveal) {
+            conflict_reveal = false;
+            dvui.scrollTo(.{ .screen_rect = rs.r });
+        }
+    }
+}
+
+/// Why a region resolves on its own, in its sides' names.
+fn autoText(buf: []u8, reason: git.AutoReason) []const u8 {
+    const names = sideNames();
+    return switch (reason) {
+        .same => "safe: the same change on both sides",
+        .only_ours => std.fmt.bufPrint(buf, "safe: only {s} changed it", .{names.ours}) catch "safe",
+        .only_theirs => std.fmt.bufPrint(buf, "safe: only {s} changed it", .{names.theirs}) catch "safe",
+        .lines_apart => "safe: each side changed different lines",
+    };
+}
+
+/// A pick's link with the key that does the same before it — none where
+/// `key` is empty.
+fn keyedLink(src: std.builtin.SourceLocation, key: []const u8, caption: []const u8, color: dvui.Color) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{ .draw_focus = false }, .{
+        .gravity_y = 0.5,
         .background = false,
+        .margin = dvui.Rect.all(0),
+        .padding = .{ .x = style.space.sm, .y = 2, .w = style.space.sm, .h = 2 },
+        .corners = style.radius.input,
     });
-    defer sides.deinit();
-    conflictSide(@src(), 1, "ours — already on this branch", region.ours, style.diffAddedFill(), .{ index, .ours });
-    conflictSide(@src(), 2, "theirs — coming in", region.theirs, style.get().blue.lerp(style.background(), 0.86), .{ index, .theirs });
+    defer bw.deinit();
+    bw.processEvents();
+    {
+        var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .both,
+            .background = bw.hovered(),
+            .color_fill = .{ .color = style.rowHover() },
+            .corners = style.radius.input,
+            .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
+        });
+        defer cell.deinit();
+        if (key.len > 0) dvui.label(@src(), "{s}", .{key}, .{
+            .font = style.tinyBold(),
+            .color_text = .{ .color = style.textMuted() },
+            .background = true,
+            .color_fill = .{ .color = style.surfaceRaised() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = dvui.CornerRect.all(3),
+            .gravity_y = 0.5,
+            .margin = .{ .w = style.space.xs },
+            .padding = .{ .x = 4, .w = 4 },
+        });
+        dvui.label(@src(), "{s}", .{caption}, .{
+            .font = style.small(),
+            .color_text = .{ .color = if (bw.hovered()) style.text() else color },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+    }
+    return bw.clicked();
+}
+
+fn takeFile(side: git.ConflictSide) void {
+    if (action != .none) return;
+    action_side = side;
+    action = .take_file;
+}
+
+/// "All of main": the whole file as one side has it.
+fn allCaption(buf: []u8, name: []const u8) []const u8 {
+    var fit: [MAX_SHOWN_LINE]u8 = undefined;
+    return std.fmt.bufPrint(buf, "All of {s}", .{fitText(&fit, name, style.small(), 120)}) catch "All";
+}
+
+/// "Keep main": a side's button, its name cut to fit.
+fn keepCaption(buf: []u8, name: []const u8) []const u8 {
+    var fit: [MAX_SHOWN_LINE]u8 = undefined;
+    return std.fmt.bufPrint(buf, "Keep {s}", .{fitText(&fit, name, style.small(), 140)}) catch "Keep";
 }
 
 /// One side of a region: a caption, then its lines in a tint that says which
@@ -14777,9 +16714,6 @@ fn conflictSide(
     caption: []const u8,
     text: []const u8,
     fill: dvui.Color,
-    /// The region and side its "Take" button resolves to; null for the base,
-    /// which is shown, never taken.
-    take: ?struct { usize, git.ConflictSide },
 ) void {
     var side = dvui.box(src, .{ .dir = .vertical }, .{
         .id_extra = id,
@@ -14799,11 +16733,9 @@ fn conflictSide(
             .color_text = .{ .color = style.textMuted() },
             .gravity_y = 0.5,
             .expand = .horizontal,
+            .max_size_content = .width(0),
             .padding = dvui.Rect.all(0),
         });
-        if (take) |t| {
-            if (linkButton(@src(), "Take this", style.accent())) requestResolve(t[0], t[1]);
-        }
     }
 
     // A side with nothing in it is a real answer — one branch deleted what the
@@ -16427,7 +18359,7 @@ fn changesSection(
             } else {
                 // A job: adding 11,000 new files is 13 s of git on Windows,
                 // which the window would otherwise wait out frozen.
-                if (linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) requestLocal("Staging", &.{ "add", "-A" });
+                if (linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) requestStageAll();
             }
         }
         changes_head_h = head.data().rect.h;
@@ -16684,6 +18616,35 @@ fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.Chan
     clearPickedChanges();
 }
 
+/// Stage every change — asked first when a conflicted file still has its
+/// markers in it. A job: adding 11,000 new files is 13 s of git on Windows,
+/// which the window would otherwise wait out frozen.
+fn requestStageAll() void {
+    const w = work orelse return;
+    for (w.unstaged) |change| {
+        if (change.status == .conflicted and markersLeft(change.path)) return ask(.stage_markers, "");
+    }
+    requestLocal("Staging", &.{ "add", "-A" });
+}
+
+/// Whether `path` is conflicted and its file still holds a conflict region,
+/// read off the disk now: what staging it would put in the index as the
+/// resolution. False for a file git does not count as conflicted.
+fn markersLeft(path: []const u8) bool {
+    const w = work orelse return false;
+    const conflicted = for (w.unstaged) |change| {
+        if (change.status == .conflicted and std.mem.eql(u8, change.path, path)) break true;
+    } else false;
+    if (!conflicted) return false;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = std.fmt.bufPrint(&buf, "{s}{s}", .{ repo_path.items, path }) catch return false;
+    const text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch return false;
+    defer gpa.free(text);
+    const regions = git.parseConflicts(gpa, text) catch return false;
+    defer gpa.free(regions);
+    return regions.len > 0;
+}
+
 /// Stage or unstage a whole file, both its names when it was renamed —
 /// `old` is `path` otherwise.
 ///
@@ -16692,6 +18653,7 @@ fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.Chan
 /// for the first time.
 fn requestStage(path: []const u8, old: []const u8, stage: bool) void {
     if (stage) {
+        if (markersLeft(path)) return ask(.stage_markers, path);
         request(&.{ "--literal-pathspecs", "add", "--", path, old });
     } else {
         request(&.{ "--literal-pathspecs", "reset", "-q", "--", path, old });
@@ -16862,8 +18824,12 @@ fn commitBox() void {
             saveWorkspace();
         }
         // No `color_text`: dvui draws the tick in it, and a muted one
-        // vanishes into the accent fill.
-        if (dvui.checkbox(@src(), &amend, "Amend", .{
+        // vanishes into the accent fill. Not while a merge or a rebase is
+        // under way: amending a rebase's stop folds it into the commit
+        // before, and a merge's into the branch's last.
+        if (operationCommand() != null) {
+            amend = false;
+        } else if (dvui.checkbox(@src(), &amend, "Amend", .{
             .tag = "commit:amend",
             .font = style.small(),
             .gravity_y = 0.5,
@@ -18097,6 +20063,23 @@ fn resetUiGlobals() void {
     clearRecent();
     recent.deinit(gpa);
     recent = .empty;
+    clearResolveUndo();
+    resolve_undo.deinit(gpa);
+    resolve_undo = .empty;
+    pr_cards.deinit(gpa);
+    inline for (.{ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
+        l.deinit(gpa);
+        l.* = .empty;
+    }
+    pick_open = null;
+    clearJobSteps();
+    job_steps.deinit(gpa);
+    job_steps = .empty;
+    pr_cards = .empty;
+    pr_cards_all = null;
+    conflict_path.deinit(gpa);
+    conflict_path = .empty;
+    conflict_focus = 0;
     clearForget();
     identity_name.deinit(gpa);
     identity_name = .empty;
@@ -18605,11 +20588,14 @@ test "a conflicted merge is resolved and continued from the banner" {
     defer closeRepo();
     defer clearCommandError();
 
-    // Expected to fail. A conflicted merge does not move HEAD, so this also
+    // Expected to stop. A conflicted merge does not move HEAD, so this also
     // covers `gitDo` re-reading the history on its failure path — without that
-    // the banner never appears at all.
+    // the banner never appears at all. A stop is not an error: no red line,
+    // and the conflicted file is open.
     gitDo(&.{ "merge", "--no-edit", "other" });
-    try std.testing.expect(command_error != null);
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expect(selection == .change);
+    try std.testing.expectEqualStrings("lines.txt", selected_path.items);
     try std.testing.expectEqual(git.State.merge, history.?.state);
     try std.testing.expect(conflictCount() > 0);
 
@@ -18658,6 +20644,558 @@ test "a conflicted merge aborts back to a clean tree" {
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expectEqual(@as(usize, 0), conflictCount());
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
+}
+
+// What could quietly break a merge in the middle of resolving it: staging a
+// file with its markers still in, an undo that resets under the merge, an
+// abort that throws the resolutions away. Each is asked first, or refused.
+test "mid-merge, staging markers and aborting are asked first, and undo is refused" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeConflictedPair(&tmp, dir);
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+    defer clearConfirm();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+
+    // The file still has its markers: staging it, alone or with everything,
+    // waits for a yes.
+    requestStage("lines.txt", "lines.txt", true);
+    try std.testing.expect(confirm != null and confirm.?.kind == .stage_markers);
+    try std.testing.expect(conflictCount() > 0);
+    clearConfirm();
+    requestStageAll();
+    try std.testing.expect(confirm != null and confirm.?.kind == .stage_markers);
+    try std.testing.expectEqualStrings("", confirm.?.arg);
+    clearConfirm();
+
+    // Undo would reset under the merge.
+    requestUndo();
+    try std.testing.expect(command_error != null);
+    try std.testing.expectEqual(@as(Action, .none), action);
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+    clearCommandError();
+
+    // Abort: asked, then done.
+    requestAbortOperation();
+    try std.testing.expect(confirm != null and confirm.?.kind == .abort_operation);
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+    runConfirmed();
+    _ = runAction();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.none, history.?.state);
+}
+
+// "Open this file" sends the user to an editor; a pick made afterwards from
+// the copy read before must not write over what they did there.
+test "a pick refuses to write over a file changed since it was shown" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeConflictedPair(&tmp, dir);
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    selectChange("lines.txt", .unstaged);
+    loadConflicts();
+    try std.testing.expect(conflicts.len > 0);
+
+    const edited = "edited elsewhere\n";
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "lines.txt", .data = edited });
+    requestResolve(0, .ours);
+    _ = runAction();
+    try std.testing.expect(command_error != null);
+
+    const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(1024));
+    defer gpa.free(now);
+    try std.testing.expectEqualStrings(edited, now);
+}
+
+// A rebase git refuses to start — here, over uncommitted changes — leaves
+// the composed plan on screen, to run again once the tree is clean.
+test "a refused interactive rebase keeps its plan" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "second" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    const second = findCommit("second") orelse return error.CommitNotFound;
+    beginRebase(second.parents[0]);
+    try std.testing.expectEqual(@as(usize, 1), rebase_steps.items.len);
+
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed\n" });
+    rebase_steps.items[0].action = .drop;
+    runRebase();
+    try std.testing.expect(command_error != null);
+    try std.testing.expectEqual(git.State.none, history.?.state);
+    try std.testing.expect(selection == .rebase);
+    try std.testing.expectEqual(@as(usize, 1), rebase_steps.items.len);
+    // git copied its list; Zit's own is gone either way.
+    var todo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const todo = try std.fmt.bufPrint(&todo_buf, "{s}zit-rebase-todo", .{repo.?.gitdir()});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(app_io, todo, .{}));
+}
+
+// The strip reads what git keeps for a rebase: the branch, where it goes,
+// the step it stopped on and its commit — and the conflict's sides by name,
+// "ours" being the base there. Continue goes on from it once resolved.
+test "a rebase stopped on a conflict says where it is, and continues" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+
+    try makeTestRepo(&tmp, dir, "f.txt", "base\n");
+    try expectGit(dir, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "feat\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "feat changes f" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "g.txt", .data = "g\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "feat adds g" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "main\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "main changes f" });
+    try expectGit(dir, &.{ "switch", "-q", "feat" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "rebase", "main" });
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.rebase, history.?.state);
+    try std.testing.expectEqualStrings("feat", op_info.branch);
+    try std.testing.expectEqualStrings("main", op_info.onto);
+    try std.testing.expectEqual(@as(u32, 1), op_info.step);
+    try std.testing.expectEqual(@as(u32, 2), op_info.total);
+    try std.testing.expectEqualStrings("feat changes f", op_info.subject);
+    var title_buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Rebasing feat onto main", opTitle(&title_buf));
+    try std.testing.expectEqualStrings("main", sideNames().ours);
+    try std.testing.expectEqualStrings("feat", sideNames().theirs);
+    try std.testing.expect(std.mem.indexOf(u8, sideNames().theirs_role, op_info.commit) != null);
+    try std.testing.expect(opNext() == .resolve);
+    try std.testing.expect(!canContinue());
+
+    // Answered and staged: Continue, which replays the second commit too.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "both\n" });
+    gitDo(&.{ "add", "--", "f.txt" });
+    try std.testing.expect(opNext() == .proceed);
+    try std.testing.expect(canContinue());
+    requestContinue();
+    _ = runAction();
+    try pumpJob();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.none, history.?.state);
+    try std.testing.expectEqualStrings("feat adds g", history.?.commits[0].summary);
+    try std.testing.expectEqualStrings("feat changes f", history.?.commits[1].summary);
+    try std.testing.expectEqualStrings("main changes f", history.?.commits[2].summary);
+}
+
+// Resolved to what the base already had, a commit is left with nothing to
+// apply: git refuses to continue with it, and the strip offers Skip instead.
+test "a rebase step left empty by its resolution is skipped, not continued" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+
+    try makeTestRepo(&tmp, dir, "f.txt", "base\n");
+    try expectGit(dir, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "feat\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "feat changes f" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "main\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "main changes f" });
+    try expectGit(dir, &.{ "switch", "-q", "feat" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "rebase", "main" });
+    try std.testing.expectEqual(git.State.rebase, history.?.state);
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "main\n" });
+    gitDo(&.{ "add", "--", "f.txt" });
+    try std.testing.expect(opNext() == .skip);
+    try std.testing.expect(!canContinue());
+}
+
+// After a rebase the branch and its upstream have parted ways: Push turns
+// into a force push, which says what it replaces.
+/// A bare remote and a clone of it, the clone's `main` pushed: for the
+/// pull request flows, which fetch and push.
+fn makeRemotePair(tmp: *std.testing.TmpDir, root: []const u8, up: []const u8, down: []const u8) !void {
+    try expectGit(root, &.{ "init", "-q", "--bare", "-b", "main", "up.git" });
+    try tmp.dir.createDirPath(app_io, "down");
+    try makeTestRepo(tmp, down, "down/f.txt", "base\n");
+    var origin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try expectGit(down, &.{ "remote", "add", "origin", try absPath(&origin_buf, up) });
+    try expectGit(down, &.{ "push", "-q", "-u", "origin", "main" });
+}
+
+// Checking a request out as `gh pr checkout` does: a branch that tracks the
+// remote's, made — or switched to and fast-forwarded when it is behind —
+// and a fork's request on `pr/N`, never on a branch of yours of its name.
+test "a pull request is checked out tracking its branch, brought up to date, and a fork's apart" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var up_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const up = try std.fmt.bufPrint(&up_buf, "{s}/up.git", .{root});
+    var down_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const down = try std.fmt.bufPrint(&down_buf, "{s}/down", .{root});
+
+    try git.init();
+    defer git.shutdown();
+    try makeRemotePair(&tmp, root, up, down);
+    try expectGit(down, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/g.txt", .data = "one\n" });
+    try expectGit(down, &.{ "add", "-A" });
+    try expectGit(down, &.{ "commit", "-qm", "feat one" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/g.txt", .data = "two\n" });
+    try expectGit(down, &.{ "commit", "-qam", "feat two" });
+    try expectGit(down, &.{ "push", "-q", "origin", "feat" });
+    // The request as a fork would send it: only under refs/pull.
+    try expectGit(up, &.{ "update-ref", "refs/pull/7/head", "refs/heads/feat" });
+    try expectGit(down, &.{ "switch", "-q", "main" });
+    try expectGit(down, &.{ "branch", "-qD", "feat" });
+
+    openRepo(down);
+    defer closeRepo();
+    defer clearCommandError();
+
+    // Not here yet: made, tracking the remote's.
+    checkoutRequest(3, "feat", false);
+    _ = runAction();
+    try pumpJob();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqualStrings("feat", history.?.head.?);
+    try std.testing.expectEqualStrings("origin/feat", history.?.tracking.upstream.?);
+
+    // Here but behind: switched to, and brought up to date.
+    try expectGit(down, &.{ "reset", "-q", "--hard", "HEAD~1" });
+    try expectGit(down, &.{ "switch", "-q", "main" });
+    reloadHistory();
+    checkoutRequest(3, "feat", false);
+    _ = runAction();
+    try pumpJob();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqualStrings("feat", history.?.head.?);
+    try std.testing.expectEqualStrings("feat two", history.?.commits[0].summary);
+
+    // From a fork, its branch named "main": on pr/7, and main left alone.
+    try expectGit(down, &.{ "switch", "-q", "main" });
+    reloadHistory();
+    checkoutRequest(7, "main", true);
+    _ = runAction();
+    try pumpJob();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqualStrings("pr/7", history.?.head.?);
+    try std.testing.expectEqualStrings("feat two", history.?.commits[0].summary);
+    try std.testing.expect(isLocalBranch("main"));
+}
+
+// A request in conflict with its base, rebased onto it here: fetched,
+// checked out, rebased — stopping at the conflict, in the conflict view,
+// with the bar to go on from.
+test "a pull request in conflict is rebased onto its base here, stopping at the conflict" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var up_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const up = try std.fmt.bufPrint(&up_buf, "{s}/up.git", .{root});
+    var down_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const down = try std.fmt.bufPrint(&down_buf, "{s}/down", .{root});
+
+    try git.init();
+    defer git.shutdown();
+    try makeRemotePair(&tmp, root, up, down);
+    try expectGit(down, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/f.txt", .data = "feat\n" });
+    try expectGit(down, &.{ "commit", "-qam", "feat changes f" });
+    try expectGit(down, &.{ "push", "-q", "-u", "origin", "feat" });
+    try expectGit(down, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/f.txt", .data = "main\n" });
+    try expectGit(down, &.{ "commit", "-qam", "main changes f" });
+    try expectGit(down, &.{ "push", "-q", "origin", "main" });
+
+    openRepo(down);
+    defer closeRepo();
+    defer clearCommandError();
+
+    resolveRequestLocally(.{ .number = 3, .head = "feat", .base = "main", .mergeable = "CONFLICTING" }, true);
+    _ = runAction();
+    try pumpJob();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.rebase, history.?.state);
+    try std.testing.expect(conflictCount() > 0);
+    try std.testing.expectEqualStrings("feat", op_info.branch);
+    try std.testing.expectEqualStrings("f.txt", selected_path.items);
+}
+
+test "after a rebase, Push is a force push that says what it replaces" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var up_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const up = try std.fmt.bufPrint(&up_buf, "{s}/up.git", .{root});
+    var down_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const down = try std.fmt.bufPrint(&down_buf, "{s}/down", .{root});
+
+    try git.init();
+    defer git.shutdown();
+
+    try expectGit(root, &.{ "init", "-q", "--bare", "-b", "main", "up.git" });
+    try tmp.dir.createDirPath(app_io, "down");
+    try makeTestRepo(&tmp, down, "down/a.txt", "a\n");
+    var origin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try expectGit(down, &.{ "remote", "add", "origin", try absPath(&origin_buf, up) });
+    try expectGit(down, &.{ "push", "-q", "-u", "origin", "main" });
+    try expectGit(down, &.{ "switch", "-qc", "feat" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/f.txt", .data = "f\n" });
+    try expectGit(down, &.{ "add", "-A" });
+    try expectGit(down, &.{ "commit", "-qm", "feat" });
+    try expectGit(down, &.{ "push", "-q", "-u", "origin", "feat" });
+    try expectGit(down, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "down/b.txt", .data = "b\n" });
+    try expectGit(down, &.{ "add", "-A" });
+    try expectGit(down, &.{ "commit", "-qm", "main moves" });
+    try expectGit(down, &.{ "switch", "-q", "feat" });
+
+    openRepo(down);
+    defer closeRepo();
+    defer clearCommandError();
+    try std.testing.expect(!rebasedSinceUpstream());
+
+    gitDo(&.{ "rebase", "main" });
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expect(rebasedSinceUpstream());
+    var buf: [512]u8 = undefined;
+    const text = forcePushText(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "origin/feat") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "1 commit there") != null);
+}
+
+// The conflict view driven by the keys alone, as GitComet's is: 2 keeps the
+// right side, U takes it back, 1 keeps the left, Enter stages the file.
+test "a conflicted file is answered from the keys: a pick, its undo, Enter to stage" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    try style.applyEmbedded(gpa, true);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeConflictedPair(&tmp, dir);
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(isConflictView());
+    try std.testing.expectEqual(@as(usize, 1), conflicts.len);
+
+    try pressFrame(.two, .none);
+    try std.testing.expectEqual(@as(usize, 0), conflicts.len);
+    try std.testing.expectEqual(@as(usize, 1), resolve_undo.items.len);
+    {
+        const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(4096));
+        defer gpa.free(now);
+        try std.testing.expect(std.mem.startsWith(u8, now, "other"));
+    }
+
+    try pressFrame(.u, .none);
+    try std.testing.expectEqual(@as(usize, 1), conflicts.len);
+    try std.testing.expectEqual(@as(usize, 0), resolve_undo.items.len);
+
+    try pressFrame(.one, .none);
+    try std.testing.expectEqual(@as(usize, 0), conflicts.len);
+    try pressFrame(.enter, .none);
+    try std.testing.expectEqual(@as(usize, 0), conflictCount());
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+    const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(4096));
+    defer gpa.free(now);
+    try std.testing.expect(std.mem.startsWith(u8, now, "main"));
+}
+
+// git wrote plain markers, as it does by default: the base comes from the
+// index, and a conflict where each side changed different lines resolves
+// in one click, each line from the side that changed it.
+test "a conflict of changes on neighbouring lines is resolved safely, with its base" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "n.txt", "a = 1\nb = 2\nc = 3\n");
+    try expectGit(dir, &.{ "switch", "-qc", "other" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "n.txt", .data = "a = 1\nb = 20\nc = 3\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "b" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "n.txt", .data = "a = 10\nb = 2\nc = 30\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "a and c" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "-c", "merge.conflictStyle=merge", "merge", "--no-edit", "other" });
+    try std.testing.expectEqualStrings("n.txt", selected_path.items);
+    loadConflicts();
+    try std.testing.expectEqual(@as(usize, 1), conflicts.len);
+    try std.testing.expect(conflicts[0].has_base);
+    try std.testing.expect(git.sameText("a = 1\nb = 2\nc = 3\n", conflicts[0].base));
+    try std.testing.expectEqual(@as(?git.AutoReason, .lines_apart), conflict_autos[0]);
+
+    requestAction(.resolve_safe);
+    _ = runAction();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    const now = try tmp.dir.readFileAlloc(app_io, "n.txt", gpa, .limited(4096));
+    defer gpa.free(now);
+    try std.testing.expect(git.sameText("a = 10\nb = 20\nc = 30\n", now));
+}
+
+// A file one side deleted and the other changed: no regions, a question —
+// keep it or let it go — answered and staged in one click.
+test "a file deleted on one side is kept or deleted in one click" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "notes.txt", "notes\n");
+    try expectGit(dir, &.{ "switch", "-qc", "other" });
+    try expectGit(dir, &.{ "rm", "-q", "notes.txt" });
+    try expectGit(dir, &.{ "commit", "-qm", "no notes" });
+    try expectGit(dir, &.{ "switch", "-q", "main" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "notes.txt", .data = "notes, edited\n" });
+    try expectGit(dir, &.{ "commit", "-qam", "edited notes" });
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    try std.testing.expectEqualStrings("notes.txt", selected_path.items);
+    loadConflicts();
+    try std.testing.expectEqual(git.ConflictKind.deleted_by_them, conflict_kind);
+    try std.testing.expect(wholeFileConflict());
+
+    // "Delete it": the side that deleted it.
+    takeFile(.theirs);
+    _ = runAction();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(usize, 0), conflictCount());
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(app_io, "notes.txt", .{}));
+}
+
+test "a review written for one pull request is not carried to another" {
+    gpa = std.testing.allocator;
+    defer pr_comment.clearAndFree(gpa);
+    defer pr_selected = null;
+    pr_selected = 5;
+    try pr_comment.appendSlice(gpa, "looks good");
+    selectRequest(5);
+    try std.testing.expectEqualStrings("looks good", pr_comment.items);
+    selectRequest(7);
+    try std.testing.expectEqual(@as(usize, 0), pr_comment.items.len);
 }
 
 // The parser is unit-tested in `git.zig`; what this covers is the rest of the
@@ -20548,6 +23086,134 @@ test "a comment's inline marks come off, and plain text is left as it is" {
 // The request pane draws in full — head, tabs, the conversation's timeline
 // with a folded run of reviews, threads, the answer and the merge — and each
 // other tab, without a widget left open.
+test "a picker's list toggles, and a label with spaces in it stays whole" {
+    gpa = std.testing.allocator;
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(gpa);
+    listToggle(&list, "ann");
+    listToggle(&list, "good first issue");
+    try std.testing.expectEqualStrings("ann, good first issue", list.items);
+    try std.testing.expect(listHas(list.items, "good first issue"));
+    try std.testing.expect(!listHas(list.items, "good"));
+    listToggle(&list, "ann");
+    try std.testing.expectEqualStrings("good first issue", list.items);
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("[\"good first issue\",\"bug\"]", jsonCommaList(arena.allocator(), "good first issue, bug,"));
+}
+
+// The create dialog as GitHub's page has it: the people and the labels
+// picked from lists the host gave, the type from a list of two.
+test "a new pull request's reviewers, labels and type are picked from lists" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try expectGit(dir, &.{ "switch", "-qc", "feat/login-form" });
+    openRepo(dir);
+    defer closeRepo();
+    pr.host = .github;
+    defer pr.host = .none;
+    me_loaded = true;
+    pr.meta = .{
+        .people = &.{ .{ .login = "ann", .name = "Ann Lee" }, .{ .login = "bo" } },
+        .labels = &.{ .{ .name = "bug", .color = "d73a4a" }, .{ .name = "good first issue", .color = "7057ff" } },
+    };
+    pr.meta_status = .ready;
+    defer {
+        pr.meta = .{};
+        pr.meta_status = .idle;
+    }
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1400, .h = 860 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    openPrCreate();
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqualStrings("feat/login-form", pr_new_head.items);
+
+    try clickAt(try tagCenter("pr_new:labels"));
+    try clickAt(try tagCenter("pick:good first issue"));
+    try std.testing.expectEqualStrings("good first issue", pr_new_labels.items);
+    try pressFrame(.escape, .none);
+
+    try clickAt(try tagCenter("pr_new:reviewers"));
+    try clickAt(try tagCenter("pick:bo"));
+    try std.testing.expectEqualStrings("bo", pr_new_reviewers.items);
+    try pressFrame(.escape, .none);
+
+    try clickAt(try tagCenter("pr_new:type"));
+    try clickAt(try tagCenter("pick:Draft"));
+    try std.testing.expect(pr_new_draft);
+    try std.testing.expect(pr_new_open);
+}
+
+// GitHub's sidebar: a section's head drops its list, and a tick there is
+// sent at once — refused here, with no one signed in, which is the point:
+// it was sent, and the list kept the tick.
+test "the request's sidebar picks its labels from a list, sent at once" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+    pr.detail = .{
+        .number = 42,
+        .title = "Login form",
+        .author = "damien",
+        .state = "OPEN",
+        .head = "feat/login-form",
+        .base = "main",
+        .reviewers = &.{.{ .login = "ann", .state = "APPROVED" }},
+        .labels = &.{.{ .name = "enhancement", .color = "a2eeef" }},
+    };
+    defer pr.detail = null;
+    pr.meta = .{ .labels = &.{ .{ .name = "bug", .color = "d73a4a" }, .{ .name = "enhancement", .color = "a2eeef" } } };
+    pr.meta_status = .ready;
+    defer {
+        pr.meta = .{};
+        pr.meta_status = .idle;
+    }
+    pr_selected = 42;
+    active_view = .pulls;
+    pr.host = .github;
+    defer pr.host = .none;
+    me_loaded = true;
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1600, .h = 800 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    try clickAt(try tagCenter("side:Labels"));
+    try clickAt(try tagCenter("pick:bug"));
+    try std.testing.expect(listHas(side_list.items, "bug"));
+    try std.testing.expect(listHas(side_list.items, "enhancement"));
+    try std.testing.expect(command_error != null);
+
+    // The edit dialog opens on the request as it is.
+    openPrEdit(pr.detail.?);
+    defer clearPrEdit();
+    try std.testing.expectEqualStrings("main", pr_edit_base.items);
+    try std.testing.expect(sameNames(pr_edit_reviewers.items, &.{"ann"}));
+    try std.testing.expect(sameNames(pr_edit_labels.items, &.{"enhancement"}));
+    try std.testing.expect(!sameNames(pr_edit_labels.items, &.{ "enhancement", "bug" }));
+}
+
 test "a request's pane draws every tab" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -20600,6 +23266,78 @@ test "a request's pane draws every tab" {
     try dvui.testing.settle(frameArrowCursor);
     // The four bare reviews in a row: the middle two folded behind a button.
     try std.testing.expect(pr_runs_open == 0);
+
+    // Six steps: the description and the last three open, the oldest folded
+    // to their head; Expand all opens the lot, a click on a head folds one.
+    try std.testing.expect(cardOpen(0, true));
+    try std.testing.expect(!cardOpen(1, 1 + CARDS_OPEN_AT_END >= 6));
+    try clickAt(try tagCenter("pr:expand_all"));
+    try std.testing.expectEqual(@as(?bool, true), pr_cards_all);
+    try std.testing.expect(cardOpen(1, false));
+    try clickAt(try tagCenter("pr:collapse_all"));
+    try std.testing.expect(!cardOpen(0, true));
+}
+
+// The requests from the keys: the checked-out branch's own picked to begin
+// with, ↑ and ↓ along the list in its order, a number for a tab.
+test "the requests are walked from the keys, starting at the checked-out branch's" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    openRepo(dir);
+    defer closeRepo();
+
+    var list = [_]pr.Request{
+        .{ .number = 1, .title = "newest", .branch = "feat-a", .author = "ann", .draft = false, .updated = 30 },
+        .{ .number = 2, .title = "this branch", .branch = "main", .author = "bo", .draft = false, .updated = 20 },
+        .{ .number = 3, .title = "oldest", .branch = "x", .author = "carl", .draft = false, .updated = 10 },
+    };
+    pr.list = &list;
+    defer pr.list = &.{};
+    pr.host = .github;
+    defer pr.host = .none;
+    me_loaded = true;
+    active_view = .pulls;
+    defer pr_selected = null;
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqual(@as(?u32, 2), pr_selected);
+
+    try pressFrame(.down, .none);
+    try std.testing.expectEqual(@as(?u32, 3), pr_selected);
+    try pressFrame(.down, .none);
+    try std.testing.expectEqual(@as(?u32, 3), pr_selected);
+    try pressFrame(.up, .none);
+    try pressFrame(.k, .none);
+    try std.testing.expectEqual(@as(?u32, 1), pr_selected);
+    try pressFrame(.four, .none);
+    try std.testing.expect(pr_tab == .checks);
+
+    // A filter clicked switches the list to the merged ones, shorter than the
+    // open: drawn from the one list, not the other's indexes. This crashed.
+    var past = [_]pr.Request{.{ .number = 9, .title = "merged", .branch = "old", .author = "ann", .draft = false, .updated = 5 }};
+    pr.past = &past;
+    defer pr.past = &.{};
+    try clickAt(try tagCenter("pr:filter"));
+    try clickAt(try tagCenter("pick:Merged"));
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(pr_filter == .merged);
+    try pressFrame(.down, .none);
+    try std.testing.expectEqual(@as(?u32, 9), pr_selected);
+    try clickAt(try tagCenter("pr:filter"));
+    try clickAt(try tagCenter("pick:Open"));
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expect(pr_filter == .open);
 }
 
 // A clone starts with no repository at all, and opens the one it makes. (A new

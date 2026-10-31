@@ -33,7 +33,28 @@ action without a key of its own is in the command palette, `Ctrl+P`.
 
 | Keys | Does |
 | --- | --- |
-| `Ctrl+Enter` | Commit what is staged |
+| `Ctrl+Enter` | Commit what is staged — or, mid-merge or rebase with every conflict resolved, continue it |
+
+## Conflicts
+
+In a conflicted file, outside a text field:
+
+| Keys | Does |
+| --- | --- |
+| `↑` `↓`, `F2` `F3` | Previous / next conflict in the file |
+| `1` `2` `3` | Keep the left side, the right one, or both |
+| `U`, `Ctrl+Z` | Take the last pick back |
+| `Enter` | Stage a file with nothing left to resolve, and open the next |
+| `F4` | Next conflicted file |
+
+## Pull requests
+
+| Keys | Does |
+| --- | --- |
+| `↑` `↓`, `K` `J` | Previous / next request in the list |
+| `1` `2` `3` `4` | Conversation, commits, files, checks |
+| `Ctrl+F` | Search the requests |
+| `Ctrl+Enter` | Send what is in the review box, as a comment |
 
 ## Panels
 

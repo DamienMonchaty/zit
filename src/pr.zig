@@ -202,6 +202,15 @@ const DETAIL_QUERY =
     \\comments(first:100){nodes{author{login} body createdAt diffHunk}}}}}}}
 ;
 
+/// What a new request can be given: who it can be assigned to or asked to
+/// review, the labels it can carry, the branch it goes into by default.
+const META_QUERY =
+    \\query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
+    \\defaultBranchRef{name}
+    \\assignableUsers(first:100){nodes{login name}}
+    \\labels(first:100,orderBy:{field:NAME,direction:ASC}){nodes{name color description}}}}
+;
+
 const ISSUES_QUERY =
     \\query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
     \\issues(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number title author{login} labels(first:20){nodes{name}}}}}}
@@ -272,6 +281,11 @@ pub fn deinit() void {
         finishDetail(w);
     }
     clearDetail();
+    if (meta_worker) |w| w.deinit(io);
+    meta_worker = null;
+    clearMeta();
+    meta_for.deinit(gpa);
+    meta_for = .empty;
     current.deinit(gpa);
     current = .empty;
     slug.deinit(gpa);
@@ -992,6 +1006,114 @@ pub fn pumpIssues() bool {
     return true;
 }
 
+// === What a new request can be given ===
+//
+// Read when the create dialog opens, for its pickers: the people, the
+// labels, the default base. Once per repository; kept until another is
+// asked for.
+
+pub const Person = struct {
+    login: []const u8,
+    /// Their name on the host, empty where they gave none.
+    name: []const u8 = "",
+};
+
+pub const RepoLabel = struct {
+    name: []const u8,
+    color: []const u8 = "",
+    description: []const u8 = "",
+};
+
+pub const Meta = struct {
+    default_branch: []const u8 = "",
+    people: []const Person = &.{},
+    labels: []const RepoLabel = &.{},
+};
+
+pub var meta: Meta = .{};
+pub var meta_status: Status = .idle;
+var meta_arena: ?std.heap.ArenaAllocator = null;
+var meta_worker: ?*run.Capture = null;
+/// The repository `meta` is for: asked again only for another.
+var meta_for: std.ArrayList(u8) = .empty;
+
+pub fn clearMeta() void {
+    if (meta_arena) |*a| a.deinit();
+    meta_arena = null;
+    meta = .{};
+    meta_status = .idle;
+    meta_for.clearRetainingCapacity();
+}
+
+/// Ask for what a new request of the repository at `cwd` can be given,
+/// unless it is already here or on its way.
+pub fn loadMeta(cwd: []const u8) void {
+    if (!initialised or meta_worker != null) return;
+    if (host == .none or !github.signedIn()) return;
+    if (meta_status == .ready and std.mem.eql(u8, meta_for.items, cwd)) return;
+    setCurrent(cwd);
+    const v = vars("") catch return;
+    defer gpa.free(v);
+    meta_worker = github.graphql(cwd, META_QUERY, v) catch return;
+    meta_status = .loading;
+}
+
+/// Land it. Once a frame; true when it landed.
+pub fn pumpMeta() bool {
+    const w = meta_worker orelse return false;
+    if (!w.finished()) return false;
+    defer {
+        w.deinit(io);
+        meta_worker = null;
+    }
+    var why: std.ArrayList(u8) = .empty;
+    defer why.deinit(gpa);
+    var body: []const u8 = "";
+    if (!answerOf(w, &why, &body)) {
+        meta_status = .failed;
+        return true;
+    }
+    var a: std.heap.ArenaAllocator = .init(gpa);
+    const got = parseMeta(a.allocator(), body) catch {
+        a.deinit();
+        meta_status = .failed;
+        return true;
+    };
+    clearMeta();
+    meta_arena = a;
+    meta = got;
+    meta_for.appendSlice(gpa, w.cwd) catch {};
+    meta_status = .ready;
+    return true;
+}
+
+fn parseMeta(alloc: std.mem.Allocator, json: []const u8) !Meta {
+    const PersonNode = struct { login: ?[]const u8 = null, name: ?[]const u8 = null };
+    const LabelMeta = struct { name: ?[]const u8 = null, color: ?[]const u8 = null, description: ?[]const u8 = null };
+    const Answer = struct { data: ?struct { repository: ?struct {
+        defaultBranchRef: ?struct { name: ?[]const u8 = null } = null,
+        assignableUsers: Nodes(PersonNode) = .{},
+        labels: Nodes(LabelMeta) = .{},
+    } = null } = null };
+    const got = try std.json.parseFromSliceLeaky(Answer, alloc, json, json_opts);
+    const repo = (got.data orelse return error.NoData).repository orelse return error.NoRepository;
+    var people: std.ArrayList(Person) = .empty;
+    for (repo.assignableUsers.nodes) |maybe| {
+        const p = maybe orelse continue;
+        try people.append(alloc, .{ .login = p.login orelse continue, .name = p.name orelse "" });
+    }
+    var labels: std.ArrayList(RepoLabel) = .empty;
+    for (repo.labels.nodes) |maybe| {
+        const l = maybe orelse continue;
+        try labels.append(alloc, .{ .name = l.name orelse continue, .color = l.color orelse "", .description = l.description orelse "" });
+    }
+    return .{
+        .default_branch = if (repo.defaultBranchRef) |b| b.name orelse "" else "",
+        .people = try people.toOwnedSlice(alloc),
+        .labels = try labels.toOwnedSlice(alloc),
+    };
+}
+
 fn parseIssues(alloc: std.mem.Allocator, json: []const u8) ![]const Issue {
     const Node = struct {
         number: u32,
@@ -1145,6 +1267,20 @@ test "a batch of commits' checks reads back by sha" {
     try std.testing.expectEqual(Ci.failure, ciOf(a).?);
     try std.testing.expectEqual(@as(?Ci, null), ciOf(b));
     try std.testing.expectEqual(Ci.pending, ciOf(c).?);
+}
+
+test "what a new request can be given reads into its shape" {
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    const got = try parseMeta(a.allocator(),
+        \\{"data":{"repository":{"defaultBranchRef":{"name":"develop"},"assignableUsers":{"nodes":[{"login":"ann","name":"Ann Lee"},{"login":"bo","name":null},null]},"labels":{"nodes":[{"name":"bug","color":"d73a4a","description":"Something is broken"},{"name":null}]}}}}
+    );
+    try std.testing.expectEqualStrings("develop", got.default_branch);
+    try std.testing.expectEqual(@as(usize, 2), got.people.len);
+    try std.testing.expectEqualStrings("Ann Lee", got.people[0].name);
+    try std.testing.expectEqualStrings("", got.people[1].name);
+    try std.testing.expectEqual(@as(usize, 1), got.labels.len);
+    try std.testing.expectEqualStrings("d73a4a", got.labels[0].color);
 }
 
 test "issues read into their shape" {
