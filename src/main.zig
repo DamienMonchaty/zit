@@ -1530,6 +1530,33 @@ const Section = enum(u8) {
         };
     }
 
+    /// The name on its header, as GitComet writes it; `label` stays the
+    /// section's tag.
+    fn title(self: Section) []const u8 {
+        return switch (self) {
+            .local => "Local",
+            .remotes => "Remotes",
+            .stashes => "Stashes",
+            .tags => "Tags",
+            .worktrees => "Worktrees",
+            .pulls => "Pull requests",
+            .issues => "Issues",
+        };
+    }
+
+    /// What an open section with nothing in it says, in its place.
+    fn empty(self: Section) ?[]const u8 {
+        return switch (self) {
+            .local => "No branches",
+            .remotes => "No remotes",
+            .stashes => "No stashes",
+            .tags => "No tags",
+            .worktrees => "No worktrees",
+            // Their own notes: loading, failed, none open.
+            .pulls, .issues => null,
+        };
+    }
+
     fn icon(self: Section) []const u8 {
         return switch (self) {
             .local => dvui.entypo.browser,
@@ -10107,22 +10134,29 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         };
     };
 
-    // The header: the button that folds it, then, in columns of their own at
-    // the right — so nothing moves when one appears — the eye that hides or
-    // shows the whole section in the graph, and the count. Siblings, as a
-    // button nested in the header's would never see its click.
+    // The header, as GitComet draws its sections': a chevron, the section's
+    // icon and its name in the text's own colour, a line over it parting it
+    // from the section above — no count, nothing that comes and goes on hover
+    // but the ⋯ at the end, for the right-click menu. Hiding a whole section
+    // from the graph is in that menu.
     var head = dvui.box(src, .{ .dir = .horizontal }, .{ .id_extra = id, .tag = frameTag("section", section.label()), .expand = .horizontal, .background = false });
     const header_rect = head.data().borderRectScale().r;
     const head_hover = header_rect.contains(dvui.currentWindow().mouse_pt);
     const eye_kind: ?git.Ref.Kind = section.refKind() orelse (if (section == .remotes) git.Ref.Kind.remote else null);
     const refs_shown: ?bool = if (eye_kind) |k| sectionShown(k) else null;
-    // Every ref in it out of the graph: said by fading the title, as a ref
-    // out of the graph is faded, and by the crossed eye staying up.
+    // Every ref in it out of the graph: said by fading the name, as a ref out
+    // of the graph is faded, and by a crossed eye after it, as GitComet marks
+    // a remote it hides.
     const all_hidden = if (refs_shown) |shown| !shown else false;
-    const ink = if (all_hidden) style.textFaint() else style.textMuted();
-    // The hover across the whole line, eye included: drawn by hand, as the
-    // ref lines' are.
+    // The hover across the whole line, ⋯ included: drawn by hand, as the ref
+    // lines' are.
     if (head_hover) header_rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
+    // The line parting it from the section above.
+    if (id > 0) {
+        const s = head.data().borderRectScale().s;
+        (dvui.Rect.Physical{ .x = header_rect.x, .y = header_rect.y, .w = header_rect.w, .h = @max(1, s) })
+            .fill(.{}, .{ .color = .{ .color = style.borderSubtle() }, .fade = 0 });
+    }
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .expand = .horizontal,
@@ -10144,69 +10178,42 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         dvui.icon(@src(), "section_chevron", if (collapsed.*)
             dvui.entypo.chevron_small_right
         else
-            dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textFaint() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
             .margin = .{ .w = style.space.xs },
         });
-
-        // Capitals sit high in their line, which keeps room below for
-        // descenders they never use: the icons go up to meet them.
-        dvui.icon(@src(), "section_icon", section.icon(), .{ .fill_color = .{ .color = ink } }, .{
+        dvui.icon(@src(), "section_icon", section.icon(), .{ .fill_color = .{ .color = if (all_hidden) style.textFaint() else style.textMuted() } }, .{
             .min_size_content = .{ .w = 13, .h = 13 },
             .gravity_y = 0.5,
-            .margin = .{ .h = SECTION_ICON_LIFT, .w = style.space.sm },
+            .margin = .{ .w = style.space.sm },
         });
-
-        dvui.label(@src(), "{s}", .{section.label()}, .{
-            .font = style.section(),
-            .color_text = .{ .color = ink },
+        dvui.label(@src(), "{s}", .{section.title()}, .{
+            .font = style.smallBold(),
+            .color_text = .{ .color = if (all_hidden) style.textFaint() else style.text() },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
+        });
+        if (all_hidden) dvui.icon(@src(), "section_hidden", dvui.entypo.eye_with_line, .{ .fill_color = .{ .color = style.textFaint() } }, .{
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.sm },
         });
     }
 
     var clicked = bw.clicked();
     bw.deinit();
 
-    // The eye's column, kept on every header that has one: shown while the
-    // header is hovered, and for good while the whole section is hidden —
-    // the ref lines' eyes do the same in their gutter.
-    if (refs_shown) |shown| sectionEye(eye_kind.?, shown, if (!shown) style.textMuted() else if (head_hover) style.textFaint() else dvui.Color.transparent);
-
-    // The count, on one pill whatever it is — a zero only fainter — then the
-    // ⋯ for the right-click menu, in the column the ref lines' ⋯ take, short
-    // of the bar the scroll area keeps there. A click on the count folds the
-    // section as the rest of the line does.
+    // The ⋯, in the column the ref lines' ⋯ take, kept and only seen on hover
+    // so nothing moves. Clicks right of it fold the section as the rest does.
     var more_at: ?dvui.Point.Physical = null;
     {
         var tail = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .vertical,
             .background = false,
-            .padding = .{ .x = style.space.xxs, .w = SIDE_RIGHT - style.space.xs },
+            .padding = .{ .w = SIDE_RIGHT - style.space.xs },
         });
         defer tail.deinit();
-        var pill = dvui.box(@src(), .{}, .{
-            .background = true,
-            // A step up on a hovered line, whose fill is the pill's own colour.
-            .color_fill = .{ .color = if (head_hover) style.border() else style.surfaceRaised() },
-            .corners = .all(COUNT_PILL_H / 2),
-            .min_size_content = .{ .w = COUNT_PILL_MIN_W, .h = COUNT_PILL_H },
-            .max_size_content = .height(COUNT_PILL_H),
-            .gravity_y = 0.5,
-            .margin = .{ .h = SECTION_ICON_LIFT / 2 },
-            .padding = .{ .x = 5, .w = 5 },
-        });
-        dvui.label(@src(), "{d}", .{count}, .{
-            .font = style.tinyBold(),
-            .color_text = .{ .color = if (count > 0) style.textMuted() else style.textFaint() },
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
-        pill.deinit();
-        // Kept, and only seen on hover, so the count never moves: a header
-        // has the room a ref line's name does not.
         if (iconButtonTagged(@src(), "section_more", "More…", dvui.entypo.dots_three_horizontal, if (head_hover) style.textMuted() else dvui.Color.transparent, frameTag("section-more", section.label()))) {
             more_at = dvui.currentWindow().mouse_pt;
         }
@@ -10215,7 +10222,7 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
     if (clicked) collapsed.* = !collapsed.*;
     head.deinit();
 
-    sectionMenu(@src(), section, id, header_rect, more_at);
+    sectionMenu(@src(), section, id, header_rect, more_at, if (refs_shown) |shown| .{ .kind = eye_kind.?, .shown = shown } else null);
 
     // A filter opens the sections it searches: a match folded away is a
     // match not found.
@@ -10223,6 +10230,14 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
     if (collapsed.* and !(lists_refs and sidebarFiltering())) return null;
 
     const h = history orelse return null;
+    if (count == 0) if (section.empty()) |note| {
+        // One per empty section, each its own: the note's widgets are made
+        // at one place in the code for all of them.
+        var line = dvui.box(@src(), .{}, .{ .id_extra = id, .expand = .horizontal, .background = false });
+        defer line.deinit();
+        sidebarNote(@src(), note);
+        return null;
+    };
 
     // Open, a section scrolls within a height of its own, as GitKraken's
     // do: a hundred branches do not push the sections under them away. Sized
@@ -10254,21 +10269,6 @@ fn sectionShown(kind: git.Ref.Kind) ?bool {
         if (!isHidden(ref.name)) return true;
     }
     return if (any) false else null;
-}
-
-/// A section's eye: all its refs out of the graph, or all back in — so the
-/// few wanted can be shown again one eye at a time.
-fn sectionEye(kind: git.Ref.Kind, shown: bool, color: dvui.Color) void {
-    const what = switch (kind) {
-        .local => "branches",
-        .remote => "remote branches",
-        .tag => "tags",
-    };
-    var buf: [64]u8 = undefined;
-    const hint = std.fmt.bufPrint(&buf, "{s} all the {s} {s} the graph", .{ if (shown) "Hide" else "Show", what, if (shown) "from" else "in" }) catch "";
-    if (iconButtonTagged(@src(), "section_eye", hint, if (shown) dvui.entypo.eye else dvui.entypo.eye_with_line, color, frameTag("eye-all", what))) {
-        hideAll(kind, shown);
-    }
 }
 
 /// Every ref of `kind` out of the graph, or back in; the branch checked out
@@ -10316,10 +10316,6 @@ const SIDE_GUTTER: f32 = 22 + 2 * style.space.xxs;
 /// Inside a ref line's button, before its name.
 const SIDE_REF_PAD: f32 = style.space.xs;
 const SECTION_ICON_LIFT: f32 = 4;
-/// A section's count: a pill this high, never narrower than this, so one
-/// digit or three keep one right edge and a shape.
-const COUNT_PILL_H: f32 = 16;
-const COUNT_PILL_MIN_W: f32 = 10;
 var section_scroll: [@typeInfo(Section).@"enum".fields.len]dvui.ScrollInfo = @splat(.{});
 
 /// An open section's rows. Returns the ref the user asked to check out.
@@ -10468,6 +10464,8 @@ fn sectionMenu(
     rect: dvui.Rect.Physical,
     /// Where the header's ⋯ was clicked, to open there as a right-click would.
     open_at: ?dvui.Point.Physical,
+    /// The refs it can take out of the graph or bring back, all at once.
+    hide: ?struct { kind: git.Ref.Kind, shown: bool },
 ) void {
     const ctx = dvui.context(src, .{ .rect = rect }, .{ .id_extra = id });
     defer ctx.deinit();
@@ -10542,6 +10540,22 @@ fn sectionMenu(
                 askName(.stash, "");
             }
         },
+    }
+
+    // The whole section out of the graph, or back: the eye the header had.
+    if (hide) |hd| {
+        menuSeparator(90);
+        const what = switch (hd.kind) {
+            .local => "branches",
+            .remote => "remote branches",
+            .tag => "tags",
+        };
+        var buf: [64]u8 = undefined;
+        const caption = std.fmt.bufPrint(&buf, "{s} all the {s} {s} the graph", .{ if (hd.shown) "Hide" else "Show", what, if (hd.shown) "from" else "in" }) catch "";
+        if (menuIcon(@src(), if (hd.shown) dvui.entypo.eye_with_line else dvui.entypo.eye, caption, false)) {
+            fw.close();
+            hideAll(hd.kind, hd.shown);
+        }
     }
 }
 
@@ -21858,15 +21872,17 @@ test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the 
     try clickAt(try tagCenter("eye:feat"));
     try std.testing.expect(!isHidden("feat"));
 
-    // The whole section out — the branch checked out stays — then back.
-    // The section's eye shows on hover, in a column of its own beside the
-    // count, which stays.
+    // The whole section out — the branch checked out stays — then back,
+    // from the section's menu.
     try hoverAt(try tagCenter("section:LOCAL"));
-    try clickAt(try tagCenter("eye-all:branches"));
+    try clickAt(try tagCenter("section-more:LOCAL"));
+    try clickAt(try tagCenter("menu:Hide all the branches from the graph"));
     try std.testing.expect(isHidden("feat"));
     try std.testing.expect(isHidden("side"));
     try std.testing.expect(!isHidden("main"));
-    try clickAt(try tagCenter("eye-all:branches"));
+    try hoverAt(try tagCenter("section:LOCAL"));
+    try clickAt(try tagCenter("section-more:LOCAL"));
+    try clickAt(try tagCenter("menu:Show all the branches in the graph"));
     try std.testing.expectEqual(@as(usize, 0), graph_hidden.items.len);
 
     try hoverAt(try tagCenter("feat"));
