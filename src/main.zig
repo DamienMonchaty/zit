@@ -1948,6 +1948,7 @@ fn appDeinit(win: *dvui.Window) void {
     pr_reply_id.deinit(gpa);
     split_rows.deinit(gpa);
     for ([_]*std.ArrayList(u8){ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| list.deinit(gpa);
+    freeViews();
     if (action_input) |patch| gpa.free(patch);
     action_input = null;
 
@@ -6854,7 +6855,7 @@ fn revealInGraph(id: git.Oid) void {
 
     var rows: std.ArrayList(u32) = .empty;
     defer rows.deinit(gpa);
-    shownRows(h.commits, &rows);
+    shownRows(gpa, h.commits, &rows);
     const row = listRow(@intCast(index), rows.items) orelse
         return setCommandError("That commit is not in this file's history: close it to see the commit.");
     revealCommit(row);
@@ -7930,7 +7931,7 @@ fn stepCommit(delta: i2) void {
     // in the list's order: while searching, ↑ and ↓ go match to match.
     var rows: std.ArrayList(u32) = .empty;
     defer rows.deinit(gpa);
-    shownRows(h.commits, &rows);
+    shownRows(gpa, h.commits, &rows);
     if (rows.items.len == 0) return;
 
     const row: usize = switch (selection) {
@@ -14337,9 +14338,12 @@ fn graphPanel() void {
 
     // Listed before anything is drawn: the scrollbar needs the total, and the
     // bar above says how many of them there are.
+    // In the frame's arena: this is every frame a filter is on, and the heap
+    // is not for what a frame throws away.
+    const frame = dvui.currentWindow().arena();
     var shown: std.ArrayList(u32) = .empty;
-    defer shown.deinit(gpa);
-    if (filtering) shownRows(commits, &shown);
+    defer shown.deinit(frame);
+    if (filtering) shownRows(frame, commits, &shown);
     const matches = shown.items.len;
 
     // A search or an author picked leaves the graph as it is, the commits
@@ -15179,12 +15183,12 @@ fn commitShown(commit: git.Commit, index: usize, terms: []const Term) bool {
 
 /// The commits a filtered list shows, as history indices in its order. The
 /// search is parsed once here, not once per commit.
-fn shownRows(commits: []const git.Commit, out: *std.ArrayList(u32)) void {
+fn shownRows(a: std.mem.Allocator, commits: []const git.Commit, out: *std.ArrayList(u32)) void {
     var buf: [MAX_TERMS]Term = undefined;
     const terms = parseQuery(commit_filter.items, &buf);
     for (commits, 0..) |commit, i| {
         if (!commitShown(commit, i, terms)) continue;
-        out.append(gpa, @intCast(i)) catch return;
+        out.append(a, @intCast(i)) catch return;
     }
 }
 
@@ -21103,6 +21107,29 @@ test "stage, commit and switch branches through the real git commands" {
     try std.testing.expectEqualStrings("main", history.?.head.?);
 }
 
+/// What the views added since 0.1.2 keep from one frame to the next — the
+/// authors' index, a conflicted file's picks, the pull requests' cards and
+/// form, the pickers' filters — freed at exit as between tests. Tests had
+/// them freed; the exit did not: a Debug run's leak report is worth reading
+/// only with nothing in it Zit meant to keep.
+fn freeViews() void {
+    known_authors.deinit(gpa);
+    known_authors = .empty;
+    _ = authors_arena.reset(.free_all);
+    authors_seq = null;
+    clearResolveUndo();
+    resolve_undo.deinit(gpa);
+    resolve_undo = .empty;
+    conflict_path.deinit(gpa);
+    conflict_path = .empty;
+    pr_cards.deinit(gpa);
+    pr_cards = .empty;
+    for ([_]*std.ArrayList(u8){ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
+        l.deinit(gpa);
+        l.* = .empty;
+    }
+}
+
 /// The UI globals that outlive a test the way they outlive a frame.
 ///
 /// Reset, not merely freed: `deinit` leaves an ArrayList undefined rather than
@@ -21173,10 +21200,7 @@ fn resetUiGlobals() void {
     clearNames(&author_only);
     author_only.deinit(gpa);
     author_only = .empty;
-    known_authors.deinit(gpa);
-    known_authors = .empty;
-    _ = authors_arena.reset(.free_all);
-    authors_seq = null;
+    freeViews();
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     default_branch = .empty;
@@ -21201,22 +21225,11 @@ fn resetUiGlobals() void {
     clearRecent();
     recent.deinit(gpa);
     recent = .empty;
-    clearResolveUndo();
-    resolve_undo.deinit(gpa);
-    resolve_undo = .empty;
-    pr_cards.deinit(gpa);
-    for ([_]*std.ArrayList(u8){ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
-        l.deinit(gpa);
-        l.* = .empty;
-    }
     pick_open = null;
     clearJobSteps();
     job_steps.deinit(gpa);
     job_steps = .empty;
-    pr_cards = .empty;
     pr_cards_all = null;
-    conflict_path.deinit(gpa);
-    conflict_path = .empty;
     conflict_focus = 0;
     clearForget();
     identity_name.deinit(gpa);
@@ -24291,7 +24304,7 @@ test "the authors are read through .mailmap, one person once" {
     onlyAuthor(ann.key);
     var rows: std.ArrayList(u32) = .empty;
     defer rows.deinit(gpa);
-    shownRows(history.?.commits, &rows);
+    shownRows(gpa, history.?.commits, &rows);
     try std.testing.expectEqual(@as(usize, 2), rows.items.len);
 
     clearAuthors();
@@ -24376,7 +24389,7 @@ test "the author column filters the list, and the version opens the features" {
     {
         var rows: std.ArrayList(u32) = .empty;
         defer rows.deinit(gpa);
-        shownRows(history.?.commits, &rows);
+        shownRows(gpa, history.?.commits, &rows);
         try std.testing.expectEqual(@as(usize, 1), rows.items.len);
         try std.testing.expectEqualStrings("by bo", history.?.commits[rows.items[0]].summary);
     }
@@ -26049,6 +26062,67 @@ test "a frame drawn again with nothing changed allocates nothing" {
     try std.testing.expectEqual(before, counting.allocs);
 }
 
+// The same, on the screens added since: a filter narrowing the history, a
+// dialog waiting for a name, a toast waiting for a yes.
+test "a frame drawn again allocates nothing, a filter on, a dialog or a toast up" {
+    var counting: CountingAllocator = .{ .child = std.testing.allocator };
+    gpa = counting.allocator();
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try commitFile(&tmp, dir, "b.txt", "second");
+    try expectGit(dir, &.{ "-c", "user.name=Ann", "-c", "user.email=ann@x.invalid", "commit", "-q", "--allow-empty", "-m", "by ann" });
+    try expectGit(dir, &.{ "branch", "feat" });
+    openRepo(dir);
+    defer closeRepo();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    const Idle = struct {
+        /// Heap allocations over five frames once nothing more is asked.
+        fn allocs(c: *CountingAllocator) !usize {
+            try dvui.testing.settle(frameArrowCursor);
+            const before = c.allocs;
+            for (0..5) |_| _ = try dvui.testing.step(frameArrowCursor);
+            return c.allocs - before;
+        }
+    };
+    var found: [4]usize = undefined;
+    // One author's commits alone.
+    onlyAuthor((authorByKey("Ann\nann@x.invalid") orelse return error.AuthorMissing).key);
+    found[0] = try Idle.allocs(&counting);
+    clearAuthors();
+    // A search typed into the commit filter.
+    commit_filter.appendSlice(gpa, "second") catch unreachable;
+    found[1] = try Idle.allocs(&counting);
+    commit_filter.clearRetainingCapacity();
+    // A dialog asking for a name.
+    askNameWith(.rename_branch, "feat", "feat");
+    found[2] = try Idle.allocs(&counting);
+    clearPrompt();
+    // A toast asking for a yes. Its first frames are its first draw —
+    // dvui setting its window up, 2 allocations — so the next five count.
+    ask(.discard, "a.txt");
+    _ = try Idle.allocs(&counting);
+    found[3] = try Idle.allocs(&counting);
+    clearConfirm();
+
+    if (!std.mem.allEqual(usize, &found, 0)) {
+        std.debug.print("heap allocations over 5 idle frames: author filter {d}, search {d}, dialog {d}, toast {d}\n", .{ found[0], found[1], found[2], found[3] });
+        return error.FramesAllocate;
+    }
+}
+
 // The mouse swept over every part of the window, then left alone: the frames
 // it asked for stop within a few, not 100 later — no hover that keeps
 // drawing, no widget whose size goes back and forth.
@@ -26138,6 +26212,17 @@ test "opening and closing everything, again and again, leaks nothing" {
         commit_filter.clearRetainingCapacity();
         toggleGraphPref(&graph_hidden, "zit.hidden", "main");
         toggleGraphPref(&graph_hidden, "zit.hidden", "main");
+        try dvui.testing.settle(frameArrowCursor);
+        // The views since: one author's commits, a dialog, a toast.
+        onlyAuthor((authorByKey("Zit Test\ntest@zync.invalid") orelse return error.AuthorMissing).key);
+        try dvui.testing.settle(frameArrowCursor);
+        clearAuthors();
+        askNameWith(.rename_branch, "main", "main");
+        try dvui.testing.settle(frameArrowCursor);
+        clearPrompt();
+        ask(.discard, "a.txt");
+        try dvui.testing.settle(frameArrowCursor);
+        clearConfirm();
         try dvui.testing.settle(frameArrowCursor);
         closeRepo();
         try dvui.testing.settle(frameArrowCursor);
