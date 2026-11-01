@@ -24153,6 +24153,11 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     try std.testing.expectEqualStrings("first", commit_summary.items);
     try std.testing.expectEqualStrings("with a body", commit_description.items);
     try clickAt(try tagCenter("commit_button"));
+    // A commit is a job: waited for, as Stash and Stage all are. The
+    // frames of the click alone were sometimes over before git was —
+    // the commit not in the history yet, the job left running into the
+    // next test.
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     try expectSubject(dir, "HEAD", "first");
@@ -27358,6 +27363,11 @@ test "audit: the main controls do what they say when clicked" {
     try typeText("audit commit");
     try std.testing.expectEqualStrings("audit commit", commit_summary.items);
     try clickAt(try tagCenter("commit_button"));
+    // A commit is a job: waited for, as Stash and Stage all are. The
+    // frames of the click alone were sometimes over before git was —
+    // the commit not in the history yet, the job left running into the
+    // next test.
+    try pumpJobFrame();
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expect(findCommit("audit commit") != null);
     try std.testing.expectEqual(@as(usize, 0), commit_summary.items.len);
