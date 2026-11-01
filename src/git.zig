@@ -588,6 +588,29 @@ pub fn replaceRegion(
     return out.toOwnedSlice(gpa);
 }
 
+/// `text` with each of `regions` — in the order they come in it — replaced
+/// by its entry in `with`, or left as it is where that is null. One pass:
+/// replacing them one at a time copied the whole text once a region.
+pub fn replaceRegions(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    regions: []const Conflict,
+    with: []const ?[]const u8,
+) error{OutOfMemory}![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.ensureTotalCapacity(gpa, text.len);
+    var at: usize = 0;
+    for (regions, with) |region, replacement| {
+        const part = replacement orelse continue;
+        try out.appendSlice(gpa, text[at..region.start]);
+        try out.appendSlice(gpa, part);
+        at = region.end;
+    }
+    try out.appendSlice(gpa, text[at..]);
+    return out.toOwnedSlice(gpa);
+}
+
 /// Equal but for carriage returns: the working copy has CRLF where
 /// `core.autocrlf` put them, the index's copies LF.
 pub fn sameText(a: []const u8, b: []const u8) bool {
@@ -2707,6 +2730,25 @@ test "a region's base is its own, never the next region's" {
     try std.testing.expectEqualStrings("first mine\n", found[0].ours);
     try std.testing.expect(found[1].has_base);
     try std.testing.expectEqualStrings("second original\n", found[1].base);
+}
+
+test "regions replaced in one pass, the others left as they were" {
+    const a = std.testing.allocator;
+    const text = "a\n<<<<<<< HEAD\n1\n=======\n2\n>>>>>>> o\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\n<<<<<<< HEAD\n5\n=======\n6\n>>>>>>> o\nd\n";
+    const found = try parseConflicts(a, text);
+    defer a.free(found);
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+
+    const out = try replaceRegions(a, text, found, &.{ "one\n", null, "five\n" });
+    defer a.free(out);
+    try std.testing.expectEqualStrings("a\none\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\nfive\nd\n", out);
+
+    // Each the same as replacing that region alone.
+    const first = try replaceRegion(a, text, found[0], &.{"one\n"});
+    defer a.free(first);
+    const only_first = try replaceRegions(a, text, found, &.{ "one\n", null, null });
+    defer a.free(only_first);
+    try std.testing.expectEqualStrings(first, only_first);
 }
 
 test "a marker in the middle of a line is not a conflict" {

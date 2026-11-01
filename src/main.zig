@@ -3883,20 +3883,19 @@ fn runResolve() void {
 }
 
 /// Every region that resolves on its own, at once: each keeps the side that
-/// changed it, line by line at the finest. From the last region up, so the
-/// offsets of those before it still hold.
+/// changed it, line by line at the finest. The file written in one pass —
+/// one region at a time was a copy of all of it for each, 345 ms for 250
+/// regions of a 1.3 MB lockfile.
 fn runResolveSafe() void {
-    var text = gpa.dupe(u8, conflict_text) catch return;
-    defer gpa.free(text);
-    var i = conflicts.len;
-    while (i > 0) {
-        i -= 1;
-        const auto = (git.autoResolve(gpa, conflicts[i]) catch null) orelse continue;
-        defer gpa.free(auto.text);
-        const next = git.replaceRegion(gpa, text, conflicts[i], &.{auto.text}) catch return;
-        gpa.free(text);
-        text = next;
+    const with = gpa.alloc(?[]const u8, conflicts.len) catch return;
+    defer gpa.free(with);
+    @memset(with, null);
+    defer for (with) |w| if (w) |t| gpa.free(t);
+    for (conflicts, with) |region, *w| {
+        if (git.autoResolve(gpa, region) catch null) |auto| w.* = auto.text;
     }
+    const text = git.replaceRegions(gpa, conflict_text, conflicts, with) catch return;
+    defer gpa.free(text);
     _ = writeConflictFile(text, true);
 }
 
