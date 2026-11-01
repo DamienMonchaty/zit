@@ -533,11 +533,10 @@ pub fn parseConflicts(gpa: std.mem.Allocator, text: []const u8) error{OutOfMemor
         }
 
         // Only a `|||||||` before the split is this region's base; a later one
-        // belongs to the next conflict down the file.
-        const base_at = blk: {
-            const at = findMarker(text, ours_start, BASE_MARK) orelse break :blk null;
-            break :blk if (at < split) at else null;
-        };
+        // belongs to the next conflict down the file. Looked for up to the
+        // split alone: git's default markers have none, and a search to the
+        // end of the file for each region was 88 ms for 500 of them in 1 MB.
+        const base_at = findMarker(text[0..split], ours_start, BASE_MARK);
 
         const ours_end = base_at orelse split;
         const end = lineEnd(text, close);
@@ -2692,6 +2691,22 @@ test "diff3 style keeps the base out of both sides" {
     try std.testing.expectEqualStrings("mine\n", found[0].ours);
     try std.testing.expectEqualStrings("original\n", found[0].base);
     try std.testing.expectEqualStrings("yours\n", found[0].theirs);
+}
+
+test "a region's base is its own, never the next region's" {
+    const text =
+        "<<<<<<< HEAD\nfirst mine\n=======\nfirst yours\n>>>>>>> other\n" ++
+        "between\n" ++
+        "<<<<<<< HEAD\nsecond mine\n||||||| base\nsecond original\n=======\nsecond yours\n>>>>>>> other\n";
+
+    const found = try parseConflicts(std.testing.allocator, text);
+    defer std.testing.allocator.free(found);
+
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+    try std.testing.expect(!found[0].has_base);
+    try std.testing.expectEqualStrings("first mine\n", found[0].ours);
+    try std.testing.expect(found[1].has_base);
+    try std.testing.expectEqualStrings("second original\n", found[1].base);
 }
 
 test "a marker in the middle of a line is not a conflict" {
