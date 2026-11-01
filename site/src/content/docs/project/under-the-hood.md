@@ -32,7 +32,7 @@ zig build dist                     # release executables in zig-out/dist/
 | Option | Does |
 | --- | --- |
 | `-Doptimize=Debug` | A debug build: stack traces, leak checks |
-| `-Dstrip=false` | Keep the symbols, for a readable stack trace |
+| `-Dtrace` | Keep the symbols and the unwind tables, for a readable stack trace |
 | `-Dsystem-libgit2=true` | Link the machine's libgit2, for a quicker local build |
 
 `zig build dist` cross-compiles from any machine with GNU `tar` and `rm` on the

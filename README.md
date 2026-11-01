@@ -56,8 +56,8 @@ repository.
 
 | Download | Size |
 | --- | --- |
-| Linux x86_64 (`.tar.gz`) | 5.5 MB |
-| Windows x86_64 (`.exe`) | 12.5 MB |
+| Linux x86_64 (`.tar.gz`) | 3.2 MB |
+| Windows x86_64 (`.exe`) | 7.3 MB |
 
 Zit draws a frame only when something changes, so an idle window costs
 nothing. Every number here can be measured again with `zig build bench --
