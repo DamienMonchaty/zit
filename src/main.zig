@@ -3124,6 +3124,13 @@ const ApiCall = struct {
 /// What a call's success sets off besides the next in the run.
 const ApiThen = enum {
     none,
+    /// A request merged or closed: off the open list, and shown as such,
+    /// before GitHub's own lists have caught up. Its number in
+    /// `api_gone_number`.
+    gone,
+    /// The branch after a merge: GitHub may have deleted it itself, where
+    /// the repository says to — gone either way, and no failure.
+    branch_after_merge,
     /// Empty the review box: what it held went out.
     clear_comment,
     clear_reply,
@@ -3143,6 +3150,9 @@ var api_assignees: std.ArrayList(u8) = .empty;
 var api_labels: std.ArrayList(u8) = .empty;
 /// Fetch once the run succeeds: it moved branches on the remote.
 var api_fetch_after = false;
+/// For `.gone`: the request merged or closed, and what it now is.
+var api_gone_number: u32 = 0;
+var api_gone_state: []const u8 = "";
 
 /// `owner/name` on GitHub of the open repository; empty when it is not there.
 var repo_slug: std.ArrayList(u8) = .empty;
@@ -3219,6 +3229,14 @@ fn collectApi() void {
         (if (w.err.items.len > 0) a.allocator().dupe(u8, w.err.items) catch "curl failed." else "curl failed.")
     else
         github.failure(a.allocator(), github.split(w.out));
+    // A branch already deleted is what was asked for; and a failure there
+    // does not keep the list from being read again.
+    if (failed != null and api_then == .branch_after_merge) {
+        if (api_queue.items.len > 0) return startNextApi();
+        refreshRequests();
+        if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
+        return;
+    }
     if (failed) |why| {
         clearApiQueue();
         setCommandError(why);
@@ -3235,6 +3253,13 @@ fn collectApi() void {
             pr_reply_id.clearRetainingCapacity();
         },
         .ask_reviewers => askReviewers(github.split(w.out).body),
+        .gone => {
+            pr.markGone(api_gone_number);
+            if (pr.detail) |*d| if (d.number == api_gone_number) {
+                d.state = api_gone_state;
+            };
+        },
+        .branch_after_merge => {},
     }
     if (api_queue.items.len > 0) return startNextApi();
     // A request just made, its reviewers and labels set: open it, in the
@@ -4076,19 +4101,23 @@ fn runConfirmed() void {
                 std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\",\"sha\":\"{s}\"}}", .{ method, sha })
             else
                 std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\"}}", .{method})) catch return clearConfirm();
-            requestApi("Merging", "PUT", apiPath(&path, "/pulls/{d}/merge", .{number}), body, .none);
+            api_gone_number = number;
+            api_gone_state = "MERGED";
+            requestApi("Merging", "PUT", apiPath(&path, "/pulls/{d}/merge", .{number}), body, .gone);
             // Its branch after it, as the toggle asked: GitHub's ref, by name —
             // unless it lives in a fork, which is not this repository's to delete.
             if (pr_delete_branch) if (pr.detail) |d| if (d.number == number and d.head.len > 0 and !d.fork) {
                 var ref_path: [512]u8 = undefined;
-                requestApi("Deleting the branch", "DELETE", apiPath(&ref_path, "/git/refs/heads/{s}", .{d.head}), null, .none);
+                requestApi("Deleting the branch", "DELETE", apiPath(&ref_path, "/git/refs/heads/{s}", .{d.head}), null, .branch_after_merge);
             };
             api_fetch_after = true;
         },
         .close_request => {
             var path: [512]u8 = undefined;
             const number = std.fmt.parseInt(u32, c.arg, 10) catch return clearConfirm();
-            requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .none);
+            api_gone_number = number;
+            api_gone_state = "CLOSED";
+            requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .gone);
         },
         .sign_out => signOutGithub(c.arg),
         .stage_markers => if (c.arg.len == 0)
@@ -5278,14 +5307,17 @@ fn requestDetail() void {
     });
     defer panel.deinit();
 
-    if (pr_selected == null) return emptyState(@src(), "Pick one on the left.");
-    const d = pr.detail orelse return emptyState(@src(), switch (pr.detail_status) {
-        .failed => "Could not read it.",
-        else => "Loading…",
-    });
-    // Refreshing frees what `d` points into: done once the pane is drawn.
+    const number = pr_selected orelse return emptyState(@src(), "Pick one on the left.");
+    const d = pr.detail orelse {
+        // Being read: its head at once, from the list it was picked in, and
+        // the rest to come under it.
+        if (pr.detail_status != .failed) if (listedRequest(number)) |r| loadingHeader(r);
+        return emptyState(@src(), if (pr.detail_status == .failed) "Could not read it." else "Loading…");
+    };
+    // Read again where it is — the page stays up until the answer replaces
+    // it, which frees what `d` points into: asked once the pane is drawn.
     var reload = false;
-    defer if (reload) selectRequest(d.number);
+    defer if (reload) pr.loadDetail(repo_path.items, d.number);
     if (pr_reread_at != 0) {
         if (frame_now_s >= pr_reread_at) {
             pr_reread_at = 0;
@@ -5295,20 +5327,15 @@ fn requestDetail() void {
 
     // The whole pane, and where there is the room GitHub's sidebar on its
     // right: who reviews, who it is assigned to, its labels.
-    const total = @max(320, panel.data().contentRect().w - 2 * style.space.xl);
+    const pane_w = panel.data().contentRect().w;
+    const total = @max(320, pane_w - 2 * style.space.xl);
     const side = total >= PR_SIDE_FROM;
     const main_w = if (side) total - PR_SIDE_W - style.space.xl else total;
-    {
-        var head = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .gravity_x = 0.5,
-            .min_size_content = .{ .w = total },
-            .max_size_content = .width(total),
-            .background = false,
-        });
-        defer head.deinit();
-        requestHeader(d, &reload, !side);
-        requestTabs(d);
-    }
+    // The head and its tabs a banner from one edge of the pane to the other,
+    // what they hold set in as far as the page under them is.
+    const inset = @max(style.space.sm, (pane_w - total) / 2);
+    requestHeader(d, &reload, !side, inset);
+    requestTabs(d, inset);
 
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     {
@@ -5362,21 +5389,43 @@ fn requestConversation(d: pr.Detail) void {
         pr_cards.clearRetainingCapacity();
         pr_cards_all = null;
     }
-    // Expand all, Collapse all: for a long conversation, where only the
-    // last few are open to begin with.
-    if (d.comments.len + d.reviews.len > CARDS_OPEN_AT_END) {
+    // How many conversations on lines of the diff are still open; Expand
+    // all, Collapse all for a long conversation, where only the last few
+    // are open to begin with.
+    const many = d.comments.len + d.reviews.len > CARDS_OPEN_AT_END;
+    const open_threads = openThreads(d);
+    if (many or d.threads.len > 0) {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
         defer bar.deinit();
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (linkButtonTagged(@src(), "Expand all", style.textMuted(), "pr:expand_all")) {
-            pr_cards.clearRetainingCapacity();
-            pr_cards_all = true;
+        if (d.threads.len > 0) {
+            const hue = if (open_threads > 0) style.get().yellow else style.success();
+            dvui.icon(@src(), "threads_icon", if (open_threads > 0) dvui.entypo.chat else dvui.entypo.check, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .w = style.space.sm } });
+            if (open_threads > 0) {
+                dvui.label(@src(), "{d} open conversation{s}", .{ open_threads, plural(open_threads) }, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+            } else {
+                dvui.label(@src(), "Every conversation is resolved", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+            }
+            const settled = d.threads.len - open_threads;
+            if (settled > 0) {
+                dvui.label(@src(), "· {d} resolved", .{settled}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
+                if (linkButtonTagged(@src(), if (pr_threads_all) "Fold them" else "Open them", style.textMuted(), "pr:threads_all")) pr_threads_all = !pr_threads_all;
+            }
         }
-        if (linkButtonTagged(@src(), "Collapse all", style.textMuted(), "pr:collapse_all")) {
-            pr_cards.clearRetainingCapacity();
-            pr_cards_all = false;
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (many) {
+            if (linkButtonTagged(@src(), "Expand all", style.textMuted(), "pr:expand_all")) {
+                pr_cards.clearRetainingCapacity();
+                pr_cards_all = true;
+            }
+            if (linkButtonTagged(@src(), "Collapse all", style.textMuted(), "pr:collapse_all")) {
+                pr_cards.clearRetainingCapacity();
+                pr_cards_all = false;
+            }
         }
     }
+    // Which threads a review has shown under it; the rest after the lot.
+    const shown_threads = dvui.currentWindow().arena().alloc(bool, d.threads.len) catch return;
+    @memset(shown_threads, false);
     var timeline = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
     {
         defer timeline.deinit();
@@ -5394,8 +5443,9 @@ fn requestConversation(d: pr.Detail) void {
                 if (take_review) {
                     const r = d.reviews[ri];
                     ri += 1;
-                    // A bare "commented" review says nothing: not an event.
-                    if (r.body.len == 0 and std.mem.eql(u8, r.state, "COMMENTED")) continue;
+                    // A bare "commented" review says nothing — unless it is
+                    // what left comments on lines of the diff.
+                    if (r.body.len == 0 and std.mem.eql(u8, r.state, "COMMENTED") and !reviewHasThreads(d, r.id)) continue;
                     events.append(a, .{ .note = r, .review = true }) catch break;
                 } else {
                     events.append(a, .{ .note = d.comments[ci], .review = false }) catch break;
@@ -5406,7 +5456,8 @@ fn requestConversation(d: pr.Detail) void {
         var i: usize = 0;
         while (i < events.items.len) {
             var end = i + 1;
-            while (end < events.items.len and std.mem.eql(u8, events.items[end].note.author, events.items[i].note.author)) end += 1;
+            // A review with a conversation still open is never folded away.
+            while (end < events.items.len and std.mem.eql(u8, events.items[end].note.author, events.items[i].note.author) and !(events.items[end].review and reviewHasOpenThreads(d, events.items[end].note.id))) end += 1;
             const bit: u128 = @as(u128, 1) << @intCast(i % 128);
             const folded = end - i >= 3 and pr_runs_open & bit == 0;
             for (i..end) |k| {
@@ -5418,13 +5469,23 @@ fn requestConversation(d: pr.Detail) void {
                 const e = events.items[k];
                 // A long conversation is read from its end: the last few open.
                 const open = k + CARDS_OPEN_AT_END >= events.items.len;
-                if (e.review) reviewEvent(k + 1, e.note, open) else timelineCard(k + 1, e.note.author, "commented", pr.isoSeconds(e.note.when), "", e.note.body, false, open);
+                if (e.review) {
+                    reviewEvent(k + 1, e.note, open, reviewHasThreads(d, e.note.id));
+                    // Its conversations on lines of the diff, under it, as
+                    // the host shows them.
+                    for (d.threads, 0..) |t, ti| {
+                        if (e.note.id.len == 0 or !std.mem.eql(u8, t.review, e.note.id)) continue;
+                        shown_threads[ti] = true;
+                        threadRow(ti, t, d, true);
+                    }
+                } else timelineCard(k + 1, e.note.author, "commented", pr.isoSeconds(e.note.when), "", e.note.body, false, open);
             }
             i = end;
         }
+        // Those no review on the page opened: after it, on the rail.
+        for (d.threads, 0..) |t, ti| if (!shown_threads[ti]) threadRow(ti, t, d, false);
     }
 
-    reviewThreads(d);
     requestComposer();
     requestMergeCard(d);
 }
@@ -5452,7 +5513,7 @@ fn requestSidebar(d: pr.Detail) void {
 
     sideHeading(.reviewers, d);
     if (d.reviewers.len == 0) sideNone(0, "No reviews yet");
-    for (d.reviewers, 0..) |r, i| sideReviewer(i, r);
+    for (d.reviewers, 0..) |r, i| sideReviewer(i, r, d.number);
     sideRule(0);
 
     sideHeading(.assignees, d);
@@ -5573,7 +5634,7 @@ fn sideRule(id: usize) void {
 }
 
 /// A reviewer: who, and where they stand, as an icon of its colour.
-fn sideReviewer(id: usize, r: pr.Reviewer) void {
+fn sideReviewer(id: usize, r: pr.Reviewer, number: u32) void {
     const icon: []const u8, const hue: dvui.Color = if (std.mem.eql(u8, r.state, "APPROVED"))
         .{ dvui.entypo.check, style.success() }
     else if (std.mem.eql(u8, r.state, "CHANGES_REQUESTED"))
@@ -5585,6 +5646,15 @@ fn sideReviewer(id: usize, r: pr.Reviewer) void {
     var line = sidePerson(id, r.login);
     defer line.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+    // One who has answered can be asked again, once the changes are made.
+    if (!std.mem.eql(u8, r.state, "REQUESTED")) {
+        const a = dvui.currentWindow().arena();
+        const hint = std.fmt.allocPrint(a, "Ask {s} for a review again", .{r.login}) catch "Ask for a review again";
+        if (iconButtonTagged(@src(), "rerequest", hint, dvui.entypo.cycle, style.textFaint(), frameTag("pr:rerequest", r.login))) {
+            var path: [512]u8 = undefined;
+            requestApi("Asking for a review", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, r.login)}) catch return, .none);
+        }
+    }
     dvui.icon(@src(), "review_state", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5 });
 }
 
@@ -5756,12 +5826,13 @@ fn previewLine(body: []const u8) []const u8 {
 
 /// A review: a card when it says something, one coloured line when it is
 /// only a verdict.
-fn reviewEvent(id: usize, r: pr.Note, open: bool) void {
+fn reviewEvent(id: usize, r: pr.Note, open: bool, has_threads: bool) void {
     const when = pr.isoSeconds(r.when);
     const v = verdictOf(r.state);
     if (r.body.len > 0) return timelineCard(id, r.author, "", when, r.state, r.body, false, open);
-    // A bare "commented" review has no words and no verdict: nothing to show.
-    if (std.mem.eql(u8, r.state, "COMMENTED")) return;
+    // A bare "commented" review has no words and no verdict: nothing to show
+    // but the comments it left on lines, if any — "ann reviewed", over them.
+    if (std.mem.eql(u8, r.state, "COMMENTED") and !has_threads) return;
     var row = TimelineRow.begin(id);
     row.rail(railIcon, RailIcon{ .icon = v.icon, .hue = v.hue });
     defer row.end();
@@ -5834,12 +5905,29 @@ fn markdownBody(body: []const u8) void {
             defer item.deinit();
             const checked = std.mem.startsWith(u8, trimmed[2..], "[x]") or std.mem.startsWith(u8, trimmed[2..], "[X]");
             const box_item = checked or std.mem.startsWith(u8, trimmed[2..], "[ ]");
-            dvui.label(@src(), "{s}", .{if (box_item) (if (checked) "☑" else "☐") else "•"}, .{ .font = style.small(), .color_text = .{ .color = if (checked) style.success() else style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+            if (box_item) {
+                // Drawn: Inter has no ☑ or ☐, and they came out blank.
+                var tick = dvui.box(@src(), .{}, .{
+                    .background = true,
+                    .color_fill = .{ .color = if (checked) style.success() else style.surface() },
+                    .border = dvui.Rect.all(1),
+                    .color_border = .{ .color = if (checked) style.success() else style.textFaint() },
+                    .corners = style.radius.tag,
+                    .min_size_content = .{ .w = 12, .h = 12 },
+                    .max_size_content = .size(.{ .w = 12, .h = 12 }),
+                    .gravity_y = 0.5,
+                    .margin = .{ .w = style.space.sm },
+                });
+                if (checked) dvui.icon(@src(), "md_tick", dvui.entypo.check, .{ .fill_color = .{ .color = style.textOnAccent() } }, .{ .min_size_content = .{ .w = 9, .h = 9 }, .gravity_x = 0.5, .gravity_y = 0.5 });
+                tick.deinit();
+            } else dvui.label(@src(), "•", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
             tl.addText(if (box_item) std.mem.trimStart(u8, clean[2..], "[xX ] ") else clean[2..], .{ .font = style.small(), .color_text = .{ .color = style.text() } });
             tl.deinit();
         } else if (trimmed[0] == '>') {
-            var quote = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = n, .expand = .horizontal, .background = false, .border = .{ .x = 3 }, .color_border = .{ .color = style.border() }, .padding = .{ .x = style.space.sm }, .margin = .{ .y = 2, .h = 2 } });
+            // Filled as the card under it: dvui fills a box with a border on
+            // one side only, and in the theme's colour unless told.
+            var quote = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = n, .expand = .horizontal, .background = true, .color_fill = .{ .color = style.surface() }, .border = .{ .x = 3 }, .color_border = .{ .color = style.border() }, .padding = .{ .x = style.space.sm }, .margin = .{ .y = 2, .h = 2 } });
             defer quote.deinit();
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
             tl.addText(std.mem.trimStart(u8, clean, "> "), .{ .font = style.small(), .color_text = .{ .color = style.textMuted() } });
@@ -5960,14 +6048,14 @@ var pr_tab: PrTab = .conversation;
 /// The request's head, above its tabs: where it stands as a pill, its title,
 /// who wants what merged where, who reviews it, its labels, and a line on
 /// what still stands between it and a merge.
-fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool) void {
+fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) void {
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
         .background = true,
         .color_fill = .{ .color = style.surfaceRaised() },
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
-        .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.md },
+        .padding = .{ .x = inset, .y = style.space.lg, .w = inset, .h = style.space.md },
     });
     defer head.deinit();
 
@@ -5997,7 +6085,12 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool) void {
         if (requestOpen(d) and !d.draft) {
             if (iconButtonTagged(@src(), "pr_draft", "Convert it back to a draft", dvui.entypo.back, style.textMuted(), "pr:draft")) requestOnRequest("Making a draft", "convertPullRequestToDraft", d.id);
         }
-        if (iconButtonTagged(@src(), "pr_refresh", "Read it again", dvui.entypo.cw, style.textMuted(), "pr:refresh")) reload.* = true;
+        // While it is read again, or an action on it is out, the dots and
+        // what is being done instead of the refresh icon.
+        if (pr.detailLoading() or api_job != null) {
+            loadingSpinner(@src());
+            dvui.label(@src(), "{s}", .{if (api_job != null and api_label.len > 0) api_label else "Reading"}, .{ .tag = "pr:busy", .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
+        } else if (iconButtonTagged(@src(), "pr_refresh", "Read it again", dvui.entypo.cw, style.textMuted(), "pr:refresh")) reload.* = true;
     }
     // Who, from where into where, when; its size on the right.
     {
@@ -6030,6 +6123,45 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool) void {
         }
     }
     mergeReadiness(d);
+}
+
+/// The request `number` as the list it was picked in has it.
+fn listedRequest(number: u32) ?pr.Request {
+    for (pr.list) |r| if (r.number == number) return r;
+    for (pr.past) |r| if (r.number == number) return r;
+    return null;
+}
+
+/// A request's head while the rest of it is read: what the list knew — its
+/// state, number and title, who wants it merged from where into where.
+fn loadingHeader(r: pr.Request) void {
+    var head = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .tag = "pr:loading",
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surfaceRaised() },
+        .border = .{ .h = 1 },
+        .color_border = .{ .color = style.border() },
+        .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.md },
+    });
+    defer head.deinit();
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer line.deinit();
+        if (r.draft) statePill("Draft", style.textMuted()) else statePill("Open", style.success());
+        dvui.label(@src(), "#{d}", .{r.number}, .{ .font = style.title(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
+        tl.addText(r.title, .{ .font = style.title(), .color_text = .{ .color = style.text() } });
+        tl.deinit();
+    }
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
+    defer line.deinit();
+    avatarSized(@src(), 0, requestAuthor(r.author), null, null, 20);
+    dvui.label(@src(), "{s}", .{r.author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "wants to merge", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+    branchChip(0, r.branch);
+    dvui.icon(@src(), "into", dvui.entypo.arrow_long_right, .{ .fill_color = .{ .color = style.textFaint() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs, .w = style.space.xs } });
+    branchChip(1, r.base);
 }
 
 /// Ask GitHub to merge it once it can, by the method picked. Deleting its
@@ -6320,9 +6452,12 @@ fn mergeReadiness(d: pr.Detail) void {
     const t = tallyChecks(d.checks);
     var buf: [160]u8 = undefined;
     const icon: []const u8, const hue: dvui.Color, const text: []const u8 = blk: {
+        // Done with: what became of it, not whether it could merge.
+        if (std.ascii.eqlIgnoreCase(d.state, "MERGED")) break :blk .{ dvui.entypo.merge, style.get().purple, std.fmt.bufPrint(&buf, "Merged into {s}", .{d.base}) catch "Merged" };
+        if (std.ascii.eqlIgnoreCase(d.state, "CLOSED")) break :blk .{ dvui.entypo.block, style.danger(), "Closed without merging" };
         if (std.mem.eql(u8, d.mergeable, "CONFLICTING")) break :blk .{ dvui.entypo.warning, style.danger(), std.fmt.bufPrint(&buf, "Conflicts with {s}: resolve them before it can merge", .{d.base}) catch "" };
         if (t.failed > 0) break :blk .{ dvui.entypo.cross, style.danger(), std.fmt.bufPrint(&buf, "{d} check{s} failing", .{ t.failed, plural(t.failed) }) catch "" };
-        if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) break :blk .{ dvui.entypo.cross, style.danger(), "Changes were asked for" };
+        if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) break :blk .{ dvui.entypo.cross, style.danger(), changesText(d) };
         if (std.mem.eql(u8, d.merge_state, "BEHIND")) break :blk .{ dvui.entypo.arrow_down, style.get().orange, std.fmt.bufPrint(&buf, "Behind {s}: update the branch first", .{d.base}) catch "" };
         if (std.mem.eql(u8, d.review, "REVIEW_REQUIRED")) break :blk .{ dvui.entypo.eye, style.get().orange, "A review is still needed" };
         if (t.running > 0) break :blk .{ dvui.entypo.clock, style.get().orange, std.fmt.bufPrint(&buf, "{d} check{s} still running", .{ t.running, plural(t.running) }) catch "" };
@@ -6348,14 +6483,44 @@ fn mergeReadiness(d: pr.Detail) void {
     if (d.auto_merge) tinyBadge(@src(), 0, "auto-merge on", style.accent());
     readinessAction(d, t);
 
-    // Asked again every few seconds while GitHub has no answer yet.
-    if (mergeUnknown(d)) {
+    // Asked again every few seconds while GitHub has no answer yet — about
+    // one still open: a merged one's stays unknown for good.
+    if (requestOpen(d) and mergeUnknown(d)) {
         if (frame_now_s - pr_recheck_s >= PR_RECHECK_S) {
             pr_recheck_s = frame_now_s;
             pr.loadDetail(repo_path.items, d.number);
         }
         dvui.timer(bar.data().id, PR_RECHECK_S * std.time.us_per_s);
     }
+}
+
+/// "ann asked for changes · 2 open conversations": who, and what is left.
+fn changesText(d: pr.Detail) []const u8 {
+    const a = dvui.currentWindow().arena();
+    var who: []const u8 = "";
+    var n: usize = 0;
+    for (d.reviewers) |r| if (std.mem.eql(u8, r.state, "CHANGES_REQUESTED")) {
+        if (n == 0) who = r.login;
+        n += 1;
+    };
+    const head = (switch (n) {
+        0 => "Changes were asked for",
+        1 => std.fmt.allocPrint(a, "{s} asked for changes", .{who}),
+        else => std.fmt.allocPrint(a, "{s} and {d} more asked for changes", .{ who, n - 1 }),
+    }) catch "Changes were asked for";
+    const open = openThreads(d);
+    if (open == 0) return head;
+    return std.fmt.allocPrint(a, "{s} · {d} open conversation{s}", .{ head, open, plural(open) }) catch head;
+}
+
+/// Ask again those who asked for changes, once they are made.
+fn rerequestReview(d: pr.Detail) void {
+    const a = dvui.currentWindow().arena();
+    var who: std.ArrayList(u8) = .empty;
+    for (d.reviewers) |r| if (std.mem.eql(u8, r.state, "CHANGES_REQUESTED")) listAppend(a, &who, r.login);
+    if (who.items.len == 0) return;
+    var path: [512]u8 = undefined;
+    requestApi("Asking for a review", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, who.items)}) catch return, .none);
 }
 
 /// The one thing to do next about a request, at the end of its readiness
@@ -6369,12 +6534,25 @@ fn readinessAction(d: pr.Detail, t: anytype) void {
         if (!d.fork and linkButtonTagged(@src(), "or merge it in", style.textMuted(), "pr:resolve_merge")) resolveRequestLocally(d, false);
         return;
     }
-    if (std.mem.eql(u8, d.merge_state, "BEHIND")) {
-        if (opButton(@src(), "Update branch", "pr:update")) updateRequestBranch(d);
-        return;
-    }
+    // In the order the line above says what is in the way.
     if (t.failed > 0) {
         if (opButton(@src(), "See the checks", "pr:see_checks")) pr_tab = .checks;
+        return;
+    }
+    // Changes asked for: to the conversations left, then onto its branch to
+    // make them, then the reviewers asked again.
+    if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) {
+        if (openThreads(d) > 0 and linkButtonTagged(@src(), "Show them", style.textMuted(), "pr:to_threads")) {
+            pr_tab = .conversation;
+            pr_scroll_thread = true;
+        }
+        if (!onRequestBranch(d)) {
+            if (opButton(@src(), "Check out to fix", "pr:fix")) checkoutRequest(d.number, d.head, d.fork);
+        } else if (opButton(@src(), "Re-request review", "pr:rerequest")) rerequestReview(d);
+        return;
+    }
+    if (std.mem.eql(u8, d.merge_state, "BEHIND")) {
+        if (opButton(@src(), "Update branch", "pr:update")) updateRequestBranch(d);
         return;
     }
     if (d.draft) {
@@ -6382,7 +6560,6 @@ fn readinessAction(d: pr.Detail, t: anytype) void {
         return;
     }
     if (mergeUnknown(d) or t.running > 0) return;
-    if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) return;
     var num: [12]u8 = undefined;
     if (opButton(@src(), "Merge…", "pr:merge")) ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
 }
@@ -6417,7 +6594,7 @@ const PR_RECHECK_S = 3;
 
 /// The tabs under the head: the conversation, the commits, the files, the
 /// checks, each with how many.
-fn requestTabs(d: pr.Detail) void {
+fn requestTabs(d: pr.Detail, inset: f32) void {
     // Sideways when the pane is narrower than the four of them.
     var scroll = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto, .horizontal_bar = .auto_overlay }, .{
         .expand = .horizontal,
@@ -6427,9 +6604,10 @@ fn requestTabs(d: pr.Detail) void {
         .color_border = .{ .color = style.border() },
     });
     defer scroll.deinit();
+    // The first tab's icon under the head's first word.
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .background = false,
-        .padding = .{ .x = style.space.lg },
+        .padding = .{ .x = @max(0, inset - style.space.md) },
     });
     defer bar.deinit();
     const tabs = [_]struct { PrTab, []const u8, []const u8, usize }{
@@ -6561,7 +6739,9 @@ fn requestFiles(d: pr.Detail) void {
         var row = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = i,
             .expand = .horizontal,
-            .background = false,
+            // The card's own: dvui fills a box ruled on one side anyway.
+            .background = true,
+            .color_fill = .{ .color = style.surface() },
             .border = .{ .h = if (i + 1 < d.file_list.len) 1 else 0 },
             .color_border = .{ .color = style.borderSubtle() },
             .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
@@ -6577,8 +6757,8 @@ fn requestFiles(d: pr.Detail) void {
         }
         // The threads on this file, under it, where they belong.
         var n: usize = 0;
-        for (d.threads) |t| if (std.mem.eql(u8, t.path, f.path)) {
-            threadCard(i * 100 + n, t);
+        for (d.threads, 0..) |t, ti| if (std.mem.eql(u8, t.path, f.path)) {
+            threadCard(i * 100 + n, ti, t, d, true);
             n += 1;
         };
     }
@@ -6702,87 +6882,138 @@ fn emptyNote(text: []const u8) void {
     dvui.label(@src(), "{s}", .{text}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
 }
 
-/// The line comments, a card per thread: open ones only unless asked, each
-/// with the diff it was left on and its whole conversation.
-fn reviewThreads(d: pr.Detail) void {
-    if (d.threads.len == 0) return;
-    var open: usize = 0;
-    for (d.threads) |t| open += @intFromBool(!t.resolved);
-
-    {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
-        defer line.deinit();
-        dvui.label(@src(), "REVIEW THREADS", .{}, .{ .font = style.section(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        dvui.label(@src(), "{d} unresolved · {d} in all", .{ open, d.threads.len }, .{
-            .font = style.tiny(),
-            .color_text = .{ .color = if (open > 0) style.get().yellow else style.textFaint() },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = dvui.Rect.all(0),
-        });
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (d.threads.len > open) {
-            if (chipButton(@src(), if (pr_threads_all) dvui.entypo.eye_with_line else dvui.entypo.eye, if (pr_threads_all) "Hide resolved" else "Show resolved", false)) pr_threads_all = !pr_threads_all;
-        }
-    }
-
-    var shown: usize = 0;
-    for (d.threads, 0..) |t, i| {
-        if (t.resolved and !pr_threads_all) continue;
-        shown += 1;
-        threadCard(i, t);
-    }
-    if (shown == 0) {
-        dvui.label(@src(), "Every thread is resolved.", .{}, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.success() },
-            .margin = .{ .h = style.space.lg },
-            .padding = dvui.Rect.all(0),
-        });
-    }
+/// How many conversations on lines of the diff are still open.
+fn openThreads(d: pr.Detail) usize {
+    var n: usize = 0;
+    for (d.threads) |t| n += @intFromBool(!t.resolved);
+    return n;
 }
 
-fn threadCard(id: usize, t: pr.Thread) void {
+fn reviewHasThreads(d: pr.Detail, review: []const u8) bool {
+    if (review.len == 0) return false;
+    for (d.threads) |t| if (std.mem.eql(u8, t.review, review)) return true;
+    return false;
+}
+
+fn reviewHasOpenThreads(d: pr.Detail, review: []const u8) bool {
+    if (review.len == 0) return false;
+    for (d.threads) |t| if (!t.resolved and std.mem.eql(u8, t.review, review)) return true;
+    return false;
+}
+
+/// A conversation on a line, on the timeline: under the review that
+/// opened it, set in a little under its card; or on its own mark.
+fn threadRow(ti: usize, t: pr.Thread, d: pr.Detail, under_review: bool) void {
+    var row = TimelineRow.begin(60_000 + ti);
+    if (under_review)
+        row.rail(railNone, {})
+    else
+        row.rail(railIcon, RailIcon{ .icon = if (t.resolved) dvui.entypo.check else dvui.entypo.chat, .hue = if (t.resolved) style.success() else style.get().yellow });
+    defer row.end();
+    var inner = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .x = if (under_review) style.space.xl else 0 } });
+    defer inner.deinit();
+    threadCard(ti, ti, t, d, false);
+}
+
+/// The rail going on past a step that has no mark of its own.
+fn railNone(_: void) void {
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = RAIL_DOT, .h = 0 } });
+}
+
+/// Scroll to the first open conversation on the next frame it is drawn.
+var pr_scroll_thread = false;
+
+/// A conversation on a line of the diff, folded to its head once resolved:
+/// where, the diff it was left on, what was said — a suggestion as the
+/// change it suggests, to apply here — and the answer: reply, resolve.
+/// `ti` is its place in the request's threads, what its fold is kept by;
+/// `under_file` when it is shown under its file's name, which it then
+/// leaves out: "Line 3", not "login.ts:3" twice over.
+fn threadCard(id: usize, ti: usize, t: pr.Thread, d: pr.Detail, under_file: bool) void {
+    const fold_key = 70_000 + ti;
+    const open = cardOpen(fold_key, !t.resolved or pr_threads_all);
     var card = dvui.box(@src(), .{ .dir = .vertical }, .{
         .id_extra = id,
         .expand = .horizontal,
         .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
+        .color_fill = .{ .color = style.surface() },
         .border = dvui.Rect.all(1),
-        .color_border = .{ .color = if (t.resolved) style.borderSubtle() else style.border() },
-        .corners = style.radius.input,
-        .padding = dvui.Rect.all(style.space.md),
+        .color_border = .{ .color = if (t.resolved) style.borderSubtle() else style.get().yellow.opacity(0.45) },
+        .corners = style.radius.row,
         .margin = .{ .h = style.space.md },
     });
     defer card.deinit();
-
-    // Where.
-    {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-        defer line.deinit();
-        dvui.icon(@src(), "thread_file", dvui.entypo.text_document, .{ .fill_color = .{ .color = style.textFaint() } }, .{
-            .min_size_content = .{ .w = 11, .h = 11 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.xs },
-        });
-        if (t.line > 0) {
-            dvui.label(@src(), "{s}:{d}", .{ t.path, t.line }, .{ .font = style.graphMono(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
-        } else {
-            dvui.label(@src(), "{s}", .{t.path}, .{ .font = style.graphMono(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
-        }
-        if (t.outdated) tinyBadge(@src(), 0, "Outdated", style.get().yellow);
-        if (t.resolved) tinyBadge(@src(), 1, "Resolved", style.success());
+    // Asked from the readiness line: the first one still open, in sight.
+    if (pr_scroll_thread and !t.resolved) {
+        pr_scroll_thread = false;
+        dvui.scrollTo(.{ .screen_rect = card.data().borderRectScale().r });
     }
 
-    // The diff it was left on: the hunk's last lines, which end at the line.
-    if (t.hunk.len > 0) {
+    // Where, on a head that folds it.
+    {
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .color_fill = .{ .color = style.surfaceRaised() },
+            .border = .{ .h = if (open) 1 else 0 },
+            .color_border = .{ .color = style.borderSubtle() },
+            .corners = if (open) .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr } else style.radius.row,
+            .padding = .{ .x = style.space.sm, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+        });
+        defer head.deinit();
+        dvui.icon(@src(), "thread_fold", if (open) dvui.entypo.chevron_small_down else dvui.entypo.chevron_small_right, .{ .fill_color = .{ .color = style.textMuted() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .w = style.space.xs } });
+        if (!under_file) dvui.icon(@src(), "thread_file", dvui.entypo.text_document, .{ .fill_color = .{ .color = style.textFaint() } }, .{ .min_size_content = .{ .w = 11, .h = 11 }, .gravity_y = 0.5, .margin = .{ .w = style.space.xs } });
+        var where_buf: [512]u8 = undefined;
+        const ranged = t.start_line > 0 and t.start_line < t.line;
+        const where = if (under_file) (if (t.line == 0)
+            "The file"
+        else if (ranged)
+            std.fmt.bufPrint(&where_buf, "Lines {d}–{d}", .{ t.start_line, t.line }) catch ""
+        else
+            std.fmt.bufPrint(&where_buf, "Line {d}", .{t.line}) catch "") else if (t.line == 0)
+            t.path
+        else if (ranged)
+            std.fmt.bufPrint(&where_buf, "{s}:{d}–{d}", .{ t.path, t.start_line, t.line }) catch t.path
+        else
+            std.fmt.bufPrint(&where_buf, "{s}:{d}", .{ t.path, t.line }) catch t.path;
+        dvui.label(@src(), "{s}", .{where}, .{ .font = if (under_file) style.small() else style.graphMono(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        if (t.outdated) tinyBadge(@src(), 0, "Outdated", style.get().yellow);
+        if (t.resolved) tinyBadge(@src(), 1, "Resolved", style.success());
+        // Folded, who started it and its first words.
+        if (!open and t.comments.len > 0) {
+            dvui.label(@src(), "{s}: {s}", .{ t.comments[0].author, previewLine(t.comments[0].body) }, .{
+                .font = style.small(),
+                .color_text = .{ .color = style.textFaint() },
+                .gravity_y = 0.5,
+                .expand = .horizontal,
+                .max_size_content = .width(0),
+                .margin = .{ .x = style.space.sm },
+                .padding = dvui.Rect.all(0),
+            });
+        } else _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (t.comments.len > 1) dvui.label(@src(), "{d} comments", .{t.comments.len}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        if (head.data().borderRectScale().r.contains(dvui.currentWindow().mouse_pt)) dvui.cursorSet(.hand);
+        if (dvui.clicked(head.data(), .{})) pr_cards.put(gpa, fold_key, !open) catch {};
+    }
+    if (!open) return;
+
+    var inside = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.md) });
+    defer inside.deinit();
+
+    // The diff it was left on: the hunk's last lines, which end at the line —
+    // unless a comment suggests a change, whose box shows those lines and
+    // what they would become: the same code twice otherwise.
+    const suggests = for (t.comments) |c| {
+        if (suggestionOf(c.body) != null) break true;
+    } else false;
+    if (t.hunk.len > 0 and !suggests) {
         var code = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
             .background = true,
             .color_fill = .{ .color = style.surfaceInput() },
             .corners = style.radius.tag,
             .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
-            .margin = .{ .y = style.space.sm, .h = style.space.sm },
+            .margin = .{ .h = style.space.sm },
         });
         defer code.deinit();
         const TAIL = 4;
@@ -6797,7 +7028,7 @@ fn threadCard(id: usize, t: pr.Thread) void {
         }
     }
 
-    for (t.comments, 0..) |c, ci| threadComment(ci, c);
+    for (t.comments, 0..) |c, ci| threadComment(ci, c, t, d);
 
     const replying = pr_reply_id.items.len > 0 and std.mem.eql(u8, pr_reply_id.items, t.id);
     if (replying) {
@@ -6809,15 +7040,16 @@ fn threadCard(id: usize, t: pr.Thread) void {
             .color_border = .{ .color = style.border() },
             .corners = style.radius.input,
             .min_size_content = .{ .h = 56 },
-            .margin = .{ .h = style.space.sm },
+            .margin = .{ .y = style.space.sm, .h = style.space.sm },
         });
         defer field.deinit();
         const te = textField(@src(), .{
             .text = .{ .array_list = .{ .backing = &pr_reply, .allocator = gpa, .limit = 16384 } },
-            .placeholder = "Reply to this thread",
+            .placeholder = "Reply — Ctrl+Enter sends it",
             .multiline = true,
             .break_lines = true,
         }, .{
+            .tag = "pr:reply",
             .expand = .both,
             .background = false,
             .border = dvui.Rect.all(0),
@@ -6831,16 +7063,22 @@ fn threadCard(id: usize, t: pr.Thread) void {
     }
 
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.xs } });
         defer line.deinit();
         if (replying) {
-            if (dialogButton(@src(), "Send reply", true)) replyToThread();
+            if (dialogButtonTagged(@src(), "Reply", true, "pr:reply_send")) replyToThread();
+            if (!t.resolved and t.can_resolve) {
+                if (dialogButtonTagged(@src(), "Reply and resolve", false, "pr:reply_resolve")) {
+                    replyToThread();
+                    setThreadResolved(t.id, true);
+                }
+            }
             if (dialogButton(@src(), "Cancel", false)) {
                 pr_reply_id.clearRetainingCapacity();
                 pr_reply.clearRetainingCapacity();
             }
         } else if (t.can_reply) {
-            if (chipButton(@src(), dvui.entypo.reply, "Reply", false)) {
+            if (chipButtonTagged(@src(), dvui.entypo.reply, "Reply", false, frameTag("pr:reply_to", t.id))) {
                 pr_reply_id.clearRetainingCapacity();
                 pr_reply_id.appendSlice(gpa, t.id) catch {};
                 pr_reply.clearRetainingCapacity();
@@ -6848,20 +7086,23 @@ fn threadCard(id: usize, t: pr.Thread) void {
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (!t.resolved and t.can_resolve) {
-            if (chipButton(@src(), dvui.entypo.check, "Resolve", true)) setThreadResolved(t.id, true);
+            if (chipButtonTagged(@src(), dvui.entypo.check, "Resolve conversation", true, frameTag("pr:resolve", t.id))) setThreadResolved(t.id, true);
         } else if (t.resolved and t.can_unresolve) {
-            if (chipButton(@src(), dvui.entypo.ccw, "Unresolve", false)) setThreadResolved(t.id, false);
+            if (chipButtonTagged(@src(), dvui.entypo.ccw, "Unresolve", false, frameTag("pr:unresolve", t.id))) setThreadResolved(t.id, false);
         }
     }
 }
 
 /// One reply in a thread: who and when on a line, the words under it,
 /// indented under the picture.
-fn threadComment(id: usize, c: pr.Note) void {
+fn threadComment(id: usize, c: pr.Note, t: pr.Thread, d: pr.Detail) void {
     var box = dvui.box(@src(), .{ .dir = .vertical }, .{
         .id_extra = id,
         .expand = .horizontal,
-        .background = false,
+        // The card's own: dvui fills a box ruled on one side anyway, in the
+        // theme's colour unless told — the dark band behind a reply.
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
         .border = .{ .y = if (id > 0) 1 else 0 },
         .color_border = .{ .color = style.borderSubtle() },
         .padding = .{ .y = style.space.sm, .h = style.space.xs },
@@ -6880,7 +7121,224 @@ fn threadComment(id: usize, c: pr.Note) void {
     }
     var text = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .x = 20 + style.space.sm } });
     defer text.deinit();
-    markdownBody(c.body);
+    // A suggestion is shown as the change it is — the lines it replaces and
+    // what with — and can be applied to the file here.
+    if (suggestionOf(c.body)) |sg| {
+        if (std.mem.trim(u8, sg.before, " \t\r\n").len > 0) markdownBody(sg.before);
+        suggestionBox(id, t, d, sg.code);
+        if (std.mem.trim(u8, sg.after, " \t\r\n").len > 0) markdownBody(sg.after);
+    } else markdownBody(c.body);
+}
+
+/// A comment's first ```suggestion block: the words before it, the lines
+/// it suggests, the words after.
+const Suggestion = struct { before: []const u8, code: []const u8, after: []const u8 };
+
+fn suggestionOf(body: []const u8) ?Suggestion {
+    const fence = std.mem.indexOf(u8, body, "```suggestion") orelse return null;
+    const code_start = (std.mem.indexOfScalarPos(u8, body, fence, '\n') orelse return null) + 1;
+    var pos = code_start;
+    while (pos <= body.len) {
+        const eol = std.mem.indexOfScalarPos(u8, body, pos, '\n') orelse body.len;
+        if (std.mem.startsWith(u8, std.mem.trim(u8, body[pos..eol], " \t\r"), "```")) {
+            // The newline before the closing fence is not part of the code.
+            const code_end = if (pos > code_start) pos - 1 else code_start;
+            return .{ .before = body[0..fence], .code = body[code_start..code_end], .after = if (eol < body.len) body[eol + 1 ..] else "" };
+        }
+        if (eol == body.len) return null;
+        pos = eol + 1;
+    }
+    return null;
+}
+
+/// The last `n` lines of the new side of a diff hunk — what a comment on
+/// them saw — their `+` or space taken off. In `a`.
+fn hunkTail(a: std.mem.Allocator, hunk: []const u8, n: usize) []const []const u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, hunk, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        if (line.len == 0) continue;
+        if (line[0] == '+' or line[0] == ' ') lines.append(a, line[1..]) catch return &.{};
+    }
+    return lines.items[lines.items.len -| n..];
+}
+
+/// The lines a thread is on: from its first through its last.
+fn threadSpan(t: pr.Thread) usize {
+    if (t.start_line > 0 and t.start_line < t.line) return t.line - t.start_line + 1;
+    return 1;
+}
+
+/// A suggestion as a change: the lines it replaces, in red, what with, in
+/// green; and the button that writes it into the file here — once the
+/// request's branch is the one checked out.
+fn suggestionBox(id: usize, t: pr.Thread, d: pr.Detail, code: []const u8) void {
+    const a = dvui.currentWindow().arena();
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surfaceInput() },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = style.borderSubtle() },
+        .corners = style.radius.input,
+        .margin = .{ .y = style.space.xs, .h = style.space.xs },
+    });
+    defer box.deinit();
+    {
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .color_fill = .{ .color = style.surfaceRaised() },
+            .border = .{ .h = 1 },
+            .color_border = .{ .color = style.borderSubtle() },
+            .corners = .{ .tl = style.radius.input.tl, .tr = style.radius.input.tr },
+            .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.xs, .h = style.space.xs },
+        });
+        defer head.deinit();
+        dvui.label(@src(), "Suggested change", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (suggestionApplied(d.number, t.id)) {
+            // Done here: said so, with the way to the change it made.
+            dvui.icon(@src(), "applied", dvui.entypo.check, .{ .fill_color = .{ .color = style.success() } }, .{ .min_size_content = .{ .w = 11, .h = 11 }, .gravity_y = 0.5, .margin = .{ .w = style.space.xs } });
+            dvui.label(@src(), "Applied here", .{}, .{ .font = style.small(), .color_text = .{ .color = style.success() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+            if (chipButtonTagged(@src(), dvui.entypo.text_document, "See the change", false, frameTag("pr:applied", t.id))) {
+                active_view = .graph;
+                selectChange(t.path, .unstaged);
+            }
+        } else if (t.outdated) {
+            dvui.label(@src(), "its lines have moved since", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        } else if (requestOpen(d)) {
+            if (!onRequestBranch(d)) {
+                if (chipButtonTagged(@src(), dvui.entypo.download, "Check out to apply", false, frameTag("pr:apply_checkout", t.id))) checkoutRequest(d.number, d.head, d.fork);
+            } else if (chipButtonTagged(@src(), dvui.entypo.check, "Apply suggestion", true, frameTag("pr:apply", t.id))) applySuggestion(d.number, t, code);
+        }
+    }
+    var lines = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = .{ .y = style.space.xs, .h = style.space.xs } });
+    defer lines.deinit();
+    // The lines before it in grey, for where it is; those it replaces in
+    // red; what with in green.
+    const span = threadSpan(t);
+    const seen = hunkTail(a, t.hunk, span + SUGGESTION_CONTEXT);
+    const before = seen.len -| span;
+    for (seen, 0..) |old, n| diffLine(n, if (n < before) ' ' else '-', old);
+    var it = std.mem.splitScalar(u8, code, '\n');
+    var n: usize = 0;
+    while (it.next()) |raw| : (n += 1) diffLine(1000 + n, '+', std.mem.trimEnd(u8, raw, "\r"));
+}
+
+/// One line of a suggestion's change, on a tint of what it does.
+/// How many lines before a suggestion's show where it is.
+const SUGGESTION_CONTEXT = 2;
+
+/// One line of a suggestion's change, on a tint of what it does; a line
+/// around it, `mark` a space, plain and faint.
+fn diffLine(id: usize, mark: u8, text: []const u8) void {
+    const context = mark == ' ';
+    const hue = if (mark == '+') style.success() else if (context) style.textFaint() else style.danger();
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .background = !context,
+        .color_fill = .{ .color = style.tint(hue) },
+        .padding = .{ .x = style.space.sm, .w = style.space.sm },
+    });
+    defer line.deinit();
+    dvui.label(@src(), "{c}", .{mark}, .{ .font = style.graphMono(), .color_text = .{ .color = hue }, .min_size_content = .{ .w = 12 }, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{s}", .{text}, .{ .font = style.graphMono(), .color_text = .{ .color = if (context) style.textFaint() else style.text() }, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
+}
+
+/// The branch a request is checked out as here: its own name, or
+/// `pr/N` for one from a fork.
+fn onRequestBranch(d: pr.Detail) bool {
+    const h = history orelse return false;
+    const head = h.head orelse return false;
+    var buf: [32]u8 = undefined;
+    const local = if (d.fork) std.fmt.bufPrint(&buf, "pr/{d}", .{d.number}) catch return false else d.head;
+    return std.mem.eql(u8, head, local);
+}
+
+/// A suggestion written into the file here, over the lines it was left on —
+/// once they still read as the comment saw them; otherwise the file moved
+/// on since, and it would land on the wrong lines. The change is then the
+/// working copy's, to look over, commit and push.
+fn applySuggestion(number: u32, t: pr.Thread, code: []const u8) void {
+    if (applySuggestionTo(dvui.currentWindow().arena(), repo_path.items, t, code)) |message| return setCommandError(message);
+    markApplied(number, t.id);
+    workChanged("Applying");
+}
+
+/// The suggestions applied here, by their thread's id, for request
+/// `pr_applied_for`: their button says so rather than offer them again.
+/// Fixed room, nothing to free: a review holds a handful.
+var pr_applied: [16][64]u8 = undefined;
+var pr_applied_len: [16]u8 = @splat(0);
+var pr_applied_n: usize = 0;
+var pr_applied_for: u32 = 0;
+
+fn markApplied(number: u32, id: []const u8) void {
+    if (pr_applied_for != number) {
+        pr_applied_for = number;
+        pr_applied_n = 0;
+    }
+    if (id.len > 64 or suggestionApplied(number, id)) return;
+    const slot = pr_applied_n % pr_applied.len;
+    @memcpy(pr_applied[slot][0..id.len], id);
+    pr_applied_len[slot] = @intCast(id.len);
+    pr_applied_n += 1;
+}
+
+fn suggestionApplied(number: u32, id: []const u8) bool {
+    if (pr_applied_for != number) return false;
+    for (0..@min(pr_applied_n, pr_applied.len)) |i| {
+        if (std.mem.eql(u8, pr_applied[i][0..pr_applied_len[i]], id)) return true;
+    }
+    return false;
+}
+
+/// What went wrong, or null once it is written. In `a`, an arena.
+fn applySuggestionTo(a: std.mem.Allocator, root: []const u8, t: pr.Thread, code: []const u8) ?[]const u8 {
+    if (t.line == 0) return "GitHub did not say which lines that suggestion is for.";
+    const abs = std.fs.path.join(a, &.{ root, t.path }) catch return "Out of memory.";
+    const text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, a, .limited(64 << 20)) catch return "Could not read that file here.";
+    const crlf = std.mem.indexOf(u8, text, "\r\n") != null;
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |l| lines.append(a, std.mem.trimEnd(u8, l, "\r")) catch return "Out of memory.";
+    // A last newline leaves an empty piece after it, which is no line.
+    const ends_nl = text.len > 0 and text[text.len - 1] == '\n';
+    if (ends_nl) _ = lines.pop();
+
+    const span = threadSpan(t);
+    const first = t.line + 1 - span;
+    const moved = std.fmt.allocPrint(a, "{s} has changed since that comment: apply it by hand.", .{t.path}) catch "The file has changed since that comment.";
+    if (t.line > lines.items.len) return moved;
+    const seen = hunkTail(a, t.hunk, span);
+    if (seen.len == span) for (seen, 0..) |want, i| {
+        if (!std.mem.eql(u8, std.mem.trimEnd(u8, want, "\r"), lines.items[first - 1 + i])) return moved;
+    };
+
+    var out: std.ArrayList(u8) = .empty;
+    const eol: []const u8 = if (crlf) "\r\n" else "\n";
+    var wrote: usize = 0;
+    const put = struct {
+        fn f(o: *std.ArrayList(u8), al: std.mem.Allocator, n: *usize, line: []const u8, sep: []const u8) void {
+            if (n.* > 0) o.appendSlice(al, sep) catch {};
+            o.appendSlice(al, line) catch {};
+            n.* += 1;
+        }
+    }.f;
+    for (lines.items[0 .. first - 1]) |l| put(&out, a, &wrote, l, eol);
+    // An empty suggestion takes the lines out.
+    if (code.len > 0) {
+        var ct = std.mem.splitScalar(u8, code, '\n');
+        while (ct.next()) |l| put(&out, a, &wrote, std.mem.trimEnd(u8, l, "\r"), eol);
+    }
+    for (lines.items[t.line..]) |l| put(&out, a, &wrote, l, eol);
+    if (ends_nl and wrote > 0) out.appendSlice(a, eol) catch {};
+    std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = abs, .data = out.items }) catch return "Could not write that file.";
+    return null;
 }
 
 /// A word on a tint of its colour: Resolved, Outdated.
@@ -7101,8 +7559,10 @@ fn shortcuts() void {
         const chord: ?Run = blk: {
             if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and active_view == .pulls) break :blk struct {
                 fn f() void {
-                    // The review box's text, as a comment: the button that
+                    // A reply being written goes to its thread; otherwise
+                    // the review box's text, as a comment: the button that
                     // needs nothing more.
+                    if (pr_reply_id.items.len > 0 and std.mem.trim(u8, pr_reply.items, " \n\t").len > 0) return replyToThread();
                     if (std.mem.trim(u8, pr_comment.items, " \n\t").len > 0) prAnswer(.comment);
                 }
             }.f;
@@ -11293,8 +11753,14 @@ fn searchField(
 var search_entered: ?dvui.Id = null;
 
 fn chipButton(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8, accent: bool) bool {
+    return chipButtonTagged(src, icon, caption, accent, null);
+}
+
+/// As `chipButton`, findable by `tag`.
+fn chipButtonTagged(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8, accent: bool, tag: ?[]const u8) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
+        .tag = tag,
         .gravity_y = 0.5,
         .background = true,
         .color_fill = .{ .color = if (accent) style.accentDim() else style.surfaceRaised() },
@@ -20548,6 +21014,9 @@ fn resetUiGlobals() void {
     pr_reply_id.deinit(gpa);
     pr_reply_id = .empty;
     pr_threads_all = false;
+    pr_applied_n = 0;
+    pr_applied_for = 0;
+    pr_scroll_thread = false;
     pr_selected = null;
     split_rows.deinit(gpa);
     split_rows = .empty;
@@ -23823,6 +24292,164 @@ test "the request's sidebar picks its labels from a list, sent at once" {
     try std.testing.expect(sameNames(pr_edit_reviewers.items, &.{"ann"}));
     try std.testing.expect(sameNames(pr_edit_labels.items, &.{"enhancement"}));
     try std.testing.expect(!sameNames(pr_edit_labels.items, &.{ "enhancement", "bug" }));
+}
+
+// A suggestion as GitHub writes it, and written into the file: over the
+// lines it was left on, only while they read as the comment saw them.
+test "a suggestion goes over the lines it was left on, while they still read as the comment saw them" {
+    app_io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // The block, and the words around it.
+    const sg = suggestionOf("Use it:\n```suggestion\nif (ok(x)) go();\n```\nThanks.").?;
+    try std.testing.expectEqualStrings("Use it:\n", sg.before);
+    try std.testing.expectEqualStrings("if (ok(x)) go();", sg.code);
+    try std.testing.expectEqualStrings("Thanks.", sg.after);
+    try std.testing.expect(suggestionOf("no block here") == null);
+    try std.testing.expectEqualStrings("", suggestionOf("```suggestion\n```").?.code);
+
+    // One line, in a file with CRLF ends, which it keeps.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "a.js", .data = "one\r\nif (x) go();\r\nthree\r\n" });
+    const one: pr.Thread = .{ .path = "a.js", .line = 2, .hunk = "@@ -1,2 +1,2 @@\n one\n-if (y) go();\n+if (x) go();" };
+    try std.testing.expectEqual(@as(?[]const u8, null), applySuggestionTo(a, dir, one, "if (ok(x)) go();"));
+    try std.testing.expectEqualStrings("one\r\nif (ok(x)) go();\r\nthree\r\n", try tmp.dir.readFileAlloc(app_io, "a.js", a, .limited(1024)));
+    // Twice: the line no longer reads as the comment saw it, and is left be.
+    try std.testing.expect(applySuggestionTo(a, dir, one, "if (ok(x)) go();") != null);
+    try std.testing.expectEqualStrings("one\r\nif (ok(x)) go();\r\nthree\r\n", try tmp.dir.readFileAlloc(app_io, "a.js", a, .limited(1024)));
+
+    // Two lines into one, in a file with no last newline; then an empty
+    // suggestion takes a line out.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "a\nb\nc\nd" });
+    const two: pr.Thread = .{ .path = "b.txt", .start_line = 2, .line = 3, .hunk = "@@ -1 +1,3 @@\n a\n+b\n+c" };
+    try std.testing.expectEqual(@as(?[]const u8, null), applySuggestionTo(a, dir, two, "bc"));
+    try std.testing.expectEqualStrings("a\nbc\nd", try tmp.dir.readFileAlloc(app_io, "b.txt", a, .limited(1024)));
+    const gone: pr.Thread = .{ .path = "b.txt", .line = 1, .hunk = "@@ -0,0 +1 @@\n+a" };
+    try std.testing.expectEqual(@as(?[]const u8, null), applySuggestionTo(a, dir, gone, ""));
+    try std.testing.expectEqualStrings("bc\nd", try tmp.dir.readFileAlloc(app_io, "b.txt", a, .limited(1024)));
+    // Past the end of the file: changed since.
+    try std.testing.expect(applySuggestionTo(a, dir, .{ .path = "b.txt", .line = 9 }, "x") != null);
+}
+
+// Picked, a request is read in full off the window's thread: its head is
+// there at once from the list, the rest loading under it — not a blank pane.
+test "a request being read shows its head from the list, the rest loading" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    openRepo(dir);
+    defer closeRepo();
+
+    var listed = [_]pr.Request{.{ .number = 9, .title = "Faster search", .branch = "feat/search", .author = "ann", .draft = false, .base = "main" }};
+    pr.list = &listed;
+    defer pr.list = &.{};
+    pr.detail = null;
+    pr_selected = 9;
+    active_view = .pulls;
+    pr.host = .github;
+    defer pr.host = .none;
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    _ = try tagRect("pr:loading");
+    // Not one the list has: the pane loading, with no head to guess at.
+    pr_selected = 10;
+    try dvui.testing.settle(frameArrowCursor);
+    try expectNoTag("pr:loading");
+}
+
+// A request someone asked changes of, as its author meets it: who asked and
+// how much is left, the conversations under the review that opened them —
+// a resolved one folded — and a suggestion applied from the click.
+test "changes asked for: threads under their review, a suggestion applied from its button" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "login.ts", "const f = el();\nif (email) submit();\n");
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+
+    pr.detail = .{
+        .number = 16,
+        .id = "PR_1",
+        .title = "Login form",
+        .author = "me",
+        .state = "OPEN",
+        // Its branch is the one checked out here.
+        .head = "main",
+        .base = "dev",
+        .mergeable = "MERGEABLE",
+        .review = "CHANGES_REQUESTED",
+        .reviews = &.{.{ .id = "R1", .author = "ann", .body = "A couple of things.", .when = "2026-10-21T11:00:00Z", .state = "CHANGES_REQUESTED" }},
+        .reviewers = &.{.{ .login = "ann", .state = "CHANGES_REQUESTED" }},
+        .threads = &.{
+            .{ .id = "T1", .review = "R1", .path = "login.ts", .line = 2, .can_reply = true, .can_resolve = true, .hunk = "@@ -1 +1,2 @@\n const f = el();\n+if (email) submit();", .comments = &.{.{ .author = "ann", .body = "Use the validator:\n```suggestion\nif (isEmail(email)) submit();\n```", .when = "2026-10-21T11:00:00Z" }} },
+            .{ .id = "T2", .review = "R1", .path = "login.ts", .line = 1, .resolved = true, .can_unresolve = true, .comments = &.{.{ .author = "ann", .body = "fine now", .when = "2026-10-21T11:00:00Z" }} },
+        },
+    };
+    defer pr.detail = null;
+    pr_selected = 16;
+    active_view = .pulls;
+    pr.host = .github;
+    defer pr.host = .none;
+    me_loaded = true;
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    pr_tab = .conversation;
+    try dvui.testing.settle(frameArrowCursor);
+
+    // On its branch already: asking again is what is left to do, and each
+    // reviewer who answered can be asked again too.
+    _ = try tagRect("pr:rerequest");
+    _ = try tagRect("pr:rerequest:ann");
+    try expectNoTag("pr:fix");
+    // The open one shows its answers; the resolved one is folded to its head.
+    _ = try tagRect("pr:resolve:T1");
+    try expectNoTag("pr:unresolve:T2");
+    try clickAt(try tagCenter("pr:threads_all"));
+    _ = try tagRect("pr:unresolve:T2");
+
+    // The suggestion, into the file here; its button then says so, and
+    // leads to the change.
+    try clickAt(try tagCenter("pr:apply:T1"));
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try expectNoTag("pr:apply:T1");
+    _ = try tagRect("pr:applied:T1");
+    const now = try tmp.dir.readFileAlloc(app_io, "login.ts", gpa, .limited(1024));
+    defer gpa.free(now);
+    try std.testing.expectEqualStrings("const f = el();\nif (isEmail(email)) submit();\n", now);
+
+    // To the conversations from the readiness line.
+    try clickAt(try tagCenter("pr:to_threads"));
+    try std.testing.expect(!pr_scroll_thread);
+
+    // To the change it made, in the working copy.
+    try clickAt(try tagCenter("pr:applied:T1"));
+    try std.testing.expectEqual(View.graph, active_view);
+    try std.testing.expectEqualStrings("login.ts", selected_path.items);
 }
 
 test "a request's pane draws every tab" {

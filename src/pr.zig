@@ -139,8 +139,13 @@ pub const Thread = struct {
     path: []const u8 = "",
     /// The line now, or where it was when the line has gone; 0 for neither.
     line: u32 = 0,
+    /// Where it starts when it was left on several lines, through `line`;
+    /// 0 for one line.
+    start_line: u32 = 0,
     /// The diff the first comment was left under, ending at its line.
     hunk: []const u8 = "",
+    /// The review it was opened with, by its id: GitHub shows it under it.
+    review: []const u8 = "",
     can_resolve: bool = false,
     can_unresolve: bool = false,
     can_reply: bool = false,
@@ -149,6 +154,8 @@ pub const Thread = struct {
 
 /// A comment or a review: who, what they said, and for a review its verdict.
 pub const Note = struct {
+    /// A review's node id, what its threads name it by; empty for a comment.
+    id: []const u8 = "",
     author: []const u8 = "",
     body: []const u8 = "",
     when: []const u8 = "",
@@ -188,7 +195,7 @@ const DETAIL_QUERY =
     \\id number title body state isDraft reviewDecision mergeable mergeStateStatus headRefName baseRefName url isCrossRepository
     \\additions deletions changedFiles createdAt headRefOid author{login} autoMergeRequest{enabledAt}
     \\comments(first:100){nodes{author{login} body createdAt}}
-    \\reviews(first:100){nodes{author{login} body submittedAt state}}
+    \\reviews(first:100){nodes{id author{login} body submittedAt state}}
     \\latestReviews(first:50){nodes{author{login} state}}
     \\reviewRequests(first:50){nodes{requestedReviewer{... on User{login} ... on Team{name} ... on Bot{login}}}}
     \\labels(first:30){nodes{name color}}
@@ -198,8 +205,9 @@ const DETAIL_QUERY =
     \\head:commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{__typename
     \\... on CheckRun{name conclusion status detailsUrl startedAt completedAt checkSuite{workflowRun{workflow{name}}}}
     \\... on StatusContext{context state targetUrl}}}}}}}
-    \\reviewThreads(first:100){nodes{id isResolved isOutdated path line originalLine viewerCanResolve viewerCanUnresolve viewerCanReply
-    \\comments(first:100){nodes{author{login} body createdAt diffHunk}}}}}}}
+    \\reviewThreads(first:100){nodes{id isResolved isOutdated path line originalLine startLine originalStartLine
+    \\viewerCanResolve viewerCanUnresolve viewerCanReply
+    \\comments(first:100){nodes{author{login} body createdAt diffHunk pullRequestReview{id}}}}}}}}
 ;
 
 /// What a new request can be given: who it can be assigned to or asked to
@@ -238,6 +246,54 @@ pub var status: Status = .idle;
 pub var last_error: std.ArrayList(u8) = .empty;
 /// Owned by `arena`, replaced whole on each listing.
 pub var list: []const Request = &.{};
+
+/// Requests merged or closed from here, by number: out of the open list at
+/// once, and kept out of the listings that still have them — GitHub's lists
+/// catch up a moment after its merge has happened — for a few listings.
+var gone: [8]struct { number: u32 = 0, listings: u8 = 0 } = @splat(.{});
+const GONE_LISTINGS = 4;
+
+/// `number` merged or closed: off the open list now.
+pub fn markGone(number: u32) void {
+    var slot: usize = 0;
+    for (gone, 0..) |g, i| {
+        if (g.number == number or g.listings == 0) {
+            slot = i;
+            break;
+        }
+        if (g.listings < gone[slot].listings) slot = i;
+    }
+    gone[slot] = .{ .number = number, .listings = GONE_LISTINGS };
+    list = withoutGone(list);
+}
+
+/// `from` less what was merged or closed here, in place: `list` is the
+/// arena's own.
+fn withoutGone(from: []const Request) []const Request {
+    const mutable: []Request = @constCast(from);
+    var kept: usize = 0;
+    for (from) |r| {
+        const hidden = for (gone) |g| {
+            if (g.listings > 0 and g.number == r.number) break true;
+        } else false;
+        if (hidden) continue;
+        mutable[kept] = r;
+        kept += 1;
+    }
+    return from[0..kept];
+}
+
+/// A listing landed, before it is filtered: each request it still has is
+/// hidden from one fewer to come; one it no longer has is gone there too.
+fn ageGone(fresh: []const Request) void {
+    for (&gone) |*g| {
+        if (g.listings == 0) continue;
+        const listed = for (fresh) |r| {
+            if (r.number == g.number) break true;
+        } else false;
+        g.listings = if (listed) g.listings - 1 else 0;
+    }
+}
 
 var gpa: std.mem.Allocator = undefined;
 var io: std.Io = undefined;
@@ -482,7 +538,9 @@ pub fn pump() bool {
         if (parse(body)) |next| {
             clear();
             arena = next.arena;
-            list = next.list;
+            // Counted against the whole listing, then filtered in place.
+            ageGone(next.list);
+            list = withoutGone(next.list);
             status = .ready;
         } else {
             status = .failed;
@@ -608,6 +666,11 @@ const DetailFetch = struct {
     }
 };
 
+/// Whether a read of the request in full is out.
+pub fn detailLoading() bool {
+    return detail_worker != null;
+}
+
 /// Read request `number` in full, off the UI thread.
 pub fn loadDetail(cwd: []const u8, number: u32) void {
     if (!initialised or host == .none or !github.signedIn()) return;
@@ -675,7 +738,13 @@ pub fn pumpDetail() bool {
     return false;
 }
 
-const Comment = struct { author: ?Who = null, body: ?[]const u8 = null, createdAt: ?[]const u8 = null, diffHunk: ?[]const u8 = null };
+const Comment = struct {
+    author: ?Who = null,
+    body: ?[]const u8 = null,
+    createdAt: ?[]const u8 = null,
+    diffHunk: ?[]const u8 = null,
+    pullRequestReview: ?struct { id: []const u8 = "" } = null,
+};
 const ThreadNode = struct {
     id: []const u8 = "",
     isResolved: bool = false,
@@ -683,6 +752,8 @@ const ThreadNode = struct {
     path: ?[]const u8 = null,
     line: ?u32 = null,
     originalLine: ?u32 = null,
+    startLine: ?u32 = null,
+    originalStartLine: ?u32 = null,
     viewerCanResolve: bool = false,
     viewerCanUnresolve: bool = false,
     viewerCanReply: bool = false,
@@ -695,9 +766,13 @@ fn readThreads(alloc: std.mem.Allocator, nodes: []const ?ThreadNode) ![]const Th
         const n = maybe orelse continue;
         var notes: std.ArrayList(Note) = .empty;
         var hunk: []const u8 = "";
+        var review: []const u8 = "";
         for (n.comments.nodes) |mc| {
             const c = mc orelse continue;
-            if (notes.items.len == 0) hunk = c.diffHunk orelse "";
+            if (notes.items.len == 0) {
+                hunk = c.diffHunk orelse "";
+                review = if (c.pullRequestReview) |r| r.id else "";
+            }
             try notes.append(alloc, .{ .author = who(c.author), .body = c.body orelse "", .when = c.createdAt orelse "" });
         }
         try out.append(alloc, .{
@@ -705,8 +780,12 @@ fn readThreads(alloc: std.mem.Allocator, nodes: []const ?ThreadNode) ![]const Th
             .resolved = n.isResolved,
             .outdated = n.isOutdated,
             .path = n.path orelse "",
+            // Its first line from the same side as its last: where it is now,
+            // or where it was when the line has gone.
             .line = n.line orelse n.originalLine orelse 0,
+            .start_line = if (n.line != null) n.startLine orelse 0 else n.originalStartLine orelse 0,
             .hunk = hunk,
+            .review = review,
             .can_resolve = n.viewerCanResolve,
             .can_unresolve = n.viewerCanUnresolve,
             .can_reply = n.viewerCanReply,
@@ -753,7 +832,7 @@ fn parseDetail(alloc: std.mem.Allocator, json: []const u8) !Detail {
         headRefOid: ?[]const u8 = null,
         autoMergeRequest: ?struct { enabledAt: ?[]const u8 = null } = null,
         comments: Nodes(struct { author: ?Who = null, body: ?[]const u8 = null, createdAt: ?[]const u8 = null }) = .{},
-        reviews: Nodes(struct { author: ?Who = null, body: ?[]const u8 = null, submittedAt: ?[]const u8 = null, state: ?[]const u8 = null }) = .{},
+        reviews: Nodes(struct { id: []const u8 = "", author: ?Who = null, body: ?[]const u8 = null, submittedAt: ?[]const u8 = null, state: ?[]const u8 = null }) = .{},
         latestReviews: Nodes(struct { author: ?Who = null, state: ?[]const u8 = null }) = .{},
         reviewRequests: Nodes(Asked) = .{},
         labels: Nodes(LabelNode) = .{},
@@ -775,7 +854,7 @@ fn parseDetail(alloc: std.mem.Allocator, json: []const u8) !Detail {
     var comments: std.ArrayList(Note) = .empty;
     for (d.comments.nodes) |m| if (m) |c| try comments.append(alloc, .{ .author = who(c.author), .body = c.body orelse "", .when = c.createdAt orelse "" });
     var reviews: std.ArrayList(Note) = .empty;
-    for (d.reviews.nodes) |m| if (m) |r| try reviews.append(alloc, .{ .author = who(r.author), .body = r.body orelse "", .when = r.submittedAt orelse "", .state = r.state orelse "" });
+    for (d.reviews.nodes) |m| if (m) |r| try reviews.append(alloc, .{ .id = r.id, .author = who(r.author), .body = r.body orelse "", .when = r.submittedAt orelse "", .state = r.state orelse "" });
 
     var checks: std.ArrayList(Check) = .empty;
     if (d.head.nodes.len > 0) if (d.head.nodes[d.head.nodes.len - 1]) |h| if (h.commit) |c| if (c.statusCheckRollup) |rollup| {
@@ -1183,7 +1262,7 @@ test "a pull request reads in full: reviews, comments, checks and threads" {
         \\"url":"https://github.com/o/r/pull/61","additions":815,"deletions":2,"changedFiles":15,"createdAt":"2026-10-20T08:00:00Z","headRefOid":"abc",
         \\"author":{"login":"MeretoF"},"autoMergeRequest":null,
         \\"comments":{"nodes":[{"author":{"login":"MeretoF"},"body":"QUERY instead","createdAt":"2026-10-20T08:22:02Z"}]},
-        \\"reviews":{"nodes":[{"author":{"login":"Necrelox"},"body":"","submittedAt":"2026-10-20T10:15:10Z","state":"CHANGES_REQUESTED"}]},
+        \\"reviews":{"nodes":[{"id":"PRR_1","author":{"login":"Necrelox"},"body":"","submittedAt":"2026-10-20T10:15:10Z","state":"CHANGES_REQUESTED"}]},
         \\"latestReviews":{"nodes":[{"author":{"login":"Necrelox"},"state":"CHANGES_REQUESTED"}]},
         \\"reviewRequests":{"nodes":[{"requestedReviewer":{"login":"ann"}}]},
         \\"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"MeretoF"}]},
@@ -1195,7 +1274,9 @@ test "a pull request reads in full: reviews, comments, checks and threads" {
         \\"reviewThreads":{"nodes":[
         \\{"id":"PRRT_1","isResolved":true,"isOutdated":true,"path":"a.ts","line":null,"originalLine":34,"viewerCanResolve":false,"viewerCanUnresolve":true,"viewerCanReply":true,
         \\"comments":{"nodes":[{"author":{"login":"Necrelox"},"body":"use the db types","createdAt":"2026-10-20T08:38:54Z","diffHunk":"@@ -0,0 +1 @@\n+x"},{"author":null,"body":"ok","createdAt":"2026-10-20T09:00:00Z","diffHunk":"@@"}]}},
-        \\{"id":"PRRT_2","isResolved":false,"isOutdated":false,"path":"b.ts","line":7,"originalLine":5,"comments":{"nodes":[]}}]}}}}}
+        \\{"id":"PRRT_2","isResolved":false,"isOutdated":false,"path":"b.ts","line":7,"originalLine":5,"comments":{"nodes":[]}},
+        \\{"id":"PRRT_3","isResolved":false,"isOutdated":false,"path":"c.ts","line":5,"originalLine":5,"startLine":3,"originalStartLine":3,
+        \\"comments":{"nodes":[{"author":{"login":"Necrelox"},"body":"this","createdAt":"2026-10-20T10:15:00Z","diffHunk":"@@","pullRequestReview":{"id":"PRR_1"}}]}}]}}}}}
     ;
     const d = try parseDetail(a.allocator(), json);
     try std.testing.expectEqualStrings("PR_kw", d.id);
@@ -1203,6 +1284,7 @@ test "a pull request reads in full: reviews, comments, checks and threads" {
     try std.testing.expectEqualStrings("develop", d.base);
     try std.testing.expectEqualStrings("QUERY instead", d.comments[0].body);
     try std.testing.expectEqualStrings("CHANGES_REQUESTED", d.reviews[0].state);
+    try std.testing.expectEqualStrings("PRR_1", d.reviews[0].id);
     try std.testing.expectEqualStrings("build", d.checks[0].name);
     try std.testing.expectEqualStrings("SUCCESS", d.checks[0].result);
     try std.testing.expectEqualStrings("CI", d.checks[0].group);
@@ -1214,13 +1296,18 @@ test "a pull request reads in full: reviews, comments, checks and threads" {
     try std.testing.expectEqual(@as(usize, 1), d.file_list.len);
     try std.testing.expect(!d.auto_merge);
     // Review threads: an outdated one by its original line.
-    try std.testing.expectEqual(@as(usize, 2), d.threads.len);
+    try std.testing.expectEqual(@as(usize, 3), d.threads.len);
     try std.testing.expectEqual(@as(u32, 34), d.threads[0].line);
     try std.testing.expect(d.threads[0].resolved and d.threads[0].outdated and d.threads[0].can_unresolve and !d.threads[0].can_resolve);
     try std.testing.expectEqualStrings("@@ -0,0 +1 @@\n+x", d.threads[0].hunk);
     try std.testing.expectEqualStrings("ghost", d.threads[0].comments[1].author);
     try std.testing.expectEqual(@as(u32, 7), d.threads[1].line);
     try std.testing.expectEqualStrings("", d.threads[1].hunk);
+    // One on lines 3 to 5, opened with the review: shown under it.
+    try std.testing.expectEqual(@as(u32, 3), d.threads[2].start_line);
+    try std.testing.expectEqual(@as(u32, 5), d.threads[2].line);
+    try std.testing.expectEqualStrings("PRR_1", d.threads[2].review);
+    try std.testing.expectEqual(@as(u32, 0), d.threads[1].start_line);
 }
 
 test "a host by its remote, and answers for another repository dropped" {
@@ -1292,4 +1379,32 @@ test "issues read into their shape" {
     try std.testing.expectEqual(@as(u32, 7), got[0].number);
     try std.testing.expectEqualStrings("p1", got[0].labels[1]);
     try std.testing.expectEqualStrings("ghost", got[1].author);
+}
+
+test "a request merged here leaves the open list, though a late listing still has it" {
+    gone = @splat(.{});
+    defer gone = @splat(.{});
+    var mine = [_]Request{
+        .{ .number = 1, .title = "a", .branch = "a", .author = "me", .draft = false },
+        .{ .number = 2, .title = "b", .branch = "b", .author = "me", .draft = false },
+    };
+    list = &mine;
+    defer list = &.{};
+    markGone(2);
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(u32, 1), list[0].number);
+
+    // A listing GitHub sent before it caught up: still hidden, for a few.
+    var late = [_]Request{
+        .{ .number = 1, .title = "a", .branch = "a", .author = "me", .draft = false },
+        .{ .number = 2, .title = "b", .branch = "b", .author = "me", .draft = false },
+    };
+    ageGone(&late);
+    const seen = withoutGone(&late);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(@as(u8, GONE_LISTINGS - 1), gone[0].listings);
+
+    // One without it: GitHub has caught up, nothing is hidden any more.
+    ageGone(late[0..1]);
+    try std.testing.expectEqual(@as(u8, 0), gone[0].listings);
 }

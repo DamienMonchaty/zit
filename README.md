@@ -101,6 +101,7 @@ nothing. Every number here can be measured again with `zig build bench --
 **GitHub**
 - Pull requests in full: files, commits, checks, reviews, threads
 - Create, check out, review, comment, approve, merge, auto-merge
+- Changes asked for: reply to and resolve conversations, apply suggestions here, ask for a review again
 - Re-run failed checks; browse issues
 - Sign in with a code on github.com
 
