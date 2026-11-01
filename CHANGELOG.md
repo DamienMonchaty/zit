@@ -147,6 +147,12 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- In the graph, a line meets a commit at its middle, as GitComet draws
+  them: a merge whose parent is the next commit, on its left, comes down its
+  own column and turns into it at its height, where it used to cross just
+  above it and reach it beside its middle; a merge onto a line already on
+  its left leaves across at its own height. The lines are two crisp pixels
+  wide on the screen's grid, rather than a blur across three.
 - A history read again in the background — after a fetch, say — dropped the
   graph out of First-parent.
 - Merges, rebases and conflicts are harder to break by accident:
