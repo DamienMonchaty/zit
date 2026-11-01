@@ -173,6 +173,11 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- On Windows, an open repository no longer costs a fifth of a core while
+  nothing happens: its working tree is watched, as on Linux, instead of read
+  again every 0.7 s — 0.5–0.8 % CPU when idle instead of 21–27 %, on a
+  repository of 2,300 files. A fetch that moves nothing is no longer taken
+  for a change.
 - Picking a commit of thousands of files no longer freezes the window for
   seconds: its files are listed without reading a line of them — 4 ms
   instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened
