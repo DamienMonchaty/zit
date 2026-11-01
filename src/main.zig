@@ -1752,6 +1752,17 @@ fn appInit(win: *dvui.Window) !void {
     gpa = init.gpa;
     app_io = init.io;
 
+    // Windows commits a thread's whole stack when it starts, and std's pool
+    // — the history, status and GitHub reads run on it — gives each of its
+    // threads 16 MB. 4 is far more than a libgit2 revwalk or status needs
+    // and still leaves room for a Debug build's frames. Set before the pool
+    // has a thread: it starts them as the first reads go out. The Io here is
+    // always the `std.Io.Threaded` that std's `main` makes.
+    if (@import("builtin").os.tag == .windows) {
+        const pool: *std.Io.Threaded = @ptrCast(@alignCast(app_io.userdata));
+        pool.stack_size = 4 * 1024 * 1024;
+    }
+
     // Before anything reads it, and before the workspace is loaded out of it.
     var config_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (store.appDir(init.environ_map.*, &config_buf, .config, "")) |dir| {

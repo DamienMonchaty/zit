@@ -182,6 +182,14 @@ What changed, each measured at 45 s:
   thread in the process, SDL's and the GPU driver's too, at the top of each
   thread's stack: about 280 KB of each thread's RSS. Kept in Debug; release
   builds are stripped and could not print the trace.
+- **16 MB of commit per thread, on Windows (2026-11-01).** Windows commits
+  a thread's whole stack when it starts, and std gives each 16 MB: a
+  program with one thread is 17.4 MB of commit with it and 2.3 MB with
+  1 MB. std's pool — the history, status and GitHub reads — runs with 4 MB
+  stacks on Windows now, and the thread waiting on an editor or terminal
+  Zit opened with 64 KB. A copy of a 2,300-file repository, the same 10
+  threads: 161–166 MB of commit before, 124–132 MB after. Linux only
+  reserves a stack, so nothing changes there.
 - **A fixed `mmap` threshold** (`M_MMAP_THRESHOLD`, 128 KB): glibc's moves up
   to the last large block freed, and the next large blocks then come from
   the heap, where a free returns nothing until a trim.

@@ -92,7 +92,10 @@ fn startDetached(io: std.Io, cwd: []const u8, argv: []const []const u8) !void {
         .stdout = .ignore,
         .stderr = .ignore,
     });
-    const reaper = try std.Thread.spawn(.{}, reap, .{ io, child });
+    // A stack for waiting, no more: the editor or terminal it waits on can
+    // stay open for hours, and Windows commits all of a thread's stack —
+    // std's default is 16 MB.
+    const reaper = try std.Thread.spawn(.{ .stack_size = 64 * 1024 }, reap, .{ io, child });
     reaper.detach();
 }
 
