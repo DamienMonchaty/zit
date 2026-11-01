@@ -3989,11 +3989,39 @@ fn requestUndo() void {
     // still the one leaving it, that move is the undo, and taking it back
     // is the redo.
     redo_from = h.head_oid;
+    const what = std.mem.trim(u8, move.message, " \r\n");
+    redo_what_len = @min(what.len, redo_what.len);
+    @memcpy(redo_what[0..redo_what_len], what[0..redo_what_len]);
     request(args);
 }
 
 /// HEAD before the last undo Zit made, while that undo can be redone.
 var redo_from: ?git.Oid = null;
+/// What that undo took back, in the reflog's words: Redo's hover.
+var redo_what: [160]u8 = undefined;
+var redo_what_len: usize = 0;
+
+/// Whether Redo has something to take back: an undo made here, and nothing
+/// moved HEAD since.
+fn canRedo() bool {
+    const h = history orelse return false;
+    const from = redo_from orelse return false;
+    const move = h.last_move orelse return false;
+    return git.oidEql(move.old, from);
+}
+
+/// Undo's hover: what it would take back, as the reflog says it.
+fn undoHint() []const u8 {
+    const h = history orelse return "Undo";
+    const move = h.last_move orelse return "Nothing to undo yet";
+    return std.fmt.allocPrint(dvui.currentWindow().arena(), "Undo \u{201C}{s}\u{201D} — Ctrl+Z", .{std.mem.trim(u8, move.message, " \r\n")}) catch "Undo";
+}
+
+/// Redo's hover: what the last undo took back, or why there is nothing.
+fn redoHint() []const u8 {
+    if (!canRedo()) return "Nothing to redo: undo something first";
+    return std.fmt.allocPrint(dvui.currentWindow().arena(), "Redo \u{201C}{s}\u{201D} — Ctrl+Shift+Z", .{redo_what[0..redo_what_len]}) catch "Redo";
+}
 
 /// Ctrl+Shift+Z: take back the last undo — an undo undone, which is what
 /// `requestUndo` already does to it — and only that: after anything else
@@ -7928,7 +7956,10 @@ fn titlebar() void {
             }
         }
         toolbarDivider(@src(), 3);
-        if (toolbarButton(@src(), "Undo", dvui.entypo.reply, 0)) requestUndo();
+        // Undo and Redo side by side, as GitKraken has them, each saying on
+        // hover what it would take back; Redo lit only when there is one.
+        if (toolbarButtonFull(@src(), "Undo", dvui.entypo.reply, 0, frameTag("toolbar", "Undo"), false, true, undoHint())) requestUndo();
+        if (toolbarButtonFull(@src(), "Redo", dvui.entypo.forward, 0, frameTag("toolbar", "Redo"), false, canRedo(), redoHint())) requestRedo();
         toolbarDivider(@src(), 0);
         if (toolbarButton(@src(), "Fetch", dvui.entypo.cw, 0)) {
             requestNetwork("Fetching", fetchAllArgs(false));
@@ -11497,7 +11528,13 @@ fn toolbarButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, ico
 
 /// As `toolbarButtonTagged`, lit in the accent while `on`: a view it shows.
 fn toolbarButtonOn(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8, on: bool) bool {
-    const enabled = repo != null;
+    return toolbarButtonFull(src, caption, icon, badge, tag, on, true, null);
+}
+
+/// As `toolbarButtonOn`, faded and deaf unless `usable`, and saying `hint`
+/// on hover — what it would do — rather than only its caption.
+fn toolbarButtonFull(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8, on: bool, usable: bool, hint: ?[]const u8) bool {
+    const enabled = repo != null and usable;
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
@@ -11514,10 +11551,11 @@ fn toolbarButtonOn(src: std.builtin.SourceLocation, caption: []const u8, icon: [
 
     const hovered = enabled and bw.hovered();
     const color = if (!enabled) style.textFaint() else if (on) style.accent() else if (hovered) style.text() else style.textMuted();
-    // Without its caption, the caption says itself on hover.
-    if (toolbar_compact and bw.hovered()) {
-        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{caption}, .{ .font = style.small() });
-    }
+    // Without its caption, the caption says itself on hover; a hint, what
+    // the button would do, says itself either way.
+    if (bw.hovered()) if (hint orelse if (toolbar_compact) caption else null) |words| {
+        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{words}, .{ .font = style.small() });
+    };
 
     {
         var cell = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -24721,9 +24759,27 @@ test "redo takes back the last undo, and only while nothing has moved since" {
     try std.testing.expect(runAction());
     try expectGit(dir, &.{ "commit", "-qm", "another" });
     poll();
+    try std.testing.expect(!canRedo());
     requestRedo();
     try std.testing.expect(command_error != null);
     try std.testing.expect(findCommit("second") == null);
+    clearCommandError();
+
+    // From the toolbar: Redo beside Undo, deaf until an undo, then taking
+    // it back, and deaf again.
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    try clickAt(try tagCenter("toolbar:Redo"));
+    try std.testing.expect(findCommit("another") != null);
+    try clickAt(try tagCenter("toolbar:Undo"));
+    try std.testing.expect(findCommit("another") == null);
+    try std.testing.expect(canRedo());
+    try std.testing.expectEqualStrings("commit: another", redo_what[0..redo_what_len]);
+    try clickAt(try tagCenter("toolbar:Redo"));
+    try std.testing.expect(findCommit("another") != null);
+    try std.testing.expect(!canRedo());
 }
 
 test "with the integrations off, no pull requests, issues or GitHub account" {
