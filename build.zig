@@ -224,6 +224,22 @@ fn addZit(
         exe.link_data_sections = true;
     }
 
+    // Built for size, the C libraries no hot path goes through: SDL — the
+    // window, its events, handing each frame to the GPU — FreeType, which
+    // draws each glyph once into dvui's atlas, and mbedtls, which libgit2
+    // needs for HTTPS, which Zit leaves to `git`, and for hashing SHA-256
+    // repositories; SHA-1 is libgit2's own sha1dc. Most of what this saves
+    // is the UBSan checks ReleaseSafe compiles into C code, so undefined
+    // behaviour in those three no longer traps. libgit2, its zlib and Zit
+    // keep the app's mode: the history, the diffs and the status are read
+    // through them.
+    if (optimize == .ReleaseSafe or optimize == .ReleaseFast) {
+        const linked = Linked.of(b, exe);
+        for ([_][]const u8{ "SDL3", "freetype", "mbedtls" }) |name| {
+            if (linked.named(name)) |lib| lib.root_module.optimize = .ReleaseSmall;
+        }
+    }
+
     // SDL as Zit uses it: video and events, nothing else. Its dynamic API
     // — a table of every SDL function, so that `SDL3_DYNAMIC_API` can swap a
     // newer SDL in at run time — keeps all of them linked, used or not;
