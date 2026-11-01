@@ -289,7 +289,13 @@ Checked, and nothing to do:
   repositories. New caps: a diff of a file over 16 MB is shown as binary
   rather than read (libgit2's default is 512 MB); a picture download stops at
   1 MB, the size it is read back at.
-- Undo is git's reflog, on disk: nothing to compress.
+- Undo is git's reflog, on disk: nothing to compress. Not the conflicted
+  file's U, which came later and kept a whole copy of the file for every
+  pick, with no bound: 500 picks in a 1.3 MB lockfile, 628 MB. Each pick now
+  keeps the span it changed and the file's length and hash after it — 50 KB
+  for the same 500, 1.2 ms to take and 0.8 ms to undo a pick — and at most
+  1,000 picks are kept (2026-11-01). Rather than compressing whole copies:
+  what a pick changed is all an undo needs.
 - The heap's small stack-sized buffers are on the stack, not the heap; no
   preallocation found that a smaller need would not fill.
 - Frames: **a frame drawn again with nothing changed makes no heap

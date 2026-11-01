@@ -178,6 +178,11 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- Resolving a conflicted file region by region no longer keeps a copy of
+  the whole file for every pick, to undo it: 500 picks in a 1.3 MB lockfile
+  kept 628 MB; what each pick changed, 50 KB. An undo after the file was
+  edited another way says there is nothing to take back, rather than
+  undoing into it. Closing the repository lets the picks go.
 - On Windows, an open repository no longer costs a fifth of a core while
   nothing happens: its working tree is watched, as on Linux, instead of read
   again every 0.7 s — 0.5–0.8 % CPU when idle instead of 21–27 %, on a

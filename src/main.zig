@@ -1105,12 +1105,17 @@ var conflict_focus: usize = 0;
 var conflict_path: std.ArrayList(u8) = .empty;
 /// Bring the focused region into view on the next frame.
 var conflict_reveal = false;
-/// The file as it was before each pick made in it, newest last: U and
-/// Ctrl+Z put the last one back.
-var resolve_undo: std.ArrayList([]u8) = .empty;
+/// Each pick made in the open conflicted file, newest last, as what it
+/// changed was before it: U and Ctrl+Z take the last one back. The span, not
+/// the file: 500 picks in a 1.3 MB lockfile kept whole copies of it, 628 MB;
+/// as spans, 50 KB.
+var resolve_undo: std.ArrayList(git.Splice) = .empty;
+/// Picks that can be taken back; past it the oldest goes. A bound, not a
+/// size anyone reaches by hand.
+const MAX_RESOLVE_UNDO = 1000;
 
 fn clearResolveUndo() void {
-    for (resolve_undo.items) |old| gpa.free(old);
+    for (resolve_undo.items) |step| step.deinit(gpa);
     resolve_undo.clearRetainingCapacity();
 }
 
@@ -2806,6 +2811,10 @@ var watcher_failure_logged = false;
 fn closeRepo() void {
     stopWatching();
     watcher_failure_logged = false;
+    // The picks were in this repository's file: nothing to take back in the
+    // next one's.
+    clearResolveUndo();
+    conflict_path.clearRetainingCapacity();
     // A status read still out is not waited for — on a large tree, or on
     // Windows, that is the tab switch frozen. `collectWorkLoad` throws its
     // result away for being another repository's, and frees it.
@@ -3987,7 +3996,15 @@ fn runResolveSafe() void {
 
 /// U and Ctrl+Z in a conflicted file: the file as it was before the last pick.
 fn runUndoResolve() void {
-    const previous = resolve_undo.pop() orelse return;
+    const step = resolve_undo.pop() orelse return;
+    defer step.deinit(gpa);
+    const previous = (git.spliceUndo(gpa, conflict_text, step) catch return) orelse {
+        // Edited since, another way than a pick: the picks before it no
+        // longer fit it.
+        clearResolveUndo();
+        setCommandError("The file changed since that pick: there is nothing to take back.");
+        return;
+    };
     defer gpa.free(previous);
     _ = writeConflictFile(previous, false);
 }
@@ -4009,9 +4026,10 @@ fn writeConflictFile(next: []const u8, keep_undo: bool) bool {
     }
 
     if (keep_undo) {
-        const copy = gpa.dupe(u8, conflict_text) catch return false;
-        resolve_undo.append(gpa, copy) catch {
-            gpa.free(copy);
+        const step = git.spliceBetween(gpa, conflict_text, next) catch return false;
+        if (resolve_undo.items.len == MAX_RESOLVE_UNDO) resolve_undo.orderedRemove(0).deinit(gpa);
+        resolve_undo.append(gpa, step) catch {
+            step.deinit(gpa);
             return false;
         };
     }
