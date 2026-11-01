@@ -178,6 +178,9 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- With an author picked or a search typed, a frame no longer allocates on
+  the heap; and what the newer views keep — the authors' list, a conflicted
+  file's picks, the pull request form — is freed at exit too.
 - Resolving a conflicted file region by region no longer keeps a copy of
   the whole file for every pick, to undo it: 500 picks in a 1.3 MB lockfile
   kept 628 MB; what each pick changed, 50 KB. An undo after the file was

@@ -303,6 +303,20 @@ Checked, and nothing to do:
   a test opens everything a repository holds and closes it, three times, on
   `std.testing.allocator`, which fails on a byte left behind.
 
+  Both were from before the author filter, the dialogs and the toasts
+  (2026-11-01). Counted on those too, the filter was not true to it: with
+  an author picked or a search typed, the history's rows shown were listed
+  on the heap every frame — one allocation a frame. They go in the frame's
+  arena now. A dialog: none. A toast: two over its first frames, dvui
+  setting its window up, then none. The open-and-close test goes through
+  the filter, a dialog and a toast too.
+
+  The exit freed less than the tests did: the authors' index, a conflicted
+  file's picks, the pull requests' cards and form, the pickers' filters.
+  One `freeViews` now, called by both. A Debug run of a repository,
+  closed: no leak reported, before as after — those fill only once their
+  views are used.
+
 ## Idle, taken apart again (2026-10-29)
 
 Nothing draws without a reason now, and every reason is an event:
