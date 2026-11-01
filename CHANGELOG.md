@@ -160,6 +160,11 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- A pull request merged or closed from Zit leaves the list at once, and
+  shows as merged or closed, rather than after a refresh by hand: it stays
+  out of the lists GitHub sends back before it has caught up. Its branch
+  already deleted by GitHub after the merge is no longer an error that kept
+  the list from being read again.
 - A reply in a review thread, a quote in a comment and a row of a pull
   request's files no longer sit on a dark band.
 - In the graph, a line meets a commit at its middle, as GitComet draws

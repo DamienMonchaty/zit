@@ -3124,6 +3124,13 @@ const ApiCall = struct {
 /// What a call's success sets off besides the next in the run.
 const ApiThen = enum {
     none,
+    /// A request merged or closed: off the open list, and shown as such,
+    /// before GitHub's own lists have caught up. Its number in
+    /// `api_gone_number`.
+    gone,
+    /// The branch after a merge: GitHub may have deleted it itself, where
+    /// the repository says to — gone either way, and no failure.
+    branch_after_merge,
     /// Empty the review box: what it held went out.
     clear_comment,
     clear_reply,
@@ -3143,6 +3150,9 @@ var api_assignees: std.ArrayList(u8) = .empty;
 var api_labels: std.ArrayList(u8) = .empty;
 /// Fetch once the run succeeds: it moved branches on the remote.
 var api_fetch_after = false;
+/// For `.gone`: the request merged or closed, and what it now is.
+var api_gone_number: u32 = 0;
+var api_gone_state: []const u8 = "";
 
 /// `owner/name` on GitHub of the open repository; empty when it is not there.
 var repo_slug: std.ArrayList(u8) = .empty;
@@ -3219,6 +3229,14 @@ fn collectApi() void {
         (if (w.err.items.len > 0) a.allocator().dupe(u8, w.err.items) catch "curl failed." else "curl failed.")
     else
         github.failure(a.allocator(), github.split(w.out));
+    // A branch already deleted is what was asked for; and a failure there
+    // does not keep the list from being read again.
+    if (failed != null and api_then == .branch_after_merge) {
+        if (api_queue.items.len > 0) return startNextApi();
+        refreshRequests();
+        if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
+        return;
+    }
     if (failed) |why| {
         clearApiQueue();
         setCommandError(why);
@@ -3235,6 +3253,13 @@ fn collectApi() void {
             pr_reply_id.clearRetainingCapacity();
         },
         .ask_reviewers => askReviewers(github.split(w.out).body),
+        .gone => {
+            pr.markGone(api_gone_number);
+            if (pr.detail) |*d| if (d.number == api_gone_number) {
+                d.state = api_gone_state;
+            };
+        },
+        .branch_after_merge => {},
     }
     if (api_queue.items.len > 0) return startNextApi();
     // A request just made, its reviewers and labels set: open it, in the
@@ -4076,19 +4101,23 @@ fn runConfirmed() void {
                 std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\",\"sha\":\"{s}\"}}", .{ method, sha })
             else
                 std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\"}}", .{method})) catch return clearConfirm();
-            requestApi("Merging", "PUT", apiPath(&path, "/pulls/{d}/merge", .{number}), body, .none);
+            api_gone_number = number;
+            api_gone_state = "MERGED";
+            requestApi("Merging", "PUT", apiPath(&path, "/pulls/{d}/merge", .{number}), body, .gone);
             // Its branch after it, as the toggle asked: GitHub's ref, by name —
             // unless it lives in a fork, which is not this repository's to delete.
             if (pr_delete_branch) if (pr.detail) |d| if (d.number == number and d.head.len > 0 and !d.fork) {
                 var ref_path: [512]u8 = undefined;
-                requestApi("Deleting the branch", "DELETE", apiPath(&ref_path, "/git/refs/heads/{s}", .{d.head}), null, .none);
+                requestApi("Deleting the branch", "DELETE", apiPath(&ref_path, "/git/refs/heads/{s}", .{d.head}), null, .branch_after_merge);
             };
             api_fetch_after = true;
         },
         .close_request => {
             var path: [512]u8 = undefined;
             const number = std.fmt.parseInt(u32, c.arg, 10) catch return clearConfirm();
-            requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .none);
+            api_gone_number = number;
+            api_gone_state = "CLOSED";
+            requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .gone);
         },
         .sign_out => signOutGithub(c.arg),
         .stage_markers => if (c.arg.len == 0)

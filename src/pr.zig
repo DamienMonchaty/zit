@@ -247,6 +247,54 @@ pub var last_error: std.ArrayList(u8) = .empty;
 /// Owned by `arena`, replaced whole on each listing.
 pub var list: []const Request = &.{};
 
+/// Requests merged or closed from here, by number: out of the open list at
+/// once, and kept out of the listings that still have them — GitHub's lists
+/// catch up a moment after its merge has happened — for a few listings.
+var gone: [8]struct { number: u32 = 0, listings: u8 = 0 } = @splat(.{});
+const GONE_LISTINGS = 4;
+
+/// `number` merged or closed: off the open list now.
+pub fn markGone(number: u32) void {
+    var slot: usize = 0;
+    for (gone, 0..) |g, i| {
+        if (g.number == number or g.listings == 0) {
+            slot = i;
+            break;
+        }
+        if (g.listings < gone[slot].listings) slot = i;
+    }
+    gone[slot] = .{ .number = number, .listings = GONE_LISTINGS };
+    list = withoutGone(list);
+}
+
+/// `from` less what was merged or closed here, in place: `list` is the
+/// arena's own.
+fn withoutGone(from: []const Request) []const Request {
+    const mutable: []Request = @constCast(from);
+    var kept: usize = 0;
+    for (from) |r| {
+        const hidden = for (gone) |g| {
+            if (g.listings > 0 and g.number == r.number) break true;
+        } else false;
+        if (hidden) continue;
+        mutable[kept] = r;
+        kept += 1;
+    }
+    return from[0..kept];
+}
+
+/// A listing landed, before it is filtered: each request it still has is
+/// hidden from one fewer to come; one it no longer has is gone there too.
+fn ageGone(fresh: []const Request) void {
+    for (&gone) |*g| {
+        if (g.listings == 0) continue;
+        const listed = for (fresh) |r| {
+            if (r.number == g.number) break true;
+        } else false;
+        g.listings = if (listed) g.listings - 1 else 0;
+    }
+}
+
 var gpa: std.mem.Allocator = undefined;
 var io: std.Io = undefined;
 var arena: ?std.heap.ArenaAllocator = null;
@@ -490,7 +538,9 @@ pub fn pump() bool {
         if (parse(body)) |next| {
             clear();
             arena = next.arena;
-            list = next.list;
+            // Counted against the whole listing, then filtered in place.
+            ageGone(next.list);
+            list = withoutGone(next.list);
             status = .ready;
         } else {
             status = .failed;
@@ -1324,4 +1374,32 @@ test "issues read into their shape" {
     try std.testing.expectEqual(@as(u32, 7), got[0].number);
     try std.testing.expectEqualStrings("p1", got[0].labels[1]);
     try std.testing.expectEqualStrings("ghost", got[1].author);
+}
+
+test "a request merged here leaves the open list, though a late listing still has it" {
+    gone = @splat(.{});
+    defer gone = @splat(.{});
+    var mine = [_]Request{
+        .{ .number = 1, .title = "a", .branch = "a", .author = "me", .draft = false },
+        .{ .number = 2, .title = "b", .branch = "b", .author = "me", .draft = false },
+    };
+    list = &mine;
+    defer list = &.{};
+    markGone(2);
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(u32, 1), list[0].number);
+
+    // A listing GitHub sent before it caught up: still hidden, for a few.
+    var late = [_]Request{
+        .{ .number = 1, .title = "a", .branch = "a", .author = "me", .draft = false },
+        .{ .number = 2, .title = "b", .branch = "b", .author = "me", .draft = false },
+    };
+    ageGone(&late);
+    const seen = withoutGone(&late);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(@as(u8, GONE_LISTINGS - 1), gone[0].listings);
+
+    // One without it: GitHub has caught up, nothing is hidden any more.
+    ageGone(late[0..1]);
+    try std.testing.expectEqual(@as(u8, 0), gone[0].listings);
 }
