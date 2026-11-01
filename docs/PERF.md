@@ -283,6 +283,36 @@ branches.
 The test backend draws in software: 51 ms of each of its frames is that,
 not Zit, and is left out of the numbers above.
 
+## Quadratic, measured (2026-11-01)
+
+An audit of the code merged since 0.1.2 named four loops inside loops.
+Measured on Windows (i7-1185G7) before changing any:
+
+| What | Before | After |
+|---|---|---|
+| A frame with 5,000 changes, all picked (`appFrame`) | 62.4 ms | 2.9 ms — none picked: 3.0 |
+| `parseConflicts`, 500 regions in 1.3 MB | 87.9 ms | 0.6 ms |
+| Resolving its 250 safe regions at once | 270 ms | 1.0 ms |
+| A frame, 5,000 commits, the oldest picked | 5.0 ms | not changed |
+| A frame, 5,000 commits, 3,000 branches against none | +1.5 ms | not changed |
+
+- **Picked changes** were a list, asked "is this one picked?" for every
+  row drawn and, counting them for the "Stage 5" link, for every change of
+  the list: 5,000 × 5,000 path comparisons a frame. A set beside the list
+  now, as `hidden_set` is beside the hidden refs.
+- **A conflict region's base** was looked for from the region to the end of
+  the file — to the end each time with git's default markers, which have
+  none. Up to the region's split now.
+- **"Resolve the safe ones"** replaced one region at a time, a copy of the
+  whole file for each. One pass now (`git.replaceRegions`).
+- **`History.indexOf`** goes through the history, asked a few times a
+  frame for the commit picked: nothing to measure at 5,000 commits. Left.
+- **The refs drawn on each line** are looked up through all of them: 1.5 ms
+  a frame at 3,000 branches, over a 4.3 ms frame — only while something
+  moves, since nothing draws at rest. A table of refs by commit would have
+  to be kept in step with every history read; left, as the search's
+  filtering was.
+
 ## Wrong, measured
 
 - **"Zit burns 20–50 % CPU when idle."** 17.8 % then 49.5 % in the first two

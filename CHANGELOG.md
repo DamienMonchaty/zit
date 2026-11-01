@@ -173,6 +173,11 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- Thousands of changes picked with Shift no longer slow every frame: with
+  5,000 picked a frame took 62 ms, it takes 3 as with none.
+- A conflicted lockfile no longer stalls the window as it opens and as its
+  regions are resolved: reading 500 regions in 1.3 MB took 88 ms and
+  "resolve the safe ones" 270 ms; they take 1 ms each.
 - Picking a commit of thousands of files no longer freezes the window for
   seconds: its files are listed without reading a line of them — 4 ms
   instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened
