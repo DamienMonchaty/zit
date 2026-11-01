@@ -26,6 +26,9 @@ pub const Error = error{Git};
 /// ponytail: hard cap, no paging. Add "load more" at the bottom of the graph if
 /// anyone actually scrolls into it.
 pub const MAX_COMMITS: usize = 5000;
+/// Most commits an author filter walks to find its MAX_COMMITS: the rest of
+/// a huge history is not looked through for one person's.
+pub const MAX_WALKED: usize = 400_000;
 
 /// Message from libgit2's thread-local error slot. Valid until the next failing
 /// libgit2 call on this thread, so copy it if it has to outlive the call site.
@@ -253,6 +256,12 @@ pub const RefFilter = struct {
     /// branch is walked: "All branches".
     first_parent: bool = false,
 
+    /// The authors whose commits the walk keeps, as "name\nemail" — the
+    /// address in any case; none keeps every one. A kept commit is joined
+    /// to its nearest kept ancestors, so the lanes still say how one leads
+    /// to another, as `git log --author --graph` draws them.
+    authors: []const []const u8 = &.{},
+
     /// `hidden` as a set, where the caller keeps one, so each ref is one lookup.
     hidden_set: ?*const std.StringHashMapUnmanaged(void) = null,
 
@@ -434,6 +443,25 @@ pub const Conflict = struct {
 };
 
 pub const ConflictSide = enum { ours, theirs, both };
+
+/// Whether a commit by `name` and `email` is one of `keys`' — each
+/// "name\nemail", the name as it is, the address in any case.
+pub fn authorMatches(keys: []const []const u8, name: []const u8, email: []const u8) bool {
+    for (keys) |k| {
+        const at = std.mem.indexOfScalar(u8, k, '\n') orelse k.len;
+        const k_email = if (at < k.len) k[at + 1 ..] else "";
+        if (std.mem.eql(u8, k[0..at], name) and std.ascii.eqlIgnoreCase(k_email, email)) return true;
+    }
+    return false;
+}
+
+test "authorMatches goes by the name, and the address in any case" {
+    const keys = [_][]const u8{ "Ann Lee\nann@x.invalid", "bot\n" };
+    try std.testing.expect(authorMatches(&keys, "Ann Lee", "ANN@x.invalid"));
+    try std.testing.expect(!authorMatches(&keys, "Ann", "ann@x.invalid"));
+    try std.testing.expect(!authorMatches(&keys, "Bo", "ann@x.invalid"));
+    try std.testing.expect(authorMatches(&keys, "bot", ""));
+}
 
 /// How a path came to be conflicted.
 pub const ConflictKind = enum {
@@ -1209,11 +1237,59 @@ pub const Repo = struct {
             }
         }.f;
 
+        // The names people go by, as the repository's .mailmap has them: one
+        // person under two spellings or two addresses is one author.
+        var mailmap: ?*c.git_mailmap = null;
+        if (c.git_mailmap_from_repository(&mailmap, self.ptr) < 0) mailmap = null;
+        defer if (mailmap) |m| c.git_mailmap_free(m);
+
+        // Narrowed to authors: every commit walked, kept or not, in the walk's
+        // order with its parents — what joins the kept ones up afterwards.
+        const narrowed = filter.authors.len > 0;
+        var skip_arena: std.heap.ArenaAllocator = .init(gpa);
+        defer skip_arena.deinit();
+        var visits: std.ArrayList(Visit) = .empty;
+        defer visits.deinit(gpa);
+        var visited: usize = 0;
+
         var oid: Oid = undefined;
-        while (commits.items.len < MAX_COMMITS and c.git_revwalk_next(&oid, walk) == 0) {
+        while (commits.items.len < MAX_COMMITS and visited < MAX_WALKED and c.git_revwalk_next(&oid, walk) == 0) {
+            visited += 1;
             var commit: ?*c.git_commit = null;
             if (c.git_commit_lookup(&commit, self.ptr, &oid) < 0) continue;
             defer c.git_commit_free(commit);
+
+            if (narrowed) {
+                var name: [*c]const u8 = null;
+                var email: [*c]const u8 = null;
+                if (c.git_commit_author(commit)) |sig| {
+                    name = sig.*.name;
+                    email = sig.*.email;
+                }
+                if (mailmap) |m| {
+                    var real_name: [*c]const u8 = null;
+                    var real_email: [*c]const u8 = null;
+                    if (c.git_mailmap_resolve(&real_name, &real_email, m, name, email) == 0) {
+                        name = real_name;
+                        email = real_email;
+                    }
+                }
+                const n_text = if (name) |n| std.mem.span(n) else "";
+                const e_text = if (email) |e| std.mem.span(e) else "";
+                if (!authorMatches(filter.authors, n_text, e_text)) {
+                    // Passed over, its parents kept for the joining.
+                    const count = c.git_commit_parentcount(commit);
+                    const parents = skip_arena.allocator().alloc(Oid, count) catch return error.Git;
+                    var kept: usize = 0;
+                    for (0..count) |i| {
+                        parents[kept] = (c.git_commit_parent_id(commit, @intCast(i)) orelse continue).*;
+                        kept += 1;
+                    }
+                    visits.append(gpa, .{ .id = oid, .parents = parents[0..kept], .kept = null }) catch return error.Git;
+                    continue;
+                }
+                visits.append(gpa, .{ .id = oid, .parents = &.{}, .kept = @intCast(commits.items.len) }) catch return error.Git;
+            }
 
             var entry: Commit = .{
                 .id = oid,
@@ -1231,8 +1307,18 @@ pub const Repo = struct {
                 entry.body = arena.dupe(u8, std.mem.trimEnd(u8, first, " \t\r")) catch return error.Git;
             }
             if (c.git_commit_author(commit)) |sig| {
-                if (sig.*.name) |n| entry.author = try intern(&names, gpa, arena, std.mem.span(n));
-                if (sig.*.email) |e| entry.email = try intern(&names, gpa, arena, std.mem.span(e));
+                var name: [*c]const u8 = sig.*.name;
+                var email: [*c]const u8 = sig.*.email;
+                if (mailmap) |m| {
+                    var real_name: [*c]const u8 = null;
+                    var real_email: [*c]const u8 = null;
+                    if (c.git_mailmap_resolve(&real_name, &real_email, m, name, email) == 0) {
+                        name = real_name;
+                        email = real_email;
+                    }
+                }
+                if (name) |n| entry.author = try intern(&names, gpa, arena, std.mem.span(n));
+                if (email) |e| entry.email = try intern(&names, gpa, arena, std.mem.span(e));
             }
 
             const n = c.git_commit_parentcount(commit);
@@ -1251,7 +1337,59 @@ pub const Repo = struct {
             commits.append(gpa, entry) catch return error.Git;
         }
 
+        if (narrowed) try joinKept(gpa, arena, commits.items, visits.items);
         return arena.dupe(Commit, commits.items) catch return error.Git;
+    }
+
+    /// A commit walked for an author filter: its parents if passed over, its
+    /// place among the kept ones if kept.
+    const Visit = struct { id: Oid, parents: []const Oid, kept: ?u32 };
+
+    /// The kept commits' parents, each passed-over one replaced by the
+    /// nearest kept ancestors through it. Backwards over the walk, which went
+    /// children first: a commit's parents are answered before it is.
+    fn joinKept(gpa: std.mem.Allocator, arena: std.mem.Allocator, kept: []Commit, visits: []const Visit) Error!void {
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        var is_kept: std.AutoHashMapUnmanaged(Oid, void) = .empty;
+        defer is_kept.deinit(gpa);
+        for (kept) |k| is_kept.put(gpa, k.id, {}) catch return error.Git;
+        // For a passed-over commit: the kept commits it leads to, at most a
+        // few — a lane for each is all the graph can draw anyway.
+        var reach: std.AutoHashMapUnmanaged(Oid, []const Oid) = .empty;
+        defer reach.deinit(gpa);
+
+        var i = visits.len;
+        while (i > 0) {
+            i -= 1;
+            const v = visits[i];
+            if (v.kept != null) continue;
+            var set: std.ArrayList(Oid) = .empty;
+            for (v.parents) |p| try addAncestors(a, &set, p, &is_kept, &reach);
+            reach.put(gpa, v.id, set.items) catch return error.Git;
+        }
+        for (kept) |*k| {
+            var set: std.ArrayList(Oid) = .empty;
+            for (k.parents) |p| try addAncestors(a, &set, p, &is_kept, &reach);
+            // No more than it had: joined through a merge passed over, a
+            // plain commit would otherwise be drawn as a merge it never was.
+            // The first is the nearest along its first parents.
+            const most = @min(set.items.len, k.parents.len);
+            k.parents = arena.dupe(Oid, set.items[0..most]) catch return error.Git;
+        }
+    }
+
+    const MAX_JOINED = 4;
+
+    fn addAncestors(a: std.mem.Allocator, set: *std.ArrayList(Oid), p: Oid, is_kept: *const std.AutoHashMapUnmanaged(Oid, void), reach: *const std.AutoHashMapUnmanaged(Oid, []const Oid)) Error!void {
+        const from: []const Oid = if (is_kept.contains(p)) &.{p} else reach.get(p) orelse &.{};
+        for (from) |o| {
+            if (set.items.len >= MAX_JOINED) return;
+            for (set.items) |had| {
+                if (oidEql(had, o)) break;
+            } else set.append(a, o) catch return error.Git;
+        }
     }
 
     /// Staged and unstaged changes, in a fresh snapshot.

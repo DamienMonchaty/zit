@@ -1998,7 +1998,7 @@ var graph_pinned: std.ArrayList([]u8) = .empty;
 var graph_only: std.ArrayList([]u8) = .empty;
 
 fn graphFilter() git.RefFilter {
-    return .{ .hidden = @ptrCast(graph_hidden.items), .hidden_set = &hidden_set, .only = @ptrCast(graph_only.items), .remotes = graph_show_remote, .first_parent = graph_first_parent };
+    return .{ .hidden = @ptrCast(graph_hidden.items), .hidden_set = &hidden_set, .only = @ptrCast(graph_only.items), .remotes = graph_show_remote, .first_parent = graph_first_parent, .authors = @ptrCast(author_only.items) };
 }
 
 /// `graph_hidden` as a set, over the same strings: asked of every ref a
@@ -2221,10 +2221,19 @@ fn startHistoryLoad() void {
             for (copy, graph_only.items) |*to, from| to.* = a.dupe(u8, from) catch "";
             only = copy;
         } else |_| {}
+        var by: []const []const u8 = &.{};
+        if (a.alloc([]const u8, author_only.items.len)) |copy| {
+            for (copy, author_only.items) |*to, from| to.* = a.dupe(u8, from) catch "";
+            by = copy;
+        } else |_| {}
+        // The whole filter, as the UI has it: First-parent went missing here,
+        // and a quiet re-read dropped the graph out of it.
         load.filter = .{
             .hidden = hidden,
             .only = only,
             .remotes = graph_show_remote,
+            .first_parent = graph_first_parent,
+            .authors = by,
         };
     }
     history_load = load;
@@ -4701,6 +4710,11 @@ fn appFrame() !dvui.App.Result {
     if (graph_filter_dirty) {
         graph_filter_dirty = false;
         reloadHistory();
+        dvui.refresh(null, @src(), null);
+    }
+    if (authors_dirty) {
+        authors_dirty = false;
+        refreshHistory();
         dvui.refresh(null, @src(), null);
     }
 
@@ -11155,6 +11169,7 @@ fn searchField(
         .font = style.small(),
     });
     const id = te.data().id;
+    if (te.enter_pressed) search_entered = id;
     te.deinit();
 
     dvui.icon(@src(), "search_icon", dvui.entypo.magnifying_glass, .{
@@ -11170,6 +11185,10 @@ fn searchField(
 /// A small framed button with an icon: for the actions a header offers,
 /// where a bare link reads as text. `accent` marks the one that changes
 /// something.
+/// The search field Enter was last pressed in, for its caller to act on
+/// and forget.
+var search_entered: ?dvui.Id = null;
+
 fn chipButton(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8, accent: bool) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
@@ -13598,7 +13617,7 @@ fn graphPanel() void {
     defer if (search_open or commit_filter.items.len > 0) floatingSearch();
 
     if (commits.len == 0) {
-        emptyState(@src(), open_error orelse "No commits yet.");
+        emptyState(@src(), open_error orelse if (author_only.items.len > 0) "No commit by the authors picked." else "No commits yet.");
         return;
     }
 
@@ -13751,13 +13770,114 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
     }
 }
 
-/// The authors the list is narrowed to; none is everyone.
+/// The authors the list is narrowed to, by `authorKey`; none is everyone.
 var author_only: std.ArrayList([]u8) = .empty;
 /// What the authors' menu is narrowed to.
 var author_filter: std.ArrayList(u8) = .empty;
 
-/// The AUTHOR column's head, as a menu: every author of the history with a
-/// box to tick, the list showing only theirs while any is ticked.
+/// Who wrote a commit, as the filter goes by them: name and address
+/// together, "name\nemail", as `git shortlog -sne` counts people. Not the
+/// address alone: a team or a bot shares one under several names. Not the
+/// name alone: two people share names. One person under two spellings is
+/// one key where the repository's .mailmap says so, which the history is
+/// read through. In `a`.
+fn authorKey(a: std.mem.Allocator, name: []const u8, email: []const u8) []const u8 {
+    return std.fmt.allocPrint(a, "{s}\n{s}", .{ name, email }) catch name;
+}
+
+/// The name and the address a key holds.
+fn keyName(key: []const u8) []const u8 {
+    return key[0 .. std.mem.indexOfScalar(u8, key, '\n') orelse key.len];
+}
+
+fn keyEmail(key: []const u8) []const u8 {
+    const at = std.mem.indexOfScalar(u8, key, '\n') orelse return "";
+    return key[at + 1 ..];
+}
+
+/// Two keys for one author: the same name, the address in any case.
+fn sameAuthor(x: []const u8, y: []const u8) bool {
+    return std.mem.eql(u8, keyName(x), keyName(y)) and std.ascii.eqlIgnoreCase(keyEmail(x), keyEmail(y));
+}
+
+fn authorPicked(commit: git.Commit) bool {
+    for (author_only.items) |k| {
+        if (std.mem.eql(u8, keyName(k), commit.author) and std.ascii.eqlIgnoreCase(keyEmail(k), commit.email)) return true;
+    }
+    return false;
+}
+
+fn keyPicked(key: []const u8) bool {
+    for (author_only.items) |k| if (sameAuthor(k, key)) return true;
+    return false;
+}
+
+/// One author of the history: who, and how many commits.
+const AuthorEntry = struct { key: []const u8, name: []const u8, email: []const u8, count: usize };
+
+/// The history's authors, newest first, read once per history: rebuilt only
+/// when `history_seq` moves. Their words are the history's.
+var known_authors: std.ArrayList(AuthorEntry) = .empty;
+var authors_seq: ?u64 = null;
+/// What the index's keys are made in; emptied with it.
+var authors_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+
+fn authorIndex() []const AuthorEntry {
+    const h = history orelse return &.{};
+    if (authors_seq == history_seq) return known_authors.items;
+    // Narrowed to authors, the history holds theirs alone: the list read
+    // before, everyone's, stays — its words are its own.
+    if (author_only.items.len > 0 and authors_seq != null) return known_authors.items;
+    known_authors.clearRetainingCapacity();
+    _ = authors_arena.reset(.retain_capacity);
+    authors_seq = history_seq;
+    const a = authors_arena.allocator();
+    var at: std.StringHashMapUnmanaged(usize) = .empty;
+    defer at.deinit(gpa);
+    for (h.commits) |commit| {
+        // The address in one case: two cases of it are one person.
+        const email = std.ascii.allocLowerString(a, commit.email) catch continue;
+        const key = authorKey(a, commit.author, email);
+        if (at.get(key)) |k| {
+            known_authors.items[k].count += 1;
+            continue;
+        }
+        at.put(gpa, key, known_authors.items.len) catch continue;
+        known_authors.append(gpa, .{
+            .key = key,
+            .name = a.dupe(u8, commit.author) catch continue,
+            .email = a.dupe(u8, commit.email) catch continue,
+            .count = 1,
+        }) catch continue;
+    }
+    return known_authors.items;
+}
+
+/// The author `key` names, if the history has them.
+fn authorByKey(key: []const u8) ?AuthorEntry {
+    for (authorIndex()) |entry| if (sameAuthor(entry.key, key)) return entry;
+    return null;
+}
+
+/// Whether `entry` is you, by the address git commits as here.
+fn isMe(entry: AuthorEntry) bool {
+    return me_email.items.len > 0 and std.ascii.eqlIgnoreCase(entry.email, me_email.items);
+}
+
+/// What the filter is, in words: the one author's name, or how many.
+fn authorFilterCaption(buf: []u8) []const u8 {
+    if (author_only.items.len == 1) {
+        const key = author_only.items[0];
+        return if (authorByKey(key)) |e| e.name else keyName(key);
+    }
+    return std.fmt.bufPrint(buf, "{d} authors", .{author_only.items.len}) catch "authors";
+}
+
+/// The AUTHOR column's head, as a menu. Each author of the history once —
+/// you first, those picked kept at the top even when the history shown has
+/// none of theirs — with their picture, address and how many commits. A
+/// click on one shows theirs alone; the box beside it adds or takes them
+/// off; Enter in the field takes the first one shown.
 fn authorHeader() void {
     var cell = dvui.box(@src(), .{}, .{
         .min_size_content = .{ .w = col_author },
@@ -13769,7 +13889,7 @@ fn authorHeader() void {
     });
     defer cell.deinit();
     const picked = author_only.items.len;
-    const button = DropButton.begin(@src(), .{
+    var button = DropButton.begin(@src(), .{
         .tag = "header:author",
         .gravity_x = 0.5,
         .gravity_y = 0.5,
@@ -13778,64 +13898,180 @@ fn authorHeader() void {
         .corners = style.radius.input,
         .padding = .{ .x = HEADER_INSET, .y = 1, .w = 2, .h = 1 },
     });
+    button.min_w = 340;
     {
         var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
         defer face.deinit();
         const ink = if (picked > 0) style.accent() else style.textFaint();
-        dvui.label(@src(), "AUTHOR", .{}, .{ .font = style.section(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        if (picked > 0) dvui.label(@src(), "{d}", .{picked}, .{ .font = style.tinyBold(), .color_text = .{ .color = style.accent() }, .gravity_y = 0.5, .margin = .{ .x = 3 }, .padding = dvui.Rect.all(0) });
+        if (picked == 0) {
+            dvui.label(@src(), "AUTHOR", .{}, .{ .font = style.section(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        } else {
+            // Who it is narrowed to, by name, rather than how many.
+            var cap_buf: [32]u8 = undefined;
+            var fit_buf: [MAX_SHOWN_LINE]u8 = undefined;
+            dvui.label(@src(), "{s}", .{fitText(&fit_buf, authorFilterCaption(&cap_buf), style.smallBold(), col_author - 24)}, .{ .font = style.smallBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        }
         dvui.icon(@src(), "author_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = ink } }, .{
             .min_size_content = .{ .w = 11, .h = 11 },
             .gravity_y = 0.5,
             .margin = .{ .x = 2 },
         });
     }
-    var toggled: ?[]const u8 = null;
-    var everyone = false;
     const menu = button.open();
-    if (menu) |m| {
-        focusOnce(searchField(@src(), &author_filter, "Filter authors…", "author_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
-        if (menuIcon(@src(), if (picked == 0) dvui.entypo.check else dvui.entypo.users, "All authors", false)) {
-            everyone = true;
-            m.close();
-        }
-        var list = dvui.scrollArea(@src(), .{}, .{
-            .min_size_content = .{ .w = 260, .h = 300 },
-            .max_size_content = .size(.{ .w = 260, .h = 300 }),
-            .background = false,
-        });
-        defer list.deinit();
-        // Each author once, in the order the history first meets them: the
-        // most recent first.
-        if (history) |h| {
-            const needle = std.mem.trim(u8, author_filter.items, " ");
-            var seen: std.StringHashMapUnmanaged(void) = .empty;
-            const arena = dvui.currentWindow().arena();
-            var i: usize = 0;
-            for (h.commits) |c| {
-                if (seen.contains(c.author)) continue;
-                seen.put(arena, c.author, {}) catch break;
-                if (needle.len > 0 and std.ascii.indexOfIgnoreCase(c.author, needle) == null) continue;
-                var on = hasName(author_only.items, c.author);
-                if (dvui.checkbox(@src(), &on, c.author, .{ .id_extra = i, .tag = frameTag("author", c.author), .font = style.small(), .margin = .{ .x = style.space.sm, .y = 1, .h = 1 } })) toggled = c.author;
-                i += 1;
-            }
-        }
-    } else author_filter.clearRetainingCapacity();
-    button.end(menu);
-
-    if (toggled) |name| toggleAuthor(name);
-    if (everyone) clearNames(&author_only);
-}
-
-fn toggleAuthor(name: []const u8) void {
-    for (author_only.items, 0..) |n, i| if (std.mem.eql(u8, n, name)) {
-        gpa.free(author_only.orderedRemove(i));
+    defer button.end(menu);
+    const m = menu orelse {
+        author_filter.clearRetainingCapacity();
         return;
     };
-    const owned = gpa.dupe(u8, name) catch return;
+
+    const field = searchField(@src(), &author_filter, "Find an author…", "author_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm });
+    focusOnce(field);
+    if (pickRow(9000, "All authors", "", picked == 0, null)) {
+        clearAuthors();
+        m.close();
+    }
+    var list = dvui.scrollArea(@src(), .{}, .{
+        .expand = .horizontal,
+        .max_size_content = .height(@min(360, dvui.windowRect().h * 0.55)),
+        .background = false,
+    });
+    defer list.deinit();
+
+    const needle = std.mem.trim(u8, author_filter.items, " ");
+    const index = authorIndex();
+    var first: ?[]const u8 = null;
+    var change: ?struct { key: []const u8, only: bool } = null;
+    var row: usize = 0;
+
+    // Those picked first, kept even where the history shown has none of
+    // theirs: the only place they can be taken off from.
+    for (author_only.items) |key| {
+        const entry = authorByKey(key) orelse AuthorEntry{ .key = key, .name = keyName(key), .email = keyEmail(key), .count = 0 };
+        if (!authorShownBy(entry, needle)) continue;
+        if (first == null) first = entry.key;
+        if (authorRow(row, entry, true, index.len > 0 and entry.count > 0)) |only| change = .{ .key = entry.key, .only = only };
+        row += 1;
+    }
+    // You, then everyone else, newest first.
+    for ([_]bool{ true, false }) |mine| {
+        for (index) |entry| {
+            if (isMe(entry) != mine or keyPicked(entry.key)) continue;
+            if (!authorShownBy(entry, needle)) continue;
+            if (first == null) first = entry.key;
+            if (authorRow(row, entry, false, true)) |only| change = .{ .key = entry.key, .only = only };
+            row += 1;
+        }
+    }
+    if (row == 0) dropHeading(@src(), 0, "NO AUTHOR BY THAT NAME");
+
+    if (search_entered == field) {
+        search_entered = null;
+        if (first) |key| change = .{ .key = key, .only = true };
+    }
+    if (change) |c| {
+        if (c.only) {
+            onlyAuthor(c.key);
+            m.close();
+        } else toggleAuthor(c.key);
+    }
+}
+
+/// Whether what is typed over the authors' menu lets `entry` through: its
+/// name or its address.
+fn authorShownBy(entry: AuthorEntry, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    return std.ascii.indexOfIgnoreCase(entry.name, needle) != null or std.ascii.indexOfIgnoreCase(entry.email, needle) != null;
+}
+
+/// One author in the menu: the box that adds or takes them off, then the
+/// row itself — their picture, name, address, how many commits — whose click
+/// shows theirs alone. Null when neither was clicked; true for "theirs
+/// alone", false for the box.
+fn authorRow(id: usize, entry: AuthorEntry, picked: bool, has_commit: bool) ?bool {
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false });
+    defer line.deinit();
+    var on = picked;
+    const toggled = dvui.checkbox(@src(), &on, null, .{ .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = 2 } });
+
+    var mi = dvui.menuItem(@src(), .{}, .{
+        .tag = frameTag("author", entry.name),
+        .expand = .horizontal,
+        .corners = style.radius.input,
+        .color_fill_hover = .{ .color = style.accentDim() },
+        .padding = .{ .x = style.space.sm, .y = 5, .w = style.space.md, .h = 5 },
+    });
+    var chosen = false;
+    {
+        defer mi.deinit();
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer face.deinit();
+        if (has_commit) avatarSized(@src(), 0, .{ .id = std.mem.zeroes(git.Oid), .summary = "", .author = entry.name, .email = entry.email, .time = 0 }, null, null, 18);
+        dvui.label(@src(), "{s}", .{entry.name}, .{
+            .font = if (picked) style.smallBold() else style.small(),
+            .color_text = .{ .color = style.text() },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+        if (isMe(entry)) dvui.label(@src(), "you", .{}, .{ .font = style.tinyBold(), .color_text = .{ .color = style.accent() }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "{s}", .{entry.email}, .{
+            .font = style.tiny(),
+            .color_text = .{ .color = style.textFaint() },
+            .gravity_y = 0.5,
+            .expand = .horizontal,
+            .max_size_content = .width(0),
+            .margin = .{ .x = style.space.sm },
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.label(@src(), "{d}", .{entry.count}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        // Read before the item closes: after, its data is gone.
+        chosen = mi.activeRect() != null;
+    }
+    if (chosen) return true;
+    if (toggled) return false;
+    return null;
+}
+
+/// The list narrowed to `key`'s commits alone.
+fn onlyAuthor(key: []const u8) void {
+    _ = authorIndex();
+    clearNames(&author_only);
+    addAuthor(key);
+    authorsChanged();
+}
+
+fn toggleAuthor(key: []const u8) void {
+    _ = authorIndex();
+    for (author_only.items, 0..) |k, i| if (sameAuthor(k, key)) {
+        gpa.free(author_only.orderedRemove(i));
+        return authorsChanged();
+    };
+    addAuthor(key);
+    authorsChanged();
+}
+
+fn addAuthor(key: []const u8) void {
+    const owned = gpa.dupe(u8, key) catch return;
     author_only.append(gpa, owned) catch gpa.free(owned);
 }
+
+/// Everyone again.
+fn clearAuthors() void {
+    if (author_only.items.len == 0) return;
+    clearNames(&author_only);
+    authorsChanged();
+}
+
+/// The history read again, narrowed to the authors picked — the others'
+/// commits left out, the lanes joining what is left — off the window's
+/// thread: one person's commits can be far back.
+fn authorsChanged() void {
+    graph_scroll.viewport.y = 0;
+    // Not in the middle of a frame: the rows being drawn index the history
+    // as it is. Once the frame is done.
+    if (in_frame) authors_dirty = true else refreshHistory();
+}
+
+var authors_dirty = false;
 
 /// A fixed-width cell of the commit list, its text centred and cut with "…"
 /// where it is too long.
@@ -14073,7 +14309,8 @@ var list_filtering: bool = false;
 /// from the graph, or the file whose history it is narrowed to.
 fn graphNotes() void {
     const hidden = graph_only.items.len == 0 and graph_hidden.items.len > 0;
-    if (!hidden and file_history.items.len == 0) return;
+    const by_author = author_only.items.len > 0;
+    if (!hidden and file_history.items.len == 0 and !by_author) return;
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .background = true,
@@ -14085,6 +14322,19 @@ fn graphNotes() void {
     if (hidden) {
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "{d} hidden — show all", .{graph_hidden.items.len}) catch "Show all";
         if (chipButton(@src(), dvui.entypo.eye_with_line, caption, false)) unhideAll();
+    }
+    // Narrowed to authors: who, how many of the commits shown are theirs,
+    // and back to everyone in one click — or, with none of theirs here,
+    // saying so rather than leaving a faded graph to puzzle over.
+    if (by_author) {
+        var cap_buf: [32]u8 = undefined;
+        const who = authorFilterCaption(&cap_buf);
+        const n = if (history) |h| h.commits.len else 0;
+        const caption = if (n == 0)
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "No commit by {s} — show all authors", .{who}) catch "Show all authors"
+        else
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} · {d} commit{s} — show all authors", .{ who, n, plural(n) }) catch "Show all authors";
+        if (chipButton(@src(), dvui.entypo.users, caption, true)) clearAuthors();
     }
     if (file_history.items.len > 0) {
         dvui.label(@src(), "history of {s}", .{file_history.items}, .{
@@ -14152,7 +14402,7 @@ fn listRow(index: u32, shown: []const u32) ?usize {
 }
 
 fn commitShown(commit: git.Commit, index: usize, terms: []const Term) bool {
-    if (author_only.items.len > 0 and !hasName(author_only.items, commit.author)) return false;
+    if (author_only.items.len > 0 and !authorPicked(commit)) return false;
     if (file_history.items.len > 0) {
         if (index >= file_history_hits.len or !file_history_hits[index]) return false;
     }
@@ -14898,6 +15148,24 @@ fn commitMenu(
             startCompare(head_oid, commit.id, h.head orelse "HEAD", name);
         }
     };
+
+    // Its author: theirs alone, or added to the authors shown, or taken off.
+    menuSeparator(5);
+    {
+        const arena = dvui.currentWindow().arena();
+        const key = authorKey(arena, commit.author, commit.email);
+        if (menuIcon(@src(), dvui.entypo.user, std.fmt.allocPrint(arena, "Only commits by {s}", .{commit.author}) catch "Only this author", false)) {
+            fw.close();
+            onlyAuthor(key);
+        }
+        const picked = keyPicked(key);
+        if (author_only.items.len > 0 and (!picked or author_only.items.len > 1)) {
+            if (menuIcon(@src(), dvui.entypo.users, std.fmt.allocPrint(arena, "{s} {s} {s} the filter", .{ if (picked) "Take" else "Add", commit.author, if (picked) "off" else "to" }) catch "The filter", false)) {
+                fw.close();
+                toggleAuthor(key);
+            }
+        }
+    }
 
     menuSeparator(4);
     if (menuIcon(@src(), dvui.entypo.copy, "Copy the full sha", false)) {
@@ -20039,6 +20307,10 @@ fn resetUiGlobals() void {
     clearNames(&author_only);
     author_only.deinit(gpa);
     author_only = .empty;
+    known_authors.deinit(gpa);
+    known_authors = .empty;
+    _ = authors_arena.reset(.free_all);
+    authors_seq = null;
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     default_branch = .empty;
@@ -22963,6 +23235,102 @@ test "the avatar's menu opens the signing card, and asks before signing out" {
     try std.testing.expect(confirm == null);
 }
 
+// One person under two spellings and two addresses is one author once the
+// repository's .mailmap says so: one row in the menu, every commit theirs.
+test "the authors are read through .mailmap, one person once" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "-c", "user.name=ann", "-c", "user.email=ann@home.invalid", "commit", "-qm", "from home" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "c.txt", .data = "c\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "-c", "user.name=Ann Lee", "-c", "user.email=ann@work.invalid", "commit", "-qm", "from work" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = ".mailmap", .data = "Ann Lee <ann@work.invalid> <ann@home.invalid>\n" });
+
+    openRepo(dir);
+    defer closeRepo();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    const ann = authorByKey("Ann Lee\nann@work.invalid") orelse return error.AuthorMissing;
+    try std.testing.expectEqualStrings("Ann Lee", ann.name);
+    try std.testing.expectEqual(@as(usize, 2), ann.count);
+    try std.testing.expectEqual(@as(?AuthorEntry, null), authorByKey("ann\nann@home.invalid"));
+    // A team sharing one address stays apart, by name.
+    try std.testing.expect(sameAuthor("Ann Lee\nANN@work.invalid", ann.key));
+    try std.testing.expect(!sameAuthor("Bo\nann@work.invalid", ann.key));
+
+    // Theirs alone, from the commit's own menu's words, then Enter in the
+    // menu's field taking the first author it shows.
+    onlyAuthor(ann.key);
+    var rows: std.ArrayList(u32) = .empty;
+    defer rows.deinit(gpa);
+    shownRows(history.?.commits, &rows);
+    try std.testing.expectEqual(@as(usize, 2), rows.items.len);
+
+    clearAuthors();
+    try clickAt(try tagCenter("header:author"));
+    try typeText("test");
+    try pressFrame(.enter, .none);
+    try std.testing.expectEqual(@as(usize, 1), author_only.items.len);
+    try std.testing.expectEqualStrings("Zit Test\ntest@zync.invalid", author_only.items[0]);
+    // The one picked stays at the top of the menu, to be taken off from.
+    try clickAt(try tagCenter("header:author"));
+    try clickAt(try tagCenter("author:Zit Test"));
+    try std.testing.expectEqual(@as(usize, 1), author_only.items.len);
+}
+
+// Narrowed to one author, the history holds theirs alone, each joined to
+// the nearest of theirs before it: a lane from the newest to the oldest,
+// through the commits left out, as `git log --author --graph` draws it.
+test "an author filter leaves the others' commits out and joins the lanes over them" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "-c", "user.name=Bo", "-c", "user.email=bo@x.invalid", "commit", "-qm", "by bo" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "c.txt", .data = "c\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "mine again" });
+
+    openRepo(dir);
+    defer closeRepo();
+    try std.testing.expectEqual(@as(usize, 3), history.?.commits.len);
+
+    onlyAuthor("Zit Test\ntest@zync.invalid");
+    const h = history.?;
+    try std.testing.expectEqual(@as(usize, 2), h.commits.len);
+    try std.testing.expectEqualStrings("mine again", h.commits[0].summary);
+    try std.testing.expectEqualStrings("base", h.commits[1].summary);
+    // Joined over Bo's.
+    try std.testing.expectEqual(@as(usize, 1), h.commits[0].parents.len);
+    try std.testing.expect(git.oidEql(h.commits[0].parents[0], h.commits[1].id));
+    try std.testing.expectEqual(@as(usize, 1), lanes.?.lane_count);
+
+    clearAuthors();
+    try std.testing.expectEqual(@as(usize, 3), history.?.commits.len);
+}
+
 test "the author column filters the list, and the version opens the features" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -22998,8 +23366,11 @@ test "the author column filters the list, and the version opens the features" {
         try std.testing.expectEqual(@as(usize, 1), rows.items.len);
         try std.testing.expectEqualStrings("by bo", history.?.commits[rows.items[0]].summary);
     }
-    // All of them again.
-    try clickAt(try tagCenter("menu:All authors"));
+    // A click on a name shows theirs alone and closes the menu; the header
+    // says whose; All authors, in the menu again, brings everyone back.
+    try expectNoTag("author_filter");
+    try clickAt(try tagCenter("header:author"));
+    try clickAt(try tagCenter("pick:All authors"));
     try std.testing.expect(!listFiltered());
 
     try clickAt(try tagCenter("status:version"));

@@ -15,6 +15,20 @@ Every release of Zit, newest first. Downloads are on the
   when it is not 100 % — a click there resets it.
 
 ### Changed
+- The author filter filters: the history is read again with the other
+  authors' commits left out, each one kept joined to the nearest kept one
+  before it, so the lanes still say how they follow one another — as
+  `git log --author --graph` draws them — and an author's older commits are
+  found beyond the last 5,000. The AUTHOR header names who it is narrowed
+  to, and a chip over the graph says how many commits are theirs, with
+  "show all authors". Its menu lists each author with their picture,
+  address and how many commits — you first, those picked kept at the top —
+  a click on one shows theirs alone, the box beside it adds or takes them
+  off, and Enter in its field takes the first one shown. A commit's menu
+  has "Only commits by…" and adds its author to the filter, or takes them
+  off. Authors are told apart by name and address together, and read
+  through the repository's `.mailmap`, so one person under two spellings
+  is one author.
 - A merge, rebase, cherry-pick or revert under way has one bar, which says
   what it is in the branches' names — "Rebasing feat onto main" — with the
   step it is at, the commit it stopped on and how many files are left, and
@@ -126,6 +140,8 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- A history read again in the background — after a fetch, say — dropped the
+  graph out of First-parent.
 - Merges, rebases and conflicts are harder to break by accident:
   - Staging a conflicted file that still has its conflict markers — with +,
     a double-click, Mark resolved, Stage all or the palette — asks first.
