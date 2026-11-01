@@ -536,11 +536,10 @@ pub fn parseConflicts(gpa: std.mem.Allocator, text: []const u8) error{OutOfMemor
         }
 
         // Only a `|||||||` before the split is this region's base; a later one
-        // belongs to the next conflict down the file.
-        const base_at = blk: {
-            const at = findMarker(text, ours_start, BASE_MARK) orelse break :blk null;
-            break :blk if (at < split) at else null;
-        };
+        // belongs to the next conflict down the file. Looked for up to the
+        // split alone: git's default markers have none, and a search to the
+        // end of the file for each region was 88 ms for 500 of them in 1 MB.
+        const base_at = findMarker(text[0..split], ours_start, BASE_MARK);
 
         const ours_end = base_at orelse split;
         const end = lineEnd(text, close);
@@ -589,6 +588,29 @@ pub fn replaceRegion(
     try out.appendSlice(gpa, text[0..conflict.start]);
     for (parts) |part| try out.appendSlice(gpa, part);
     try out.appendSlice(gpa, text[conflict.end..]);
+    return out.toOwnedSlice(gpa);
+}
+
+/// `text` with each of `regions` — in the order they come in it — replaced
+/// by its entry in `with`, or left as it is where that is null. One pass:
+/// replacing them one at a time copied the whole text once a region.
+pub fn replaceRegions(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    regions: []const Conflict,
+    with: []const ?[]const u8,
+) error{OutOfMemory}![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.ensureTotalCapacity(gpa, text.len);
+    var at: usize = 0;
+    for (regions, with) |region, replacement| {
+        const part = replacement orelse continue;
+        try out.appendSlice(gpa, text[at..region.start]);
+        try out.appendSlice(gpa, part);
+        at = region.end;
+    }
+    try out.appendSlice(gpa, text[at..]);
     return out.toOwnedSlice(gpa);
 }
 
@@ -2823,6 +2845,41 @@ test "diff3 style keeps the base out of both sides" {
     try std.testing.expectEqualStrings("mine\n", found[0].ours);
     try std.testing.expectEqualStrings("original\n", found[0].base);
     try std.testing.expectEqualStrings("yours\n", found[0].theirs);
+}
+
+test "a region's base is its own, never the next region's" {
+    const text =
+        "<<<<<<< HEAD\nfirst mine\n=======\nfirst yours\n>>>>>>> other\n" ++
+        "between\n" ++
+        "<<<<<<< HEAD\nsecond mine\n||||||| base\nsecond original\n=======\nsecond yours\n>>>>>>> other\n";
+
+    const found = try parseConflicts(std.testing.allocator, text);
+    defer std.testing.allocator.free(found);
+
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+    try std.testing.expect(!found[0].has_base);
+    try std.testing.expectEqualStrings("first mine\n", found[0].ours);
+    try std.testing.expect(found[1].has_base);
+    try std.testing.expectEqualStrings("second original\n", found[1].base);
+}
+
+test "regions replaced in one pass, the others left as they were" {
+    const a = std.testing.allocator;
+    const text = "a\n<<<<<<< HEAD\n1\n=======\n2\n>>>>>>> o\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\n<<<<<<< HEAD\n5\n=======\n6\n>>>>>>> o\nd\n";
+    const found = try parseConflicts(a, text);
+    defer a.free(found);
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+
+    const out = try replaceRegions(a, text, found, &.{ "one\n", null, "five\n" });
+    defer a.free(out);
+    try std.testing.expectEqualStrings("a\none\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\nfive\nd\n", out);
+
+    // Each the same as replacing that region alone.
+    const first = try replaceRegion(a, text, found[0], &.{"one\n"});
+    defer a.free(first);
+    const only_first = try replaceRegions(a, text, found, &.{ "one\n", null, null });
+    defer a.free(only_first);
+    try std.testing.expectEqualStrings(first, only_first);
 }
 
 test "a marker in the middle of a line is not a conflict" {

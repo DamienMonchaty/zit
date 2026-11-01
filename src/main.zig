@@ -1873,6 +1873,7 @@ fn appDeinit(win: *dvui.Window) void {
     repo_path.deinit(gpa);
     clearPickedChanges();
     picked_changes.deinit(gpa);
+    picked_set.deinit(gpa);
     clearFoldedDirs();
     commit_filter.deinit(gpa);
     commit_summary.deinit(gpa);
@@ -2094,6 +2095,7 @@ fn hasName(list: []const []u8, name: []const u8) bool {
 
 fn clearNames(list: *std.ArrayList([]u8)) void {
     if (list == &graph_hidden) hidden_set.clearRetainingCapacity();
+    if (list == &picked_changes) picked_set.clearRetainingCapacity();
     for (list.items) |n| gpa.free(n);
     list.clearRetainingCapacity();
 }
@@ -3956,20 +3958,19 @@ fn runResolve() void {
 }
 
 /// Every region that resolves on its own, at once: each keeps the side that
-/// changed it, line by line at the finest. From the last region up, so the
-/// offsets of those before it still hold.
+/// changed it, line by line at the finest. The file written in one pass —
+/// one region at a time was a copy of all of it for each, 345 ms for 250
+/// regions of a 1.3 MB lockfile.
 fn runResolveSafe() void {
-    var text = gpa.dupe(u8, conflict_text) catch return;
-    defer gpa.free(text);
-    var i = conflicts.len;
-    while (i > 0) {
-        i -= 1;
-        const auto = (git.autoResolve(gpa, conflicts[i]) catch null) orelse continue;
-        defer gpa.free(auto.text);
-        const next = git.replaceRegion(gpa, text, conflicts[i], &.{auto.text}) catch return;
-        gpa.free(text);
-        text = next;
+    const with = gpa.alloc(?[]const u8, conflicts.len) catch return;
+    defer gpa.free(with);
+    @memset(with, null);
+    defer for (with) |w| if (w) |t| gpa.free(t);
+    for (conflicts, with) |region, *w| {
+        if (git.autoResolve(gpa, region) catch null) |auto| w.* = auto.text;
     }
+    const text = git.replaceRegions(gpa, conflict_text, conflicts, with) catch return;
+    defer gpa.free(text);
     _ = writeConflictFile(text, true);
 }
 
@@ -19641,6 +19642,10 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
 
 /// Changes picked with Ctrl or Shift, by path, owned: one side's at a time.
 var picked_changes: std.ArrayList([]u8) = .empty;
+/// The same paths, borrowed from `picked_changes`: what "is it picked?" asks,
+/// for every row drawn and, through `pickedIn`, for every change of the
+/// list each frame — 62 ms a frame through the list with 5,000 picked.
+var picked_set: std.StringHashMapUnmanaged(void) = .empty;
 var picked_side: git.DiffSide = .unstaged;
 /// The file a Shift+click range runs from: the last one clicked.
 var pick_anchor: ?usize = null;
@@ -19651,18 +19656,26 @@ fn clearPickedChanges() void {
 }
 
 fn isChangePicked(side: git.DiffSide, path: []const u8) bool {
-    return picked_side == side and hasName(picked_changes.items, path);
+    return picked_side == side and picked_set.contains(path);
 }
 
 fn toggleChangePick(side: git.DiffSide, path: []const u8) void {
     if (picked_side != side) clearNames(&picked_changes);
     picked_side = side;
-    for (picked_changes.items, 0..) |p, i| if (std.mem.eql(u8, p, path)) {
-        gpa.free(picked_changes.orderedRemove(i));
+    if (picked_set.contains(path)) {
+        _ = picked_set.remove(path);
+        for (picked_changes.items, 0..) |p, i| if (std.mem.eql(u8, p, path)) {
+            gpa.free(picked_changes.orderedRemove(i));
+            return;
+        };
         return;
-    };
+    }
     const owned = gpa.dupe(u8, path) catch return;
-    picked_changes.append(gpa, owned) catch gpa.free(owned);
+    picked_changes.append(gpa, owned) catch return gpa.free(owned);
+    picked_set.put(gpa, owned, {}) catch {
+        _ = picked_changes.pop();
+        gpa.free(owned);
+    };
 }
 
 /// How many of `changes` are picked: a pick whose file has since gone —
@@ -21071,6 +21084,8 @@ fn resetUiGlobals() void {
     clearPickedChanges();
     picked_changes.deinit(gpa);
     picked_changes = .empty;
+    picked_set.deinit(gpa);
+    picked_set = .empty;
     redo_from = null;
     clearFoldedDirs();
     commit_all_files = false;
@@ -27457,4 +27472,32 @@ test "the authors' menu builds the rows in sight, and its search still finds the
     try dvui.testing.settle(frameArrowCursor);
     _ = try tagCenter("author:A00");
     try expectNoTag("author:A59");
+}
+
+test "changes picked: asked by path, taken off again, one side at a time" {
+    gpa = std.testing.allocator;
+    defer resetUiGlobals();
+    toggleChangePick(.unstaged, "a.txt");
+    toggleChangePick(.unstaged, "b.txt");
+    try std.testing.expect(isChangePicked(.unstaged, "a.txt"));
+    try std.testing.expect(isChangePicked(.unstaged, "b.txt"));
+    try std.testing.expect(!isChangePicked(.staged, "a.txt"));
+
+    // Picked again: off, in the list and in the set alike.
+    toggleChangePick(.unstaged, "a.txt");
+    try std.testing.expect(!isChangePicked(.unstaged, "a.txt"));
+    try std.testing.expectEqual(@as(usize, 1), picked_changes.items.len);
+    const changes = [_]git.Change{
+        .{ .path = "a.txt", .old_path = "a.txt", .status = .modified },
+        .{ .path = "b.txt", .old_path = "b.txt", .status = .modified },
+    };
+    try std.testing.expectEqual(@as(usize, 1), pickedIn(.unstaged, &changes));
+
+    // The other side's pick starts over.
+    toggleChangePick(.staged, "c.txt");
+    try std.testing.expect(!isChangePicked(.unstaged, "b.txt"));
+    try std.testing.expect(isChangePicked(.staged, "c.txt"));
+    clearPickedChanges();
+    try std.testing.expect(!isChangePicked(.staged, "c.txt"));
+    try std.testing.expectEqual(@as(u32, 0), picked_set.count());
 }
