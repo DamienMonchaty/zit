@@ -18905,7 +18905,9 @@ fn treeLessThan(paths: []const []const u8, a: u32, b: u32) bool {
 fn treeRows(a: std.mem.Allocator, paths: []const []const u8) ![]TreeRow {
     const order = try a.alloc(u32, paths.len);
     for (order, 0..) |*o, i| o.* = @intCast(i);
-    std.mem.sort(u32, order, paths, treeLessThan);
+    // Unstable: the paths are distinct and `treeLessThan` breaks every tie,
+    // so the order is total and a stable sort would only add code.
+    std.mem.sortUnstable(u32, order, paths, treeLessThan);
 
     var rows: std.ArrayList(TreeRow) = .empty;
     // The folders the last path was in, outermost first: their lines.

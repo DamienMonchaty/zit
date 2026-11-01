@@ -1175,7 +1175,9 @@ pub const Repo = struct {
         git_error_clear();
 
         const items = refs.toOwnedSlice(arena) catch return error.Git;
-        std.mem.sort(Ref, items, {}, refLessThan);
+        // Unstable: no two refs have the same kind and name, so the order
+        // is total and a stable sort would only add code.
+        std.mem.sortUnstable(Ref, items, {}, refLessThan);
         return items;
     }
 
@@ -2293,7 +2295,7 @@ test "refs sort by kind, with the checked-out branch first" {
         .{ .name = "main", .kind = .local, .target = undefined, .head = true },
         .{ .name = "aaa", .kind = .local, .target = undefined, .head = false },
     };
-    std.mem.sort(Ref, &refs, {}, refLessThan);
+    std.mem.sortUnstable(Ref, &refs, {}, refLessThan);
 
     try std.testing.expectEqualStrings("main", refs[0].name);
     try std.testing.expectEqualStrings("aaa", refs[1].name);
