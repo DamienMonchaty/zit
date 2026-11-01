@@ -244,6 +244,22 @@ dirty (peak 77), Vulkan 71 / 37 (86), OpenGL 123 / 44 (140) — 40 MB of it
 Mesa's gallium and 14 MB LLVM, its shader JIT — software 142 / 64 (156). The
 order stands: GPU, then Vulkan, then OpenGL.
 
+On Windows (2026-11-01, Intel Iris Xe, a clone of a 2,300-file repository,
+`SDL_RENDER_DRIVER` set for each, two runs, the window focused; the
+graphics DLLs loaded checked against the one asked for):
+
+| Renderer | Working set | Private working set | Commit | Wake-ups/s |
+|---|---|---|---|---|
+| Direct3D 11, SDL's default | 104–111 MB | 74–81 MB | 159–166 MB | 31–36 |
+| **Direct3D 12** | 82–92 MB | 48–50 MB | 122–124 MB | 16–19 |
+| SDL's GPU renderer (on Direct3D 12) | 94–106 MB | 60–62 MB | 134–135 MB | 13–14 |
+| Vulkan | 165–170 MB | 74–76 MB | 145–148 MB | 87–88 |
+| OpenGL | 131–137 MB | 47–48 MB | 112–113 MB | 82–84 |
+
+Direct3D 12 first, then 11 where there is no 12. Its pixels are 11's: 0
+of 315,000 sampled differ in a capture of each. CPU is no guide here: the
+0.7 s poll's status reads were most of it, the same ~18 % for every one.
+
 What changed, each measured at 45 s:
 
 - **The history's arena: 8.1 MB → 1.15 MB** for 2,998 commits whose live

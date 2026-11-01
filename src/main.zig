@@ -43,7 +43,15 @@ fn startOptions() dvui.App.StartOptions {
     // SDL's GPU renderer first on Linux, then its Vulkan one, then OpenGL:
     // OpenGL, the default, maps Mesa's gallium and LLVM into the process, about
     // twice the RSS of the other two. Tried in order, so a machine without
-    // Vulkan still gets OpenGL. Windows keeps SDL's choice, Direct3D.
+    // Vulkan still gets OpenGL.
+    //
+    // Direct3D 12 first on Windows, then 11, SDL's default, where there is no
+    // 12. Measured on a 2,300-file repository (Intel Iris Xe): 11 is 30 MB
+    // more private memory, 40 MB more commit and twice the wake-ups; Vulkan
+    // and OpenGL are heavier still in working set, five times the wake-ups.
+    if (@import("builtin").os.tag == .windows) {
+        _ = dvui.backend.c.SDL_SetHint(dvui.backend.c.SDL_HINT_RENDER_DRIVER, "direct3d12,direct3d11,software");
+    }
     if (@import("builtin").os.tag == .linux) {
         _ = dvui.backend.c.SDL_SetHint(dvui.backend.c.SDL_HINT_RENDER_DRIVER, "gpu,vulkan,opengl,software");
 
