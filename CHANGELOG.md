@@ -29,14 +29,22 @@ Every release of Zit, newest first. Downloads are on the
   off. Authors are told apart by name and address together, and read
   through the repository's `.mailmap`, so one person under two spellings
   is one author.
-- A merge, rebase, cherry-pick or revert under way has one bar, which says
-  what it is in the branches' names — "Rebasing feat onto main" — with the
-  step it is at, the commit it stopped on and how many files are left, and
-  the next thing to do as its one filled button: resolve the conflicts, go
-  to the next conflicted file, Continue (also `Ctrl Enter` and the palette),
-  or Skip a commit its resolution left empty. Abort and Skip sit beside it;
-  Skip now works for cherry-picks and reverts too. The sidebar lists the
-  conflicted files, each a click away.
+- A merge, rebase, cherry-pick or revert under way is said at the toolbar's
+  right end, as GitComet's action bar says it: REBASING, MERGING… in bold,
+  how far and how many conflicts under it, and the whole of it on hover —
+  "Rebasing feat onto main", the commit it stopped on. Beside it Abort, Skip,
+  and the next thing to do as the one filled button: Resolve the conflicts,
+  Next file, Continue (also `Ctrl Enter` and the palette), or Skip empty for
+  a commit its resolution left empty. Skip now works for cherry-picks and
+  reverts too. The sidebar lists the conflicted files, each a click away.
+- Nothing pushes the window down under the toolbar any more. A name asked
+  for — a new branch or tag, a remote, a stash's message, a rename, a
+  worktree — is asked in a dialog: Enter makes it, Esc lets it be. A yes or
+  no for what cannot be undone is a toast low on the right, its button named
+  for what it does — Discard, Delete, Force push, Abort — with Esc for
+  Cancel. A branch dropped onto another opens a menu where it was let go, as
+  GitKraken's, with the two things it can mean: merge it in, or rebase onto
+  it.
 - The conflict view works from the keys, as GitComet's: one region at a time
   is the active one, framed, with `↑` `↓` (or `F2` `F3`) to move, `1` `2` `3`
   to keep the left side, the right one or both, `U` or `Ctrl Z` to take the
@@ -139,6 +147,12 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- In the graph, a line meets a commit at its middle, as GitComet draws
+  them: a merge whose parent is the next commit, on its left, comes down its
+  own column and turns into it at its height, where it used to cross just
+  above it and reach it beside its middle; a merge onto a line already on
+  its left leaves across at its own height. The lines are two crisp pixels
+  wide on the screen's grid, rather than a blur across three.
 - A history read again in the background — after a fetch, say — dropped the
   graph out of First-parent.
 - Merges, rebases and conflicts are harder to break by accident:
@@ -153,9 +167,7 @@ Every release of Zit, newest first. Downloads are on the
     the first conflicted file opens instead.
   - An interactive rebase git refuses to start keeps its plan on screen,
     and its todo file is no longer left in the repository.
-  - A merge stopped on a conflict in a terminal now brings up the banner.
-- Every confirmation bar showed its buttons without its question; the
-  question is back.
+  - A merge stopped on a conflict in a terminal now shows in the toolbar.
 - In the pull requests: ↑ and ↓ no longer move the hidden history, Ctrl+F
   searches the requests, a review written for one request is not carried to
   the next, Approve and Request changes are not offered on your own request,

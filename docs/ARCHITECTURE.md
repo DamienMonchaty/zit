@@ -145,8 +145,8 @@ feeding it to `git apply --cached` on stdin, which is the only place Zit writes
 anything to git other than a command line. A changed file answers a right-click
 with the rest of what it can do — stage, open, blame, copy the path, discard. Merge, rebase, cherry-pick, revert
 and reset are ordinary commands behind the right-click menus on branches and
-commits; when one of them stops on a conflict, the banner under the toolbar is
-what offers `--continue` and `--abort`. A commit's menu leads with checking
+commits; when one of them stops on a conflict, the toolbar's right end says so
+and offers `--continue` and `--abort`. A commit's menu leads with checking
 out — the branches on it, then the commit itself — and keeps the three resets
 in one submenu.
 
@@ -162,15 +162,14 @@ editor and reads exactly the list that was composed, and `core.editor=true`
 covers the message editor a squash would otherwise stop on.
 
 Everything that cannot be undone — discard, `reset --hard`, dropping a stash —
-goes through one confirmation bar under the toolbar; everything that needs a
-name first — a branch, a tag, a remote — through one prompt bar in the same
-place. **Blame** and the **remotes** list are read through
+goes through one confirmation toast, low on the right; everything that needs a
+name first — a branch, a tag, a remote — through one small dialog. **Blame** and the **remotes** list are read through
 libgit2 like the rest.
 
 The branch you are on answers a right-click with what the toolbar has no
 room for: pull with `--rebase` or `--ff-only`, a force push (always
-`--force-with-lease`, behind the confirmation bar), rename. Other branches
-add a no-ff merge, a squash merge, push-and-track, and `-D` behind the bar;
+`--force-with-lease`, behind the confirmation), rename. Other branches
+add a no-ff merge, a squash merge, push-and-track, and `-D` behind it too;
 remote branches and tags can be deleted on the remote, tags pushed. Push
 sets up the upstream itself on a branch that has none. A hunk can be
 discarded as well as staged, a file in a commit's diff restored to that
