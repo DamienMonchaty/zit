@@ -6,6 +6,10 @@ Every release of Zit, newest first. Downloads are on the
 ## Unreleased
 
 ### Added
+- Redo beside Undo in the toolbar, as GitKraken has them: lit after an
+  undo, until something else moves the branch — `Ctrl Shift Z` and `Ctrl Y`
+  as before. Each says on hover what it would take back: Undo “commit:
+  Fix login”.
 - A website, [damienmonchaty.github.io/zit](https://damienmonchaty.github.io/zit/):
   installing, connecting GitHub, every feature, the search syntax and the
   keyboard shortcuts.
