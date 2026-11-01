@@ -1545,16 +1545,27 @@ pub const Repo = struct {
     /// commit's against nothing. First parent only: a merge's full diff is a
     /// combined diff, which is a different thing to read and to render.
     pub fn readCommitDiff(self: Repo, gpa: std.mem.Allocator, id: Oid) Error!Diff {
+        return self.readCommitDiffLines(gpa, id, .all);
+    }
+
+    /// As `readCommitDiff`, with the lines of only the files `lines` says.
+    pub fn readCommitDiffLines(self: Repo, gpa: std.mem.Allocator, id: Oid, lines: Lines) Error!Diff {
         var commit: ?*c.git_commit = null;
         try check(c.git_commit_lookup(&commit, self.ptr, &id));
         defer c.git_commit_free(commit);
         const parent: ?Oid = if (c.git_commit_parentcount(commit) > 0) c.git_commit_parent_id(commit, 0).* else null;
-        return self.readRangeDiff(gpa, parent, id);
+        return self.readRangeDiffLines(gpa, parent, id, lines);
     }
 
     /// What changed from commit `from` to commit `to`, whatever lies between;
     /// from nothing at all when `from` is null.
     pub fn readRangeDiff(self: Repo, gpa: std.mem.Allocator, from: ?Oid, to: Oid) Error!Diff {
+        return self.readRangeDiffLines(gpa, from, to, .all);
+    }
+
+    /// As `readRangeDiff`, with the lines of only the files `lines` says:
+    /// every file is listed either way, with its name and what happened to it.
+    pub fn readRangeDiffLines(self: Repo, gpa: std.mem.Allocator, from: ?Oid, to: Oid, lines: Lines) Error!Diff {
         var out: Diff = .{ .arena = .init(gpa) };
         errdefer out.arena.deinit();
         const arena = out.arena.allocator();
@@ -1574,7 +1585,7 @@ pub const Repo = struct {
         // A rename as one file rather than a deletion and an addition.
         try check(c.git_diff_find_similar(diff, null));
 
-        out.files = try collectDiff(arena, diff.?);
+        out.files = try collectDiffLines(arena, diff.?, lines);
         return out;
     }
 
@@ -2056,12 +2067,49 @@ fn collectStash(_: usize, message: [*c]const u8, stash_id: [*c]const c.git_oid, 
 ///
 /// Every list at its size from the start — libgit2 knows each hunk's line
 /// count — since one grown in the arena leaves each buffer it outgrew there.
+/// Which files of a diff to read the lines of. Listing the files is a walk
+/// of two trees; a file's lines are a diff of its two blobs, and over a
+/// commit of thousands of files that is seconds — for the one file looked at.
+pub const Lines = union(enum) {
+    all,
+    none,
+    /// The file of this name, new or old.
+    one: []const u8,
+};
+
 fn collectDiff(arena: std.mem.Allocator, diff: *c.git_diff) Error![]FileDiff {
+    return collectDiffLines(arena, diff, .all);
+}
+
+fn collectDiffLines(arena: std.mem.Allocator, diff: *c.git_diff, which: Lines) Error![]FileDiff {
     var files: std.ArrayList(FileDiff) = .empty;
 
     const count = c.git_diff_num_deltas(diff);
     files.ensureTotalCapacityPrecise(arena, count) catch return error.Git;
     for (0..count) |i| {
+        // Listed only: its names and what happened to it, from the trees.
+        const wanted = switch (which) {
+            .all => true,
+            .none => false,
+            .one => |name| blk: {
+                const d = c.git_diff_get_delta(diff, i);
+                break :blk sameCPath(d.*.new_file.path, name) or sameCPath(d.*.old_file.path, name);
+            },
+        };
+        if (!wanted) {
+            const d = c.git_diff_get_delta(diff, i);
+            files.append(arena, .{
+                .path = try dupePath(arena, d.*.new_file.path, d.*.old_file.path),
+                .old_path = try dupePath(arena, d.*.old_file.path, d.*.new_file.path),
+                .status = deltaStatus(d.*.status),
+                .mode = if (d.*.new_file.mode != 0) d.*.new_file.mode else d.*.old_file.mode,
+                .lines = &.{},
+                .hunk_count = 0,
+                .binary = d.*.flags & c.GIT_DIFF_FLAG_BINARY != 0,
+            }) catch return error.Git;
+            continue;
+        }
+
         var patch: ?*c.git_patch = null;
         if (c.git_patch_from_diff(&patch, diff, i) < 0) continue;
         defer c.git_patch_free(patch);
@@ -2131,6 +2179,12 @@ fn collectDiff(arena: std.mem.Allocator, diff: *c.git_diff) Error![]FileDiff {
     }
 
     return files.toOwnedSlice(arena) catch return error.Git;
+}
+
+/// Whether libgit2's C path `p` names `name`.
+fn sameCPath(p: [*c]const u8, name: []const u8) bool {
+    if (p == null) return false;
+    return std.mem.eql(u8, std.mem.span(p), name);
 }
 
 /// libgit2 hands back diff lines with their newline attached; the view adds its

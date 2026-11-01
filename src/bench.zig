@@ -100,6 +100,15 @@ const cases = [_]Case{
             }
         }
     }.f },
+    // What picking a commit reads: its files listed, no line of them.
+    .{ .name = "commit file lists", .run = struct {
+        fn f(ctx: *Ctx, a: std.mem.Allocator) !void {
+            for (ctx.history.commits[0..@min(DIFF_COMMITS, ctx.history.commits.len)]) |c| {
+                var d = try ctx.repo.readCommitDiffLines(a, c.id, .none);
+                d.deinit();
+            }
+        }
+    }.f },
     .{ .name = "lexer", .run = struct {
         fn f(ctx: *Ctx, a: std.mem.Allocator) !void {
             _ = a;

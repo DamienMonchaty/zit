@@ -1402,8 +1402,10 @@ fn ensureDiff() void {
 
     var next: git.Diff = switch (selection) {
         .none, .rebase, .blame => return,
-        .commit => |id| r.readCommitDiff(gpa, id) catch return clearSelection(),
-        .compare => r.readRangeDiff(gpa, compare_from, compare_to) catch return clearSelection(),
+        // The files listed, and the lines of the one open alone: a commit of
+        // thousands of files froze the window for seconds reading them all.
+        .commit => |id| r.readCommitDiffLines(gpa, id, openLines()) catch return clearSelection(),
+        .compare => r.readRangeDiffLines(gpa, compare_from, compare_to, openLines()) catch return clearSelection(),
         .change => |side| r.readWorkDiffFrom(gpa, side, selected_path.items, oldPathOf(side, selected_path.items)) catch return clearSelection(),
     };
 
@@ -1451,6 +1453,12 @@ fn ensureDiff() void {
     diff_all = all;
     diff_rows = rows;
     buildSplitRows();
+}
+
+/// The lines a commit's or a range's diff is read with: the file open, or
+/// none — its list is all the panel beside it shows.
+fn openLines() git.Lines {
+    return if (selected_path.items.len > 0) .{ .one = selected_path.items } else .none;
 }
 
 /// Line for line the same diff: what lets picks outlive a re-read.
@@ -25919,6 +25927,50 @@ test "a search fades the commits it leaves out, and the arrows go match to match
     selectCommit(two.id);
     stepCommit(-1);
     try std.testing.expectEqualStrings("three fix", commitSummary(selection.commit));
+}
+
+// A commit picked lists its files without reading their lines — over
+// thousands of files, reading them all froze the window for seconds — and
+// one file opened is read alone.
+test "a commit's files are listed without their lines, and the file open read alone" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\nbb\n" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "c.txt", .data = "c\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "two more" });
+    openRepo(dir);
+    defer closeRepo();
+    const head = history.?.commits[0].id;
+
+    var listed = try repo.?.readCommitDiffLines(gpa, head, .none);
+    defer listed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), listed.files.len);
+    for (listed.files) |f| {
+        try std.testing.expectEqual(git.Status.added, f.status);
+        try std.testing.expectEqual(@as(usize, 0), f.lines.len);
+    }
+
+    // Picked: its two files listed, no line read.
+    selectCommit(head);
+    ensureDiff();
+    try std.testing.expectEqual(@as(usize, 2), diff_all.len);
+    for (diff_all) |f| try std.testing.expectEqual(@as(usize, 0), f.lines.len);
+    // One opened: its hunk header and its two lines, the list still whole.
+    selectCommitFile(head, "b.txt");
+    ensureDiff();
+    try std.testing.expectEqual(@as(usize, 1), diff.?.files.len);
+    try std.testing.expectEqualStrings("b.txt", diff.?.files[0].path);
+    try std.testing.expectEqual(@as(usize, 3), diff.?.files[0].lines.len);
+    try std.testing.expectEqual(@as(usize, 2), diff_all.len);
 }
 
 test "a commit's files: all of its tree, and an unchanged one read whole" {
