@@ -172,6 +172,7 @@ fn addZit(
         }),
     });
 
+    slimDvui(b, dvui_dep);
     exe.root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
 
     // The version the app shows is the one in build.zig.zon, read here: the
@@ -234,6 +235,38 @@ fn addZit(
     if (Linked.of(b, exe).named("SDL3")) |sdl| leanSdl(sdl);
 
     return exe;
+}
+
+/// dvui built from a copy of its sources with the changes below: code and
+/// data it compiles in that Zit has no use for, and no option of its turns
+/// off. Each change finds its place by the text around it, and fails the
+/// build, saying where, when a new dvui has moved it.
+fn slimDvui(b: *std.Build, dvui_dep: *std.Build.Dependency) void {
+    const io = b.graph.io;
+    const copy = b.addWriteFiles();
+    var left_out: std.ArrayList([]const u8) = .empty;
+
+    // The window starts on dvui's Adwaita theme, before Zit's replaces it,
+    // and that theme embeds ten Bitstream Vera faces: 578 KB of fonts Zit
+    // never draws with. Kept: Vera Sans, dvui's fallback face.
+    {
+        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.path("src/themes/Adwaita.zig").getPath(b), b.allocator, .limited(1 << 20)) catch
+            @panic("dvui: cannot read src/themes/Adwaita.zig");
+        const from = std.mem.indexOf(u8, text, "const fonts: []const Font.Source = &.{") orelse
+            @panic("dvui: Adwaita's font list has moved, see slimDvui");
+        const to = std.mem.indexOfPos(u8, text, from, "\npub const light") orelse
+            @panic("dvui: Adwaita's light theme has moved, see slimDvui");
+        _ = copy.add("src/themes/Adwaita.zig", b.fmt(
+            "{s}const fonts: []const Font.Source = &.{{.{{ .family = Font.array(\"Vera Sans\"), .bytes = Font.Source.fallback.bytes }}}};\n{s}",
+            .{ text[0..from], text[to..] },
+        ));
+        _ = copy.addCopyFile(dvui_dep.path("src/fonts/bitstream-vera/Vera.ttf"), "src/fonts/bitstream-vera/Vera.ttf");
+        left_out.appendSlice(b.allocator, &.{ "Adwaita.zig", ".ttf", ".otf" }) catch @panic("OOM");
+    }
+
+    // `exclude_extensions` matches the end of each path, so a file name works.
+    _ = copy.addCopyDirectory(dvui_dep.path("src"), "src", .{ .exclude_extensions = left_out.items });
+    dvui_dep.module("dvui_sdl3").root_source_file = copy.getDirectory().path(b, "src/dvui.zig");
 }
 
 fn leanSdl(sdl: *std.Build.Step.Compile) void {
