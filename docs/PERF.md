@@ -23,15 +23,49 @@ Private_Dirty moves with the moment it is read: 16.8 MB at 45 s, 8 MB at
 70 s in the same run, once the first fetch, the pull requests' list and a
 trim have gone by. Compare builds read at the same moment.
 
-Idle is now the watcher (`src/watch.zig`): nothing is read until inotify
-says something changed, and a 30 s poll is the net under it. What is left,
+Idle is now the watcher (`src/watch.zig`): nothing is read until inotify —
+ReadDirectoryChangesExW on Windows — says something changed, and a 30 s
+poll is the net under it. What is left,
 0.8 wake-ups a second, is not Zit's: 0.6 on the main thread inside SDL's
 event wait — the only timer Zit sets is that 30 s one — and 0.2 on a pool
 thread, about one tick in 30 s. 361 watches on that repository (its 354
 folders that git does not ignore, and `.git`'s few), against a limit of
-524,288 here; past `fs.inotify.max_user_watches`, and on Windows and macOS,
-it is the old 0.7 s poll, still without frames for a status that did not
-change.
+524,288 here; past `fs.inotify.max_user_watches`, and on macOS, it is the
+old 0.7 s poll, still without frames for a status that did not change.
+
+## Windows (2026-11-01)
+
+The first numbers there: an Intel Core i7-1185G7 under Windows 11,
+ReleaseSafe, a clone of a 1,039-commit, 2,300-file repository,
+`tools/measure.ps1` read 40 s after opening for 60 s, window focused, two
+runs of each build, alternated.
+
+| Build | Idle CPU | Wake-ups/s | Working set | Commit |
+|---|---|---|---|---|
+| The 0.7 s poll (as it was) | 21–27 % | 37–61 | 107–115 MB | 161–164 MB |
+| ReadDirectoryChangesExW, the 30 s net | 0.46–0.77 % | 0.9–1.5 | 97–99 MB | 156–158 MB |
+
+The poll was the cost: one status read is 339 ms there
+(`zig build bench`, `status`), 118 ms once `git status` has written fresh
+stats into the index — against 4–5 ms on Linux. What is left is mostly the
+30 s net: 118 ms every 30 s is 0.4 %, at the ceiling. With no repository
+open, one run: 0.95 %, 63 MB working set.
+
+The events are sorted as inotify's are, with two more rules, both taken from
+GitComet's monitor. A folder's own "modified" is dropped: its times move
+with every name in it — `.git`'s with every lock file git makes — and each of
+those comes as its own event. FETCH_HEAD is not a change, on Linux either:
+every fetch rewrites it, one that moves no ref too.
+
+**16 MB of commit a thread.** Zig's `std.Thread.spawn` commits a thread's
+whole stack on Windows, 16 MB by default: a program with one thread is
+17.4 MB of commit with it and 2.3 MB with a 1 MB stack, for the same working
+set. The watcher's thread asks for 1 MB; every other thread Zit starts still
+commits 16.
+
+A run measured while a build was compiling beside it read 2.6 % and 66
+wake-ups a second: a busy machine preempts Zit's threads, and each
+preemption is a context switch. Measure on a quiet one.
 
 ## Method
 
@@ -39,7 +73,11 @@ change.
    with a throwaway config and cache and reads `/proc`: RSS and VmHWM in
    `status`, Private_Dirty in `smaps_rollup` (RSS counts shared pages —
    the GPU driver's, the fonts — that are not Zit's to save), and the
-   process's ticks in `stat` over the idle window. `CACHE=dir` keeps the
+   process's ticks in `stat` over the idle window. On Windows,
+   `tools/measure.ps1` reads the same from the kernel: working set (the
+   RSS), private working set, commit, CPU time and every thread's context
+   switches; `-Focus` puts the window in front, `-Renderer` picks SDL's
+   renderer. `CACHE=dir` keeps the
    picture cache between runs, `SETTLE=s` waits longer before measuring.
 2. **Where the time goes.** `tools/profile.sh [repository] [samples]`
    samples every thread's stack with `eu-stack` on an unstripped build and
