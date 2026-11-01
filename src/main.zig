@@ -2078,7 +2078,10 @@ var graph_first_parent: bool = false;
 var graph_filter_dirty: bool = false;
 
 fn graphFilterChanged() void {
-    if (@import("builtin").is_test) return reloadHistory();
+    // A test calling in from outside a frame reads it again at once. Inside
+    // one — a click on a sidebar eye — the rows still to be drawn point into
+    // this history: the frame's end reads it again, as in the app.
+    if (@import("builtin").is_test and !in_frame) return reloadHistory();
     graph_filter_dirty = true;
 }
 
