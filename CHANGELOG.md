@@ -19,6 +19,11 @@ Every release of Zit, newest first. Downloads are on the
   when it is not 100 % — a click there resets it.
 
 ### Changed
+- The downloads are nearly half the size: 7.3 MB for Windows instead of
+  12.5, 3.2 MB for the Linux archive instead of 5.5. Nothing Zit uses is
+  gone — what is left out is code nothing calls: SDL's audio, joysticks and
+  cameras, dvui's debug window, the fonts of the theme Zit replaces as it
+  starts. The text is drawn exactly as before.
 - The author filter filters: the history is read again with the other
   authors' commits left out, each one kept joined to the nearest kept one
   before it, so the lanes still say how they follow one another — as
