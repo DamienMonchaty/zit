@@ -16,6 +16,9 @@ const std = @import("std");
 
 pub const c = @cImport({
     @cInclude("git2.h");
+    // `git_repository_set_index`, and the status's count of files hashed.
+    @cInclude("git2/sys/repository.h");
+    @cInclude("git2/sys/diff.h");
 });
 
 pub const Error = error{Git};
@@ -977,10 +980,126 @@ pub const Work = struct {
     arena: std.heap.ArenaAllocator,
     staged: []Change = &.{},
     unstaged: []Change = &.{},
+    /// Files libgit2 had to read and hash to tell whether they changed: those
+    /// whose stat info no longer matched the index's.
+    hashed: usize = 0,
 
     pub fn deinit(self: *Work) void {
         self.arena.deinit();
         self.* = undefined;
+    }
+};
+
+/// Status reads that do not hash, every time, the files touched without
+/// being changed. libgit2 tells a file unchanged by its stat info matching
+/// the index's; where it does not — a file saved as it was, a checkout in the
+/// second the index was written — it reads and hashes the file, at every
+/// read, until something writes the index back with the new stats, as
+/// `git status` does. Zit does not write the repository's index: the
+/// refreshed stats are kept in a copy of it (GitComet keeps them in memory
+/// the same way). libgit2 times its racily-clean check by the file an index
+/// was read from, so the copy is a file too — Zit's, in its cache, given the
+/// repository index's own modification time — copied again whenever the
+/// repository's index is rewritten.
+///
+/// Only the copy is kept between reads. Each read opens the repository
+/// again, as a plain read does, lends it the copy, and frees it: a
+/// repository kept open keeps its object cache and its pack windows, 26 MB
+/// of private memory on a 2,300-file repository, for nothing a read needs.
+pub const StatusCache = struct {
+    /// The repository this is for, as it was opened; owned.
+    path: []u8,
+    copy: *c.git_index,
+    /// The copy's file, NUL-terminated; owned.
+    copy_path: [:0]u8,
+    /// The repository's index, NUL-terminated; owned.
+    source_path: [:0]u8,
+    /// The repository's index as it was when copied. git writes a new file
+    /// and renames it over the old, so a rewrite is a new inode as well.
+    source: ?Stamp = null,
+
+    const Stamp = struct {
+        size: u64,
+        mtime: std.Io.Timestamp,
+        inode: std.Io.File.INode,
+
+        fn of(stat: std.Io.File.Stat) Stamp {
+            return .{ .size = stat.size, .mtime = stat.mtime, .inode = stat.inode };
+        }
+
+        fn eql(a: Stamp, b: Stamp) bool {
+            return a.size == b.size and a.mtime.nanoseconds == b.mtime.nanoseconds and a.inode == b.inode;
+        }
+    };
+
+    /// For the repository containing `path`, its index's copy kept at
+    /// `copy_path` — a file this cache alone writes.
+    pub fn open(gpa: std.mem.Allocator, path: []const u8, copy_path: []const u8) Error!StatusCache {
+        var repo = try Repo.open(path);
+        defer repo.deinit();
+        const owned_path = gpa.dupe(u8, path) catch return error.Git;
+        errdefer gpa.free(owned_path);
+        const owned_copy = gpa.dupeZ(u8, copy_path) catch return error.Git;
+        errdefer gpa.free(owned_copy);
+        const source_path = std.fmt.allocPrintSentinel(gpa, "{s}index", .{repo.gitdir()}, 0) catch return error.Git;
+        errdefer gpa.free(source_path);
+        var copy: ?*c.git_index = null;
+        try check(c.git_index_open(&copy, owned_copy.ptr));
+        return .{ .path = owned_path, .copy = copy.?, .copy_path = owned_copy, .source_path = source_path };
+    }
+
+    pub fn deinit(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) void {
+        c.git_index_free(self.copy);
+        std.Io.Dir.cwd().deleteFile(io, self.copy_path) catch {};
+        gpa.free(self.path);
+        gpa.free(self.copy_path);
+        gpa.free(self.source_path);
+        self.* = undefined;
+    }
+
+    pub fn readWork(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) Error!Work {
+        try self.sync(gpa, io);
+        var repo = try Repo.open(self.path);
+        defer repo.deinit();
+        // The repository holds a reference to the copy until it is freed;
+        // this cache keeps its own.
+        try check(c.git_repository_set_index(repo.ptr, self.copy));
+        return repo.readWorkWith(gpa, .refresh);
+    }
+
+    /// The copy made again if the repository's index has been rewritten
+    /// since it was taken.
+    fn sync(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) Error!void {
+        const cwd = std.Io.Dir.cwd();
+        // Read before the file, so that a rewrite between the two shows as a
+        // change at the next read rather than hiding behind this one.
+        const stat = cwd.statFile(io, self.source_path, .{}) catch |err| switch (err) {
+            // No index yet — a repository with nothing staged: an empty one.
+            error.FileNotFound => {
+                if (self.source != null) {
+                    try check(c.git_index_clear(self.copy));
+                    cwd.deleteFile(io, self.copy_path) catch {};
+                    self.source = null;
+                }
+                return;
+            },
+            else => return error.Git,
+        };
+        if (self.source) |s| if (s.eql(Stamp.of(stat))) return;
+
+        const bytes = cwd.readFileAlloc(io, self.source_path, gpa, .unlimited) catch return error.Git;
+        defer gpa.free(bytes);
+        cwd.writeFile(io, .{ .sub_path = self.copy_path, .data = bytes }) catch return error.Git;
+        // The repository index's time, not the copy's: an entry written in
+        // the same second as that index stays racily clean — hashed — as
+        // libgit2 would have it against the original.
+        {
+            var file = cwd.openFile(io, self.copy_path, .{ .mode = .read_write }) catch return error.Git;
+            defer file.close(io);
+            file.setTimestamps(io, .{ .access_timestamp = .{ .new = stat.mtime }, .modify_timestamp = .{ .new = stat.mtime } }) catch return error.Git;
+        }
+        try check(c.git_index_read(self.copy, 1));
+        self.source = Stamp.of(stat);
     }
 };
 
@@ -1396,6 +1515,13 @@ pub const Repo = struct {
 
     /// Staged and unstaged changes, in a fresh snapshot.
     pub fn readWork(self: Repo, gpa: std.mem.Allocator) Error!Work {
+        return self.readWorkWith(gpa, .read_only);
+    }
+
+    /// `.refresh` writes the stats of files found unchanged back into the
+    /// index — which must be a `StatusCache`'s copy, never the
+    /// repository's own.
+    fn readWorkWith(self: Repo, gpa: std.mem.Allocator, index: enum { read_only, refresh }) Error!Work {
         var out: Work = .{ .arena = .init(gpa) };
         errdefer out.arena.deinit();
         const arena = out.arena.allocator();
@@ -1410,10 +1536,13 @@ pub const Repo = struct {
             c.GIT_STATUS_OPT_RENAMES_HEAD_TO_INDEX |
             c.GIT_STATUS_OPT_RENAMES_INDEX_TO_WORKDIR |
             c.GIT_STATUS_OPT_SORT_CASE_INSENSITIVELY;
+        if (index == .refresh) opts.flags |= c.GIT_STATUS_OPT_UPDATE_INDEX;
 
         var list: ?*c.git_status_list = null;
         try check(c.git_status_list_new(&list, self.ptr, &opts));
         defer c.git_status_list_free(list);
+        var perf: c.git_diff_perfdata = .{ .version = c.GIT_DIFF_PERFDATA_VERSION };
+        if (c.git_status_list_get_perfdata(&perf, list) == 0) out.hashed = perf.oid_calculations;
 
         var staged: std.ArrayList(Change) = .empty;
         var unstaged: std.ArrayList(Change) = .empty;
