@@ -283,6 +283,61 @@ branches.
 The test backend draws in software: 51 ms of each of its frames is that,
 not Zit, and is left out of the numbers above.
 
+## Binary size (2026-11-01)
+
+What the release builds weigh, ReleaseSafe and stripped, as `zig build
+dist` makes them:
+
+| | develop | After | |
+|---|---|---|---|
+| Linux x86_64 | 12,716,344 | 6,823,832 | −46 % |
+| Linux aarch64 | 11,518,600 | 5,974,264 | −48 % |
+| Windows x86_64 | 12,843,520 | 7,284,736 | −43 % |
+| Linux x86_64 archive | 5.5 MB (0.1.2) | 3.2 MB | |
+
+Where it went, from the symbols of an unstripped Linux build grouped by
+origin: SDL 3.1 MB (27 %) — its dynamic API linked every function, the
+software blitters, audio, joysticks and HID, cameras — then Zit 1.5 MB
+(`appFrame` alone 194 KB), std 1.3 MB, dvui 1.1 MB (its debug window
+0.6 MB), libgit2 and zlib 1.1 MB, fonts 0.9 MB (the ten Bitstream Vera faces
+of dvui's Adwaita theme 578 KB of it), FreeType 0.8 MB, mbedtls 0.7 MB.
+
+Each change measured alone against develop, Linux / Windows, in bytes:
+
+| Change | Linux | Windows |
+|---|---|---|
+| C libraries: a section per function, so the linker drops each unused one | −1,450,480 | −861,184 |
+| SDL, FreeType, mbedtls built ReleaseSmall | −2,000,624 | −1,597,440 |
+| SDL: video and events only, no dynamic API | −1,061,984 | −921,088 |
+| dvui: no tree-sitter, no tinyfiledialogs | −230,384 | −1,779,200 with FreeType out too |
+| dvui: no debug window | −664,160 | −623,616 |
+| dvui: Adwaita's fonts | −513,376 | −513,536 |
+| No unwind tables (`-Dtrace` keeps them) | −788,928 | — |
+| Icon: its 256 px image as a PNG | — | −259,584 |
+| Unstable sorts where the order is total | −50,112 | −47,616 |
+| Loops for ten `inline for`s | −6,544 | −8,704 |
+
+The dvui and SDL changes have no option to ask for: the build edits a
+copy of dvui's sources and SDL's config header, finding each place by the
+text around it, and fails saying where when a new version has moved it.
+
+Tried and not kept:
+
+- **stb_truetype for FreeType**, a dvui option: −845,552 on Linux, but
+  side by side on Windows its text is wider and softer — a line of the
+  history shows three fewer letters. FreeType built for size draws the same
+  pixels as before (0 of 67,580 differ).
+- **LTO:** −534,080 alone, but +366,160 on top of the rest, and the
+  Windows build no longer links (`wmemcpy`, `isnan`).
+- **dvui's Zig code ReleaseSmall** too: −2.3 MB, but its safety checks gone
+  in code that runs every frame.
+- **No `.pdata` on Windows** (−397,312): x64 code there is unwound through
+  it, and the system's exception dispatch walks through Zit's frames.
+- **HIDAPI alone off:** SDL's build breaks; joysticks have to go with it.
+- `inline for`s in Zit were not where duplication weighs: dvui's nineteen
+  slider copies (gone with its debug window), std.json's typed parsing
+  (72 instances), dvui's `log.err`s.
+
 ## Wrong, measured
 
 - **"Zit burns 20–50 % CPU when idle."** 17.8 % then 49.5 % in the first two

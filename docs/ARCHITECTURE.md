@@ -15,7 +15,7 @@ Linux archives are packed by shelling out to them: `zit-linux-x86_64.tar.gz` and
 system — SDL loads X11 or Wayland itself) and `zit-windows-x86_64.exe`
 (Windows 10 and later; per-monitor DPI aware through `assets/zit.manifest`, so it is not
 stretched and blurred on a scaled display). All three are ReleaseSafe and
-stripped, about 11 MB (the Linux archives about 5 MB); a plain `zig build` strips too, `-Dstrip=false` keeps the symbols for a stack trace. `-Dsystem-libgit2=true` links the machine's libgit2
+stripped, 6 to 7.5 MB (the Linux archives about 3 MB); a plain `zig build` strips too, `-Dtrace` keeps the symbols and the unwind tables for a stack trace. `-Dsystem-libgit2=true` links the machine's libgit2
 instead, for a quicker local build.
 
 A Linux executable carries no icon — the desktop takes it from a `.desktop`
