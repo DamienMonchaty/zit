@@ -264,6 +264,19 @@ fn slimDvui(b: *std.Build, dvui_dep: *std.Build.Dependency) void {
         left_out.appendSlice(b.allocator, &.{ "Adwaita.zig", ".ttf", ".otf" }) catch @panic("OOM");
     }
 
+    // dvui's debug window — an inspector, a colour picker, nineteen copies
+    // of a slider — draws only once `dvui.toggleDebugWindow` has opened it,
+    // which Zit never calls; but every frame's end asks for it, so all of it
+    // is linked.
+    {
+        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.path("src/Debug.zig").getPath(b), b.allocator, .limited(1 << 22)) catch
+            @panic("dvui: cannot read src/Debug.zig");
+        const show = "pub fn show(self: *Debug) void {";
+        const at = (std.mem.indexOf(u8, text, show) orelse @panic("dvui: Debug.show has moved, see slimDvui")) + show.len;
+        _ = copy.add("src/Debug.zig", b.fmt("{s}\n    if (true) return;{s}", .{ text[0..at], text[at..] }));
+        left_out.append(b.allocator, "Debug.zig") catch @panic("OOM");
+    }
+
     // `exclude_extensions` matches the end of each path, so a file name works.
     _ = copy.addCopyDirectory(dvui_dep.path("src"), "src", .{ .exclude_extensions = left_out.items });
     dvui_dep.module("dvui_sdl3").root_source_file = copy.getDirectory().path(b, "src/dvui.zig");
