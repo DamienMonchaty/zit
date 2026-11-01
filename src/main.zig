@@ -1630,7 +1630,7 @@ fn diffModeToggle(src: std.builtin.SourceLocation) void {
         .margin = .{ .x = style.space.sm, .w = style.space.lg },
     });
     defer track.deinit();
-    inline for (.{ false, true }, 0..) |split, i| {
+    for ([_]bool{ false, true }, 0..) |split, i| {
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = i,
@@ -1779,6 +1779,7 @@ fn appInit(win: *dvui.Window) !void {
         migrateFromZync(dir, "zit/avatars");
         avatars.init(gpa, app_io, dir);
     }
+    initStatusCache(init.environ_map.*);
     pr.init(gpa, app_io);
     github.init(gpa, app_io, config_dir.items);
 
@@ -1846,6 +1847,7 @@ fn appDeinit(win: *dvui.Window) void {
     if (work_load) |load| load.free();
     work_load = null;
     closeRepo();
+    status_cache_file.deinit(gpa);
     git.shutdown();
     avatars.deinit();
     pr.deinit();
@@ -1929,7 +1931,7 @@ fn appDeinit(win: *dvui.Window) void {
     pr_reply.deinit(gpa);
     pr_reply_id.deinit(gpa);
     split_rows.deinit(gpa);
-    inline for (.{ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| list.deinit(gpa);
+    for ([_]*std.ArrayList(u8){ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| list.deinit(gpa);
     if (action_input) |patch| gpa.free(patch);
     action_input = null;
 
@@ -2079,7 +2081,10 @@ var graph_first_parent: bool = false;
 var graph_filter_dirty: bool = false;
 
 fn graphFilterChanged() void {
-    if (@import("builtin").is_test) return reloadHistory();
+    // A test calling in from outside a frame reads it again at once. Inside
+    // one — a click on a sidebar eye — the rows still to be drawn point into
+    // this history: the frame's end reads it again, as in the app.
+    if (@import("builtin").is_test and !in_frame) return reloadHistory();
     graph_filter_dirty = true;
 }
 
@@ -2352,6 +2357,18 @@ fn refreshHistory() void {
     startHistoryLoadQuiet();
 }
 
+/// The history read again for a filter just changed — a branch hidden or
+/// shown alone, First-parent, the remotes, an author — on another thread, as
+/// `refreshHistory` reads it: a click no longer stops the window for a
+/// revwalk, a second on a history the size of git's. A read already out
+/// was for the filter as it was: retired at once rather than waited for and
+/// shown first.
+fn refilterHistory() void {
+    if (@import("builtin").is_test) return reloadHistory();
+    history_again = false;
+    startHistoryLoadQuiet();
+}
+
 // === Working tree, read in the background ===
 //
 // The status is re-read on the poll timer. On Linux that is a few
@@ -2372,6 +2389,16 @@ const WorkLoad = struct {
     fn run(self: *WorkLoad) void {
         defer wakeUi();
         defer self.done.store(true, .release);
+        if (status_cache_file.items.len > 0 and status_cache_lock.tryLock()) {
+            defer status_cache_lock.unlock(app_io);
+            defer if (status_cache_drop.swap(false, .acq_rel)) dropStatusCache();
+            if (statusCacheFor(self.path)) |cache| {
+                if (cache.readWork(gpa, app_io)) |w| {
+                    self.work = w;
+                    return;
+                } else |_| dropStatusCache();
+            }
+        }
         var r = git.Repo.open(self.path) catch return;
         defer r.deinit();
         self.work = r.readWork(gpa) catch null;
@@ -2384,6 +2411,53 @@ const WorkLoad = struct {
         gpa.destroy(self);
     }
 };
+
+/// The status reads' copy of the index (`git.StatusCache`), kept from one
+/// read to the next, so that a file touched without being changed is hashed
+/// once rather than at every read. One read holds it at a time — a read
+/// after a command, with the timer's still out, reads without it — and it is
+/// for the repository last read.
+var status_cache: ?git.StatusCache = null;
+var status_cache_lock: std.Io.Mutex = .init;
+/// Set by `closeRepo` while a read holds the cache: dropped as that read
+/// ends, with its file.
+var status_cache_drop: std.atomic.Value(bool) = .init(false);
+/// Where the index's copy is kept: Zit's cache, under a name of this
+/// process's own. Empty — no cache — when there is no cache folder.
+var status_cache_file: std.ArrayList(u8) = .empty;
+
+/// The cache for `path`, opened — and the last repository's dropped — if
+/// it is not that one's. Called with `status_cache_lock` held.
+fn statusCacheFor(path: []const u8) ?*git.StatusCache {
+    if (status_cache) |cache| if (!std.mem.eql(u8, cache.path, path)) dropStatusCache();
+    if (status_cache == null) status_cache = git.StatusCache.open(gpa, path, status_cache_file.items) catch return null;
+    return &status_cache.?;
+}
+
+/// Called with `status_cache_lock` held, or with no read left to hold it.
+fn dropStatusCache() void {
+    if (status_cache) |*cache| cache.deinit(gpa, app_io);
+    status_cache = null;
+}
+
+/// The closed repository's cache let go of: now, or as the read holding it
+/// ends — which is not waited for, as `closeRepo` waits for no read.
+fn releaseStatusCache() void {
+    if (status_cache_lock.tryLock()) {
+        defer status_cache_lock.unlock(app_io);
+        dropStatusCache();
+    } else status_cache_drop.store(true, .release);
+}
+
+fn initStatusCache(env: std.process.Environ.Map) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = store.appDir(env, &buf, .cache, "") orelse return;
+    std.Io.Dir.cwd().createDirPath(app_io, dir) catch return;
+    var id: [8]u8 = undefined;
+    app_io.random(&id);
+    const sep = if (@import("builtin").os.tag == .windows) "\\" else "/";
+    status_cache_file.print(gpa, "{s}" ++ sep ++ "index-{x}", .{ dir, id[0..] }) catch status_cache_file.clearRetainingCapacity();
+}
 
 var work_load: ?*WorkLoad = null;
 var work_gen: u64 = 0;
@@ -2724,6 +2798,7 @@ fn closeRepo() void {
     // A status read still out is not waited for — on a large tree, or on
     // Windows, that is the tab switch frozen. `collectWorkLoad` throws its
     // result away for being another repository's, and frees it.
+    releaseStatusCache();
     if (repo) |*r| r.deinit();
     repo = null;
     if (history) |*h| h.deinit();
@@ -3077,7 +3152,7 @@ fn runAction() bool {
         .network => startJob(),
         .tabs => runTabAction(),
         .refresh => {
-            reloadHistory();
+            refreshHistory();
             workChanged("Refreshing");
         },
         .open_repo => promptOpenRepo(),
@@ -4809,14 +4884,10 @@ fn appFrame() !dvui.App.Result {
     // until the poll timer comes round.
     if (runAction()) dvui.refresh(null, @src(), null);
 
-    if (graph_filter_dirty) {
+    if (graph_filter_dirty or authors_dirty) {
         graph_filter_dirty = false;
-        reloadHistory();
-        dvui.refresh(null, @src(), null);
-    }
-    if (authors_dirty) {
         authors_dirty = false;
-        refreshHistory();
+        refilterHistory();
         dvui.refresh(null, @src(), null);
     }
 
@@ -8214,7 +8285,7 @@ fn branchSwitcher() void {
     });
     defer list.deinit();
     var shown: usize = 0;
-    inline for (.{ git.Ref.Kind.local, git.Ref.Kind.remote }, 0..) |kind, k| {
+    for ([_]git.Ref.Kind{ .local, .remote }, 0..) |kind, k| {
         var header = false;
         for (h.refs, 0..) |ref, i| {
             if (ref.kind != kind) continue;
@@ -11430,7 +11501,7 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
         defer list.deinit();
         if (history) |h| {
             var shown: usize = 0;
-            inline for (.{ git.Ref.Kind.local, git.Ref.Kind.remote }, 0..) |kind, k| {
+            for ([_]git.Ref.Kind{ .local, .remote }, 0..) |kind, k| {
                 var header = false;
                 for (h.refs, 0..) |ref, i| {
                     if (ref.kind != kind) continue;
@@ -11955,8 +12026,8 @@ fn refsSidebar() void {
     // these refs point into.
     var chosen: ?git.Ref = null;
 
-    inline for (@typeInfo(Section).@"enum".fields, 0..) |field, i| {
-        if (sidebarSection(@src(), @enumFromInt(field.value), i)) |ref| chosen = ref;
+    for (std.enums.values(Section), 0..) |section, i| {
+        if (sidebarSection(@src(), section, i)) |ref| chosen = ref;
     }
 
     if (chosen) |ref| checkout(ref);
@@ -14585,34 +14656,45 @@ fn authorHeader() void {
 
     const needle = std.mem.trim(u8, author_filter.items, " ");
     const index = authorIndex();
-    var first: ?[]const u8 = null;
     var change: ?struct { key: []const u8, only: bool } = null;
-    var row: usize = 0;
 
+    // Who the menu lists, in its order — the list, not its rows: a
+    // history's authors can be thousands, and a row asks for its picture.
+    const Listed = struct { entry: AuthorEntry, picked: bool, has_commit: bool };
+    var listed: std.ArrayList(Listed) = .empty;
+    const arena = dvui.currentWindow().arena();
     // Those picked first, kept even where the history shown has none of
     // theirs: the only place they can be taken off from.
     for (author_only.items) |key| {
         const entry = authorByKey(key) orelse AuthorEntry{ .key = key, .name = keyName(key), .email = keyEmail(key), .count = 0 };
         if (!authorShownBy(entry, needle)) continue;
-        if (first == null) first = entry.key;
-        if (authorRow(row, entry, true, index.len > 0 and entry.count > 0)) |only| change = .{ .key = entry.key, .only = only };
-        row += 1;
+        listed.append(arena, .{ .entry = entry, .picked = true, .has_commit = index.len > 0 and entry.count > 0 }) catch break;
     }
     // You, then everyone else, newest first.
     for ([_]bool{ true, false }) |mine| {
         for (index) |entry| {
             if (isMe(entry) != mine or keyPicked(entry.key)) continue;
             if (!authorShownBy(entry, needle)) continue;
-            if (first == null) first = entry.key;
-            if (authorRow(row, entry, false, true)) |only| change = .{ .key = entry.key, .only = only };
-            row += 1;
+            listed.append(arena, .{ .entry = entry, .picked = false, .has_commit = true }) catch break;
         }
     }
-    if (row == 0) dropHeading(@src(), 0, "NO AUTHOR BY THAT NAME");
+    if (listed.items.len == 0) dropHeading(@src(), 0, "NO AUTHOR BY THAT NAME");
+
+    // Only the rows in sight are built.
+    {
+        var rows = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
+        defer rows.deinit();
+        const in_sight = rowsInSight(rows.data(), listed.items.len, AUTHOR_ROW_H);
+        rowsSpacer(@src(), 0, in_sight.first, AUTHOR_ROW_H);
+        for (listed.items[in_sight.first..in_sight.last], in_sight.first..) |l, i| {
+            if (authorRow(i, l.entry, l.picked, l.has_commit)) |only| change = .{ .key = l.entry.key, .only = only };
+        }
+        rowsSpacer(@src(), 1, listed.items.len - in_sight.last, AUTHOR_ROW_H);
+    }
 
     if (search_entered == field) {
         search_entered = null;
-        if (first) |key| change = .{ .key = key, .only = true };
+        if (listed.items.len > 0) change = .{ .key = listed.items[0].entry.key, .only = true };
     }
     if (change) |c| {
         if (c.only) {
@@ -14633,8 +14715,19 @@ fn authorShownBy(entry: AuthorEntry, needle: []const u8) bool {
 /// row itself — their picture, name, address, how many commits — whose click
 /// shows theirs alone. Null when neither was clicked; true for "theirs
 /// alone", false for the box.
+/// An author's row in the authors' menu, held to one height: the menu builds
+/// only the rows in sight and stands spacers for the rest. 28.15 is what its
+/// picture and padding came to.
+const AUTHOR_ROW_H: f32 = 29;
+
 fn authorRow(id: usize, entry: AuthorEntry, picked: bool, has_commit: bool) ?bool {
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false });
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .min_size_content = .{ .h = AUTHOR_ROW_H },
+        .max_size_content = .height(AUTHOR_ROW_H),
+        .background = false,
+    });
     defer line.deinit();
     var on = picked;
     const toggled = dvui.checkbox(@src(), &on, null, .{ .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = 2 } });
@@ -14714,7 +14807,7 @@ fn authorsChanged() void {
     graph_scroll.viewport.y = 0;
     // Not in the middle of a frame: the rows being drawn index the history
     // as it is. Once the frame is done.
-    if (in_frame) authors_dirty = true else refreshHistory();
+    if (in_frame) authors_dirty = true else refilterHistory();
 }
 
 var authors_dirty = false;
@@ -15093,8 +15186,8 @@ fn parseQuery(text: []const u8, out: *[MAX_TERMS]Term) []Term {
         const raw = text[start..i];
         var term: Term = .{ .kind = .any, .text = std.mem.trim(u8, raw, "\"") };
         if (std.mem.indexOfScalar(u8, raw, ':')) |colon| {
-            const keys = .{ .{ "author", .author }, .{ "msg", .message }, .{ "message", .message }, .{ "sha", .sha }, .{ "after", .after }, .{ "before", .before }, .{ "path", .path }, .{ "code", .code } };
-            inline for (keys) |k| {
+            const keys = [_]struct { []const u8, @FieldType(Term, "kind") }{ .{ "author", .author }, .{ "msg", .message }, .{ "message", .message }, .{ "sha", .sha }, .{ "after", .after }, .{ "before", .before }, .{ "path", .path }, .{ "code", .code } };
+            for (keys) |k| {
                 if (std.ascii.eqlIgnoreCase(raw[0..colon], k[0])) {
                     term = .{ .kind = k[1], .text = std.mem.trim(u8, raw[colon + 1 ..], "\"") };
                 }
@@ -16049,7 +16142,7 @@ fn refExtrasWidth(ref: git.Ref, synced: bool) f32 {
     var buf: [24]u8 = undefined;
     var w: f32 = 0;
     if (synced) w += 11 + style.space.xs;
-    inline for (.{ ref.tracking.ahead, ref.tracking.behind }) |n| {
+    for ([_]usize{ ref.tracking.ahead, ref.tracking.behind }) |n| {
         if (n > 0) w += style.space.xs + 9 + style.tiny().textSize(std.fmt.bufPrint(&buf, "{d}", .{n}) catch "").w;
     }
     if (requestFor(ref)) |req| w += style.space.xs + style.tinyBold().textSize(std.fmt.bufPrint(&buf, "#{d}", .{req.number}) catch "").w;
@@ -16218,7 +16311,7 @@ fn inPickedRequest(id: git.Oid) bool {
 /// Icons rather than arrow characters: the fonts are cut down to what the
 /// UI already used.
 fn trackingMarks(t: git.Tracking, ink: dvui.Color) void {
-    inline for (.{ .{ t.ahead, dvui.entypo.arrow_up, "ahead" }, .{ t.behind, dvui.entypo.arrow_down, "behind" } }, 0..) |mark, i| {
+    for ([_]struct { usize, []const u8, []const u8 }{ .{ t.ahead, dvui.entypo.arrow_up, "ahead" }, .{ t.behind, dvui.entypo.arrow_down, "behind" } }, 0..) |mark, i| {
         if (mark[0] > 0) {
             dvui.icon(@src(), mark[2], mark[1], .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
                 .id_extra = i,
@@ -18156,6 +18249,10 @@ fn detailPanel() void {
 /// A commit: what it is, who made it — co-authors too — what it says, what
 /// it touched and where it sits; each part after the heading a section that
 /// folds.
+/// The commit pane's scroll, as dvui kept it for itself: here, for a test to
+/// scroll it.
+var commit_scroll: dvui.ScrollInfo = .{};
+
 fn commitDetail(id: git.Oid) void {
     ensureDiff();
     const commit = commitAt(id);
@@ -18164,7 +18261,7 @@ fn commitDetail(id: git.Oid) void {
     const rest = if (nl) |i| std.mem.trim(u8, whole[i..], " \t\r\n") else "";
     const split = splitTrailers(rest);
 
-    var scroll = dvui.scrollArea(@src(), .{}, .{
+    var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &commit_scroll }, .{
         .expand = .both,
         .background = false,
         .padding = .{ .h = style.space.sm },
@@ -18306,12 +18403,31 @@ fn clearFoldedDirs() void {
     commit_tree.clear();
 }
 
-/// ponytail: one widget per row, no virtualising — capped instead. A
-/// virtualised list like the graph's if a tree of this size needs scrolling.
-const MAX_FILE_ROWS = 2000;
+/// Which rows of a list, `count` of them `rh` high each, can be seen this
+/// frame: where its box `list` sits against the clip — the scroll area it is
+/// in, however deep — read in screen pixels. The rest are spacers, as in
+/// `sideRows`: a list in the middle of a scrolled pane, whose own scroll
+/// area it is not, built a widget for every row of it.
+fn rowsInSight(list: *dvui.WidgetData, count: usize, rh: f32) struct { first: usize, last: usize } {
+    const box = list.contentRectScale();
+    const clip = dvui.clipGet();
+    const row = rh * box.s;
+    if (row <= 0) return .{ .first = 0, .last = count };
+    const top = clip.y - box.r.y;
+    const first = @min(count, @as(usize, @intFromFloat(@max(0, top) / row)));
+    const last = @min(count, @as(usize, @intFromFloat(@max(0, top + clip.h) / row)) + 1);
+    return .{ .first = first, .last = @max(first, last) };
+}
+
+/// The rows of a list that `rowsInSight` leaves out: one spacer above them,
+/// one below.
+fn rowsSpacer(src: std.builtin.SourceLocation, id: usize, rows: usize, rh: f32) void {
+    if (rows == 0) return;
+    _ = dvui.spacer(src, .{ .id_extra = id, .min_size_content = .{ .h = @as(f32, @floatFromInt(rows)) * rh } });
+}
 
 /// A commit's files: changed ones, or all of them; as paths, or folder by
-/// folder with the folders folding away.
+/// folder with the folders folding away. Only the rows in sight are built.
 fn commitFiles(id: git.Oid) void {
     {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.xs } });
@@ -18351,9 +18467,15 @@ fn commitFiles(id: git.Oid) void {
         }
     };
 
+    const rh = style.row_height;
+    var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
+    defer list.deinit();
+
     if (changes_view != .tree) {
-        for (0..@min(paths_n, MAX_FILE_ROWS)) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), i, null);
-        if (paths_n > MAX_FILE_ROWS) sidebarNote(@src(), "More files than are listed here.");
+        const in_sight = rowsInSight(list.data(), paths_n, rh);
+        rowsSpacer(@src(), 0, in_sight.first, rh);
+        for (in_sight.first..in_sight.last) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), i, null);
+        rowsSpacer(@src(), 1, paths_n - in_sight.last, rh);
         return;
     }
 
@@ -18361,24 +18483,32 @@ fn commitFiles(id: git.Oid) void {
     var key = std.hash.Wyhash.init(@intFromBool(commit_all_files));
     key.update(std.mem.asBytes(&id));
     key.update(std.mem.asBytes(&paths_n));
-    const list: usize = if (commit_all_files) @intFromPtr(tree_files.paths.ptr) else @intFromPtr(diff_all.ptr);
-    key.update(std.mem.asBytes(&list));
+    const files: usize = if (commit_all_files) @intFromPtr(tree_files.paths.ptr) else @intFromPtr(diff_all.ptr);
+    key.update(std.mem.asBytes(&files));
     commit_tree.build(key.final(), paths_n, commit_all_files, Files.path);
 
+    // The lines unfolded: walked whole, a few pointers each, to know how
+    // many there are; built only where they can be seen.
+    var shown_n: usize = 0;
+    var counting: TreeShown = .{ .rows = commit_tree.rows, .folded = &folded_dirs };
+    while (counting.next()) |_| shown_n += 1;
+    const in_sight = rowsInSight(list.data(), shown_n, rh);
+    rowsSpacer(@src(), 0, in_sight.first, rh);
+
     var it: TreeShown = .{ .rows = commit_tree.rows, .folded = &folded_dirs };
-    var rows: usize = 0;
+    var row: usize = 0;
     var fold: ?[]const u8 = null;
-    while (it.next()) |shown| : (rows += 1) {
-        if (rows == MAX_FILE_ROWS) {
-            sidebarNote(@src(), "More files than are listed here.");
-            break;
-        }
+    while (it.next()) |shown| : (row += 1) {
+        if (row >= in_sight.last) break;
+        if (row < in_sight.first) continue;
         if (shown.row.file) |f| {
             fileRow(@src(), id, Files.path(commit_all_files, f), Files.status(commit_all_files, f), f, @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON);
         } else if (folderLine(@src(), shown.index, shown.row, shown.folded, null)) {
             fold = shown.row.path;
         }
     }
+    rowsSpacer(@src(), 1, shown_n - in_sight.last, rh);
+    // After the lines: folding changes which ones it walks.
     if (fold) |path| foldToggle(&folded_dirs, path);
 }
 
@@ -18659,7 +18789,15 @@ fn compareDetail() void {
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     defer scroll.deinit();
     if (diff == null) return;
-    for (diff_all, 0..) |file, i| fileRow(@src(), compare_to, file.path, file.status, i, null);
+    // Only the rows in sight, as a commit's: two commits far apart can
+    // differ by tens of thousands of files.
+    const rh = style.row_height;
+    var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
+    defer list.deinit();
+    const in_sight = rowsInSight(list.data(), diff_all.len, rh);
+    rowsSpacer(@src(), 0, in_sight.first, rh);
+    for (diff_all[in_sight.first..in_sight.last], in_sight.first..) |file, i| fileRow(@src(), compare_to, file.path, file.status, i, null);
+    rowsSpacer(@src(), 1, diff_all.len - in_sight.last, rh);
 }
 
 /// The working tree: what is staged, what is not, and the way to move a file
@@ -18903,7 +19041,9 @@ fn treeLessThan(paths: []const []const u8, a: u32, b: u32) bool {
 fn treeRows(a: std.mem.Allocator, paths: []const []const u8) ![]TreeRow {
     const order = try a.alloc(u32, paths.len);
     for (order, 0..) |*o, i| o.* = @intCast(i);
-    std.mem.sort(u32, order, paths, treeLessThan);
+    // Unstable: the paths are distinct and `treeLessThan` breaks every tie,
+    // so the order is total and a stable sort would only add code.
+    std.mem.sortUnstable(u32, order, paths, treeLessThan);
 
     var rows: std.ArrayList(TreeRow) = .empty;
     // The folders the last path was in, outermost first: their lines.
@@ -19118,6 +19258,8 @@ fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8
     const open = std.mem.eql(u8, selected_path.items, path);
     var row = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
+        // By its path, for a test to find which rows were built.
+        .tag = frameTag("file", path),
         .expand = .horizontal,
         .min_size_content = .{ .h = style.row_height },
         .background = open,
@@ -20938,6 +21080,7 @@ test "stage, commit and switch branches through the real git commands" {
 /// empty, and the next test to render a frame reads straight through it.
 fn resetUiGlobals() void {
     zoom = 1.0;
+    commit_scroll = .{};
     clearPickedChanges();
     picked_changes.deinit(gpa);
     picked_changes = .empty;
@@ -21033,7 +21176,7 @@ fn resetUiGlobals() void {
     resolve_undo.deinit(gpa);
     resolve_undo = .empty;
     pr_cards.deinit(gpa);
-    inline for (.{ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
+    for ([_]*std.ArrayList(u8){ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
         l.deinit(gpa);
         l.* = .empty;
     }
@@ -21056,7 +21199,7 @@ fn resetUiGlobals() void {
     clearDrop();
     drag_source.deinit(gpa);
     drag_source = .empty;
-    inline for (.{ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| {
+    for ([_]*std.ArrayList(u8){ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| {
         list.deinit(gpa);
         list.* = .empty;
     }
@@ -21150,6 +21293,78 @@ fn makeTestRepo(tmp: *std.testing.TmpDir, dir: []const u8, path: []const u8, dat
     try tmp.dir.writeFile(app_io, .{ .sub_path = path, .data = data });
     try expectGit(dir, &.{ "add", "-A" });
     try expectGit(dir, &.{ "commit", "-qm", "base" });
+}
+
+test "files touched without being changed are hashed once, and the repository's index is never written" {
+    app_io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var copy_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const copy = try std.fmt.bufPrint(&copy_buf, ".zig-cache/tmp/{s}/index", .{scratch.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "c.txt", .data = "c\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "two more" });
+
+    // Touched: the same bytes, another time — 2001, well before the index.
+    const touched: std.Io.Timestamp = .{ .nanoseconds = 978_307_200 * std.time.ns_per_s };
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| {
+        var f = try tmp.dir.openFile(app_io, name, .{ .mode = .read_write });
+        defer f.close(app_io);
+        try f.setTimestamps(app_io, .{ .access_timestamp = .{ .new = touched }, .modify_timestamp = .{ .new = touched } });
+    }
+    const index_before = try tmp.dir.readFileAlloc(app_io, ".git/index", a, .unlimited);
+    defer a.free(index_before);
+    const stat_before = try tmp.dir.statFile(app_io, ".git/index", .{});
+
+    var cache = try git.StatusCache.open(a, dir, copy);
+    defer cache.deinit(a, app_io);
+
+    // The first read hashes the three to find them unchanged; the next,
+    // none: their new stats are in the copy.
+    var first = try cache.readWork(a, app_io);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 0), first.unstaged.len);
+    try std.testing.expectEqual(@as(usize, 3), first.hashed);
+    var second = try cache.readWork(a, app_io);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 0), second.unstaged.len);
+    try std.testing.expectEqual(@as(usize, 0), second.hashed);
+
+    // The repository's own index is as it was — so a plain read still
+    // hashes them all.
+    const index_after = try tmp.dir.readFileAlloc(app_io, ".git/index", a, .unlimited);
+    defer a.free(index_after);
+    try std.testing.expectEqualSlices(u8, index_before, index_after);
+    try std.testing.expectEqual(stat_before.mtime.nanoseconds, (try tmp.dir.statFile(app_io, ".git/index", .{})).mtime.nanoseconds);
+    var r = try git.Repo.open(dir);
+    defer r.deinit();
+    var plain = try r.readWork(a);
+    defer plain.deinit();
+    try std.testing.expectEqual(@as(usize, 3), plain.hashed);
+
+    // A change is still one.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b, edited\n" });
+    var edited = try cache.readWork(a, app_io);
+    defer edited.deinit();
+    try std.testing.expectEqual(@as(usize, 1), edited.unstaged.len);
+    try std.testing.expectEqualStrings("b.txt", edited.unstaged[0].path);
+
+    // The repository's index rewritten by git: the copy taken again.
+    try expectGit(dir, &.{ "add", "b.txt" });
+    var staged = try cache.readWork(a, app_io);
+    defer staged.deinit();
+    try std.testing.expectEqual(@as(usize, 1), staged.staged.len);
+    try std.testing.expectEqual(@as(usize, 0), staged.unstaged.len);
 }
 
 // Twelve lines, edited at both ends: far enough apart that git's three lines of
@@ -27181,6 +27396,83 @@ test "a commit date reads as a date, and fits its column" {
     try std.testing.expect(style.graphMono().textSize("2026-10-21 18:05").w <= style.time_column);
 }
 
+test "a commit's files: only the rows in sight are built, however many" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    for (0..300) |i| {
+        var name: [16]u8 = undefined;
+        try tmp.dir.writeFile(app_io, .{ .sub_path = try std.fmt.bufPrint(&name, "f{d:0>3}.txt", .{i}), .data = "x\n" });
+    }
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "three hundred" });
+    openRepo(dir);
+    defer closeRepo();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    selectCommit(history.?.commits[0].id);
+    try dvui.testing.settle(frameArrowCursor);
+
+    // The first of the 300 built, the last not: the pane shows a few dozen.
+    _ = try tagCenter("file:f000.txt");
+    try expectNoTag("file:f299.txt");
+
+    // Scrolled to the end of the pane: the other way round.
+    commit_scroll.viewport.y = commit_scroll.scrollMax(.vertical);
+    try dvui.testing.settle(frameArrowCursor);
+    _ = try tagCenter("file:f299.txt");
+    try expectNoTag("file:f000.txt");
+}
+
+
+test "the authors' menu builds the rows in sight, and its search still finds the rest" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    for (0..60) |i| {
+        var name: [32]u8 = undefined;
+        var mail: [48]u8 = undefined;
+        const n = try std.fmt.bufPrint(&name, "user.name=A{d:0>2}", .{i});
+        const m = try std.fmt.bufPrint(&mail, "user.email=a{d:0>2}@x.invalid", .{i});
+        try expectGit(dir, &.{ "-c", n, "-c", m, "commit", "-q", "--allow-empty", "-m", "c" });
+    }
+    openRepo(dir);
+    defer closeRepo();
+
+    // Wide: the author column only shows with room left for the messages,
+    // whatever widths the tests before this one left.
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1900, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    // Newest first: the last to commit is in sight, the first is not built.
+    try clickAt(try tagCenter("header:author"));
+    _ = try tagCenter("author:A59");
+    try expectNoTag("author:A00");
+    // Asked for by name, it is the one row.
+    try typeText("A00");
+    try dvui.testing.settle(frameArrowCursor);
+    _ = try tagCenter("author:A00");
+    try expectNoTag("author:A59");
+}
 
 test "changes picked: asked by path, taken off again, one side at a time" {
     gpa = std.testing.allocator;

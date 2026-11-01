@@ -62,11 +62,18 @@ const Result = struct { name: []const u8, median_ns: u64, allocs: usize, bytes: 
 
 /// What every case shares: the repository and what was read from it once.
 const Ctx = struct {
+    io: std.Io,
     repo: git.Repo,
     history: git.History,
     /// The newest commits' diffs, read once, for the lexer alone to be timed.
     diffs: []git.Diff = &.{},
+    /// The app's status reads: one repository and index copy from one read
+    /// to the next.
+    status: git.StatusCache = undefined,
 };
+
+/// Where the bench keeps its status cache's copy of the index.
+const STATUS_COPY = ".zig-cache/bench-status-index";
 
 const Case = struct {
     name: []const u8,
@@ -89,6 +96,14 @@ const cases = [_]Case{
     .{ .name = "status", .run = struct {
         fn f(ctx: *Ctx, a: std.mem.Allocator) !void {
             var w = try ctx.repo.readWork(a);
+            w.deinit();
+        }
+    }.f },
+    // What the app reads: the stats of files found unchanged kept from one
+    // read to the next.
+    .{ .name = "status, kept", .run = struct {
+        fn f(ctx: *Ctx, a: std.mem.Allocator) !void {
+            var w = try ctx.status.readWork(a, ctx.io);
             w.deinit();
         }
     }.f },
@@ -149,8 +164,10 @@ pub fn main(init: std.process.Init) !void {
 
     try git.init();
     defer git.shutdown();
-    var ctx: Ctx = .{ .repo = try git.Repo.open(repo_path), .history = undefined };
+    var ctx: Ctx = .{ .io = io, .repo = try git.Repo.open(repo_path), .history = undefined };
     defer ctx.repo.deinit();
+    ctx.status = try git.StatusCache.open(gpa, repo_path, STATUS_COPY);
+    defer ctx.status.deinit(gpa, io);
     ctx.history = try ctx.repo.readHistoryFiltered(gpa, .{});
     defer ctx.history.deinit();
     var diffs: std.ArrayList(git.Diff) = .empty;
