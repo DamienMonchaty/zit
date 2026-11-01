@@ -198,8 +198,58 @@ fn addZit(
     // to set on the other systems.
     if (optimize != .Debug and target.result.os.tag == .windows) exe.subsystem = .Windows;
 
+    // Each function and each constant of the C libraries in a section of
+    // its own, so that the linker, which already drops the sections nothing
+    // refers to, drops them one by one instead of whole files at a time.
+    // Nothing changes in the code that stays.
+    if (optimize != .Debug) {
+        const linked = Linked.of(b, exe);
+        for (linked.libs.items) |lib| {
+            lib.link_function_sections = true;
+            lib.link_data_sections = true;
+        }
+        exe.link_function_sections = true;
+        exe.link_data_sections = true;
+    }
+
     return exe;
 }
+
+/// The static libraries `exe` links, at any depth — dvui's SDL, libgit2's
+/// zlib and mbedtls — and every module it is built from: what a setting has
+/// to reach to apply to the C dependencies as well as to Zit.
+const Linked = struct {
+    libs: std.ArrayList(*std.Build.Step.Compile) = .empty,
+    modules: std.ArrayList(*std.Build.Module) = .empty,
+
+    fn of(b: *std.Build, exe: *std.Build.Step.Compile) Linked {
+        var self: Linked = .{};
+        self.walk(b, exe.root_module);
+        return self;
+    }
+
+    fn walk(self: *Linked, b: *std.Build, module: *std.Build.Module) void {
+        for (self.modules.items) |seen| if (seen == module) return;
+        self.modules.append(b.allocator, module) catch @panic("OOM");
+        for (module.link_objects.items) |object| switch (object) {
+            .other_step => |linked| {
+                for (self.libs.items) |seen| {
+                    if (seen == linked) break;
+                } else {
+                    self.libs.append(b.allocator, linked) catch @panic("OOM");
+                    self.walk(b, linked.root_module);
+                }
+            },
+            else => {},
+        };
+        for (module.import_table.values()) |imported| self.walk(b, imported);
+    }
+
+    fn named(self: Linked, name: []const u8) ?*std.Build.Step.Compile {
+        for (self.libs.items) |l| if (std.mem.eql(u8, l.name, name)) return l;
+        return null;
+    }
+};
 
 fn linkLibgit2(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system_libgit2: bool) void {
     if (system_libgit2) {
