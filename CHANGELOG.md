@@ -75,6 +75,19 @@ Every release of Zit, newest first. Downloads are on the
   ends with the one thing to do next: rebase it onto its base here (or merge
   the base in) when it conflicts, Update branch when it is behind, the
   failing checks, Ready for review for a draft, or Merge.
+- A pull request someone asked changes of says who, and how many
+  conversations are left — "ann asked for changes · 2 open conversations" —
+  with what to do about it: Show them, Check out to fix, then Re-request
+  review. Each reviewer who answered can be asked again from the sidebar.
+- A pull request's conversations on lines of the diff sit under the review
+  that opened them, as on GitHub; a resolved one is folded to its first
+  words, and a review with one still open is never folded away. A
+  suggestion reads as the change it is, the lines it replaces and what with,
+  and Apply suggestion writes it into the file here: on the request's
+  branch, and only while those lines still read as the comment saw them.
+  A reply can resolve its conversation in the same click, and `Ctrl Enter`
+  sends it. The request's head and tabs run from one edge of the pane to
+  the other.
 - Checking out a pull request works as `gh pr checkout`: its branch tracks
   the remote's, and a branch already here is brought up to date rather than
   left behind. A fork's request goes on `pr/N`, never onto a branch of yours
@@ -147,6 +160,8 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- A reply in a review thread, a quote in a comment and a row of a pull
+  request's files no longer sit on a dark band.
 - In the graph, a line meets a commit at its middle, as GitComet draws
   them: a merge whose parent is the next commit, on its left, comes down its
   own column and turns into it at its height, where it used to cross just
