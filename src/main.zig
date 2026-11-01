@@ -15847,74 +15847,66 @@ fn drawLanes(
         const y = (@as(f32, @floatFromInt(row_index)) + 0.5) * rh;
         const y_next = y + rh;
 
+        // As GitComet strokes them: a whole, even number of the screen's
+        // pixels wide, each lane and each row's middle on a pixel's edge, so
+        // a lane is two crisp pixels rather than a blur across three.
+        const thickness = @max(2, @round(style.graph.line_w * rs.s / 2) * 2);
+        const Y = @round(rs.r.y + y * rs.s);
+        const Yn = @round(rs.r.y + y_next * rs.s);
+        const next_lane: ?u16 = if (i + 1 < l.rows.len) l.rows[i + 1].lane else null;
+
         for (l.links[row.link_start..row.link_end]) |link| {
             const color = ink(link.color_lane, focus);
-            const x0 = laneX(link.from);
-            const x1 = laneX(link.to);
+            const X0 = @round(rs.r.x + laneX(link.from) * rs.s);
+            const X1 = @round(rs.r.x + laneX(link.to) * rs.s);
 
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
 
-            path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y }));
-            if (link.from != link.to) {
-                const sx: f32 = if (x1 > x0) 1 else -1;
-                const into_node = i + 1 < l.rows.len and link.to == l.rows[i + 1].lane;
-                const steps = 6;
-                // GitComet's elbows: a corner of `corner` radius in the half
-                // row next to the commit, a quarter circle drawn as a cubic.
-                const r = @min(style.graph.corner, @abs(x1 - x0), rh / 2);
-                const k: f32 = 0.5522847;
-                if (link.joins or (into_node and link.from != row.lane)) {
-                    // Into the next row's commit — a branch joining the line
-                    // it left, by the commit it left from: straight down its
-                    // own column, the corner, then across into it.
-                    path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = y_next - r }));
-                    for (1..steps + 1) |s| {
-                        const t = @as(f32, @floatFromInt(s)) / steps;
-                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x0, .y = y_next - r }, .{ .x = x0, .y = y_next - r * (1 - k) }, .{ .x = x0 + sx * r * k, .y = y_next }, .{ .x = x0 + sx * r, .y = y_next }, t)));
+            path.addPoint(.{ .x = X0, .y = Y });
+            const sx: f32 = if (X1 > X0) 1 else -1;
+            // GitComet's elbows: one quarter circle of `corner` radius, as a
+            // cubic, between a run down a lane and a run across at a
+            // commit's own height — a line meets a node at its middle or
+            // straight down into it, never beside it.
+            const r = @min(style.graph.corner * rs.s, @abs(X1 - X0), (Yn - Y) / 2);
+            const k: f32 = 0.5522847;
+            const steps = 8;
+            switch (linkShape(link, row.lane, next_lane)) {
+                .straight => {},
+                .across_then_down => {
+                    const turn = X1 - sx * r;
+                    path.addPoint(.{ .x = turn, .y = Y });
+                    for (1..steps + 1) |n| {
+                        const t = @as(f32, @floatFromInt(n)) / steps;
+                        const q = bezier(.{ .x = turn, .y = Y }, .{ .x = turn + sx * r * k, .y = Y }, .{ .x = X1, .y = Y + r * (1 - k) }, .{ .x = X1, .y = Y + r }, t);
+                        path.addPoint(.{ .x = q.x, .y = q.y });
                     }
-                } else if (link.from == row.lane and x1 > x0) {
-                    // Leaving this row's commit to its right — a merge to its
-                    // other parent: across at its height, the corner, then
-                    // down: the branch reads as coming up into the merge.
-                    const turn = x1 - sx * r;
-                    path.addPoint(rs.pointToPhysical(.{ .x = turn, .y = y }));
-                    for (1..steps + 1) |s| {
-                        const t = @as(f32, @floatFromInt(s)) / steps;
-                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = turn, .y = y }, .{ .x = turn + sx * r * k, .y = y }, .{ .x = x1, .y = y + r * (1 - k) }, .{ .x = x1, .y = y + r }, t)));
+                },
+                .down_then_across => {
+                    path.addPoint(.{ .x = X0, .y = Yn - r });
+                    for (1..steps + 1) |n| {
+                        const t = @as(f32, @floatFromInt(n)) / steps;
+                        const q = bezier(.{ .x = X0, .y = Yn - r }, .{ .x = X0, .y = Yn - r * (1 - k) }, .{ .x = X0 + sx * r * k, .y = Yn }, .{ .x = X0 + sx * r, .y = Yn }, t);
+                        path.addPoint(.{ .x = q.x, .y = q.y });
                     }
-                } else if (link.from == row.lane) {
-                    // To its left, onto a line already there: down its own
-                    // column first, then across just above the next row,
-                    // turning down into that line.
-                    const r2 = @min(r, @abs(x1 - x0) / 2, rh / 4);
-                    const ym = y_next - r2;
-                    path.addPoint(rs.pointToPhysical(.{ .x = x0, .y = ym - r2 }));
-                    for (1..steps + 1) |s| {
-                        const t = @as(f32, @floatFromInt(s)) / steps;
-                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x0, .y = ym - r2 }, .{ .x = x0, .y = ym - r2 * (1 - k) }, .{ .x = x0 + sx * r2 * k, .y = ym }, .{ .x = x0 + sx * r2, .y = ym }, t)));
-                    }
-                    path.addPoint(rs.pointToPhysical(.{ .x = x1 - sx * r2, .y = ym }));
-                    for (1..steps + 1) |s| {
-                        const t = @as(f32, @floatFromInt(s)) / steps;
-                        path.addPoint(rs.pointToPhysical(bezier(.{ .x = x1 - sx * r2, .y = ym }, .{ .x = x1 - sx * r2 * (1 - k), .y = ym }, .{ .x = x1, .y = ym + r2 * k }, .{ .x = x1, .y = y_next }, t)));
-                    }
-                } else {
+                },
+                .slide => {
                     // A lane sliding over as one to its left ends: a soft S
                     // across the whole row — half an ease, half a slope, so
                     // one slide reads as a curve and slides on row after row
                     // as an even slope, not as stairs or as waves.
-                    for (1..steps) |s| {
-                        const t = @as(f32, @floatFromInt(s)) / steps;
+                    for (1..steps) |n| {
+                        const t = @as(f32, @floatFromInt(n)) / steps;
                         const e = 0.5 * t + 0.5 * t * t * (3 - 2 * t);
-                        path.addPoint(rs.pointToPhysical(.{ .x = x0 + (x1 - x0) * e, .y = y + rh * t }));
+                        path.addPoint(.{ .x = X0 + (X1 - X0) * e, .y = Y + (Yn - Y) * t });
                     }
-                }
+                },
             }
-            path.addPoint(rs.pointToPhysical(.{ .x = x1, .y = y_next }));
+            path.addPoint(.{ .x = X1, .y = Yn });
 
             path.build().stroke(.{
-                .thickness = style.graph.line_w * rs.s,
+                .thickness = thickness,
                 .color = .{ .color = color },
             });
         }
@@ -15985,6 +15977,46 @@ fn graphLead() f32 {
 fn laneX(lane: u16) f32 {
     const x = style.graph.inset + @as(f32, @floatFromInt(lane)) * laneStep();
     return @min(x, graphColumn() - style.graph.inset);
+}
+
+/// How a line from one row's lane to the next row's is drawn: GitComet's two
+/// elbows, which meet a commit only at its own height or straight down into
+/// it, and the slide of a lane moving over.
+const LinkShape = enum {
+    straight,
+    /// Out of this row's commit — a merge to its other parent, or onto a
+    /// line already there: across at its height, the corner, then down.
+    across_then_down,
+    /// Into the next row's commit beside it — a branch rejoining, a merge
+    /// whose parent is the next commit: down its own column, the corner,
+    /// then across into it at its height.
+    down_then_across,
+    slide,
+};
+
+fn linkShape(link: graph.Link, lane: u16, next_lane: ?u16) LinkShape {
+    if (link.from == link.to) return .straight;
+    const into_node = next_lane != null and link.to == next_lane.?;
+    // Leftwards into the next commit, across at this one's height would run
+    // above the next row's node and reach it beside its middle.
+    if (link.from == lane and !(into_node and link.to < link.from)) return .across_then_down;
+    if (link.joins or into_node) return .down_then_across;
+    return .slide;
+}
+
+test "a line meets a commit at its height or straight down into it" {
+    // A merge to its other parent on its right: across first, then down.
+    try std.testing.expectEqual(LinkShape.across_then_down, linkShape(.{ .from = 0, .to = 1, .color_lane = 1 }, 0, 0));
+    // A merge whose parent is the next commit, on its left: down its own
+    // column, then into that commit at its middle — not across above it.
+    try std.testing.expectEqual(LinkShape.down_then_across, linkShape(.{ .from = 1, .to = 0, .color_lane = 0 }, 1, 0));
+    // A merge onto a line already there on its left, the next commit
+    // elsewhere: across at the merge's height, then down that line.
+    try std.testing.expectEqual(LinkShape.across_then_down, linkShape(.{ .from = 1, .to = 0, .color_lane = 0 }, 1, 1));
+    // A branch rejoining the line it left, by the commit it left from.
+    try std.testing.expectEqual(LinkShape.down_then_across, linkShape(.{ .from = 2, .to = 0, .color_lane = 0, .joins = true }, 1, 0));
+    try std.testing.expectEqual(LinkShape.straight, linkShape(.{ .from = 1, .to = 1, .color_lane = 1 }, 0, 0));
+    try std.testing.expectEqual(LinkShape.slide, linkShape(.{ .from = 2, .to = 1, .color_lane = 1 }, 0, 0));
 }
 
 fn bezier(p0: dvui.Point, p1: dvui.Point, p2: dvui.Point, p3: dvui.Point, t: f32) dvui.Point {
