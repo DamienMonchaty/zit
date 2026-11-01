@@ -43,6 +43,37 @@ jobs:
         env:
           SDL_VIDEODRIVER: dummy
 
+  # The suite again without the safety checks, beside the one above rather
+  # than after it: undefined behaviour ReleaseSafe traps on runs on in
+  # ReleaseFast, and shows as a wrong answer or a crash only there — the
+  # tests in ReleaseSafe would never see it.
+  linux-release-fast:
+    name: Linux — tests in ReleaseFast
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Zig
+        env:
+          ZIG: "0.16.0"
+          SHA: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        run: |
+          curl -sSfL "https://ziglang.org/download/$ZIG/zig-x86_64-linux-$ZIG.tar.xz" -o zig.tar.xz
+          echo "$SHA  zig.tar.xz" | sha256sum -c -
+          tar xf zig.tar.xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-$ZIG" >> "$GITHUB_PATH"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/zig
+          key: zig-linux-release-fast-${{ hashFiles('build.zig.zon') }}
+      - run: |
+          git config --global user.name "Zit CI"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+      - run: zig build test -Doptimize=ReleaseFast --summary all
+        env:
+          SDL_VIDEODRIVER: dummy
+
   windows:
     name: Windows — build
     runs-on: windows-latest

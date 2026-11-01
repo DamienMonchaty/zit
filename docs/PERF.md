@@ -89,9 +89,12 @@ authors' pictures are fetched.
 
 The history is 10× slower for 1.3× the commits shown because the revwalk
 sorts `TOPOLOGICAL | TIME`: libgit2 walks all 85,906 commits before it hands
-back the first one. Sorting by time alone would stream, but a commit dated
-before its parent (clock skew) would then come out first and break the
-lanes. Open: a topological order bounded to the commits shown.
+back the first one. Sorting by time alone would not stream either:
+libgit2 walks everything first for any order but none (`revwalk.c`,
+`limited`) — this said it would stream, until the code was read
+(2026-11-01). And no order at all would put a commit dated before its
+parent (clock skew) first and break the lanes. Open: a topological order
+bounded to the commits shown, worked out by Zit.
 
 ## Bench, 2026-10-28
 
@@ -194,9 +197,11 @@ Together: RSS 61 → 55–56 MB, Zit's own memory 30 → 24 MB, peak 77 → 69�
 
 Checked, and nothing to do:
 
-- dvui already gives its frame arenas back above their use (it resets each
-  to 90 % of its capacity every frame), so a peak does not stay.
-- What programs print is capped — 1 MB of output, 8 KB of errors — and so
+- dvui gives its frame arenas back a tenth at a time (it resets each to
+  90 % of its capacity every frame), so a peak goes within a few dozen
+  frames — of frames drawn: at rest there are none, and a peak stays until
+  something moves. This said a peak does not stay (corrected 2026-11-01).
+- What programs print is capped — 8 MB of output, 8 KB of errors — and so
   are the history (5,000 commits), the requests listed (100) and the recent
   repositories. New caps: a diff of a file over 16 MB is shown as binary
   rather than read (libgit2's default is 512 MB); a picture download stops at
