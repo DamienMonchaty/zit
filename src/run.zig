@@ -92,7 +92,13 @@ fn startDetached(io: std.Io, cwd: []const u8, argv: []const []const u8) !void {
         .stdout = .ignore,
         .stderr = .ignore,
     });
-    const reaper = try std.Thread.spawn(.{}, reap, .{ io, child });
+    // On Windows a stack for waiting, no more: the editor or terminal it
+    // waits on can stay open for hours, and Windows commits all of a thread's
+    // stack — std's default is 16 MB. Not on Linux, which only reserves it,
+    // and where glibc puts the process's static TLS in the thread's stack:
+    // 64 KB was too small to hold it, pthread_create said EINVAL.
+    const stack: usize = if (@import("builtin").os.tag == .windows) 64 * 1024 else std.Thread.SpawnConfig.default_stack_size;
+    const reaper = try std.Thread.spawn(.{ .stack_size = stack }, reap, .{ io, child });
     reaper.detach();
 }
 

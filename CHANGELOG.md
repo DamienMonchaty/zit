@@ -205,6 +205,8 @@ Every release of Zit, newest first. Downloads are on the
 - A conflicted lockfile no longer stalls the window as it opens and as its
   regions are resolved: reading 500 regions in 1.3 MB took 88 ms and
   "resolve the safe ones" 270 ms; they take 1 ms each.
+- On Windows, Zit asks the system for about 35 MB less memory: its
+  background threads no longer each reserve a 16 MB stack.
 - Picking a commit of thousands of files no longer freezes the window for
   seconds: its files are listed without reading a line of them — 4 ms
   instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened
