@@ -149,7 +149,18 @@ fn addZit(
     strip: bool,
     system_libgit2: bool,
 ) *std.Build.Step.Compile {
-    const dvui_dep = b.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 });
+    // dvui's SDL3 backend builds in tree-sitter and tinyfiledialogs unless
+    // told not to: dead weight, since Zit highlights code with its own lexer
+    // and picks folders through SDL's dialog. FreeType stays: stb_truetype in
+    // its place saves 0.8 MB but draws the text wider and softer — a line
+    // of the history shows three fewer letters.
+    const dvui_dep = b.dependency("dvui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .sdl3,
+        .@"tree-sitter" = false,
+        .@"tiny-file-dialogs" = false,
+    });
 
     const exe = b.addExecutable(.{
         .name = "zit",
