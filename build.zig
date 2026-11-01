@@ -14,13 +14,17 @@ pub fn build(b: *std.Build) !void {
 
     // Stripped unless debugging: the symbols are three quarters of the
     // binary (46 MB against 11). A stripped build says "Unable to dump stack
-    // trace" on a panic, so `-Dstrip=false` — or a Debug build — keeps them
-    // for chasing one.
-    const strip = b.option(bool, "strip", "Drop debug symbols (default: yes, except in Debug)") orelse
-        (optimize != .Debug);
+    // trace" on a panic, so `-Dtrace` — or a Debug build — keeps what a trace
+    // needs: the symbols, and the unwind tables (`.eh_frame`) the stripped
+    // build leaves out too, Zit's and its C libraries'. `-Dstrip=false` alone
+    // keeps both as well.
+    const trace = b.option(bool, "trace", "Keep symbols and unwind tables for stack traces (default: only in Debug)") orelse
+        (optimize == .Debug);
+    const strip = b.option(bool, "strip", "Drop debug symbols (default: yes, unless -Dtrace)") orelse !trace;
+    const unwind_tables = trace or !strip;
     const system_libgit2 = b.option(bool, "system-libgit2", "Link the system's libgit2 instead of building it") orelse false;
 
-    const exe = addZit(b, target, optimize, strip, system_libgit2);
+    const exe = addZit(b, target, optimize, strip, unwind_tables, system_libgit2);
     b.installArtifact(exe);
 
     const install_desktop = b.addInstallFile(b.path("assets/zit.desktop"), "share/applications/zit.desktop");
@@ -92,7 +96,7 @@ pub fn build(b: *std.Build) !void {
     for (dists) |d| {
         const query = try std.Target.Query.parse(.{ .arch_os_abi = d.query });
         const resolved = b.resolveTargetQuery(query);
-        const dist_exe = addZit(b, resolved, .ReleaseSafe, true, false);
+        const dist_exe = addZit(b, resolved, .ReleaseSafe, true, false, false);
 
         if (resolved.result.os.tag == .windows) {
             const install = b.addInstallArtifact(dist_exe, .{
@@ -147,6 +151,7 @@ fn addZit(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     strip: bool,
+    unwind_tables: bool,
     system_libgit2: bool,
 ) *std.Build.Step.Compile {
     // dvui's SDL3 backend builds in tree-sitter and tinyfiledialogs unless
@@ -238,6 +243,15 @@ fn addZit(
         for ([_][]const u8{ "SDL3", "freetype", "mbedtls" }) |name| {
             if (linked.named(name)) |lib| lib.root_module.optimize = .ReleaseSmall;
         }
+    }
+
+    // No unwind tables in a release build: nothing in Zit or its C libraries
+    // throws, and without symbols a panic prints no trace to unwind for.
+    // Not on Windows: x64 code there is unwound through `.pdata`, and the
+    // system's exception dispatch walks through Zit's frames with it — the
+    // ABI requires it.
+    if (!unwind_tables and target.result.os.tag != .windows) {
+        for (Linked.of(b, exe).modules.items) |module| module.unwind_tables = .none;
     }
 
     // SDL as Zit uses it: video and events, nothing else. Its dynamic API
