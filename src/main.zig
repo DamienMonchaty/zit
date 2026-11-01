@@ -972,7 +972,44 @@ const Prompt = struct {
         };
     }
 
-    /// The button that answers the bar.
+    /// Over the field, what goes in it.
+    fn label(kind: Kind) []const u8 {
+        return switch (kind) {
+            .new_branch, .rename_branch, .new_tag, .rename_remote => "Name",
+            .add_remote => "Name and URL",
+            .stash => "Message",
+            .remote_url => "URL",
+            .add_worktree => "Folder and branch",
+        };
+    }
+
+    fn icon(kind: Kind) []const u8 {
+        return switch (kind) {
+            .new_branch => dvui.entypo.flow_branch,
+            .new_tag => dvui.entypo.tag,
+            .add_remote => dvui.entypo.cloud,
+            .rename_branch, .rename_remote => dvui.entypo.pencil,
+            .stash => dvui.entypo.archive,
+            .remote_url => dvui.entypo.link,
+            .add_worktree => dvui.entypo.folder,
+        };
+    }
+
+    /// Under the dialog's title: what it is about.
+    fn hint(kind: Kind, arg: []const u8, buf: []u8) []const u8 {
+        return switch (kind) {
+            .new_branch, .new_tag => if (arg.len > 0)
+                std.fmt.bufPrint(buf, "At {s}", .{arg[0..@min(7, arg.len)]}) catch ""
+            else
+                "At what is checked out",
+            .add_remote => "A name, a space, then its URL",
+            .rename_branch, .rename_remote, .remote_url => arg,
+            .stash => "Every change, set aside under this name",
+            .add_worktree => "A folder, a space, then the branch to check out there",
+        };
+    }
+
+    /// The button that answers the dialog.
     fn verb(kind: Kind) []const u8 {
         return switch (kind) {
             .rename_branch, .rename_remote => "Rename",
@@ -2707,7 +2744,7 @@ fn closeRepo() void {
     clearNames(&author_only);
     // Its pull requests belong to it.
     active_view = .graph;
-    // A drop bar's merge or rebase names this repository's branches.
+    // A drop menu's merge or rebase names this repository's branches.
     clearDrop();
     drag_source.clearRetainingCapacity();
 }
@@ -2925,7 +2962,7 @@ const Action = enum {
     /// The clone or create dialog's button, and its Browse button.
     repo_dialog,
     browse_parent,
-    /// The drop bar's answer, for `drop`.
+    /// The drop menu's answer, for `drop`.
     drop,
     /// The forget dialog's yes.
     forget,
@@ -3559,7 +3596,7 @@ fn applyOutcome(outcome: ?run.Outcome) void {
     if (result.ok) {
         clearCommandError();
     } else if (stoppedAtConflict(result.message)) {
-        // The operation doing what it should: the banner says what is under
+        // The operation doing what it should: the toolbar says what is under
         // way, and the first conflicted file opens once the changes are read.
         clearCommandError();
         open_first_conflict = true;
@@ -3570,7 +3607,7 @@ fn applyOutcome(outcome: ?run.Outcome) void {
     // Both, unconditionally, and on failure too: `poll` only refreshes the
     // history when HEAD moved, and plenty of commands change refs without
     // moving it — a fetch being the obvious one, and a merge that stopped on a
-    // conflict being the one that hides the banner if this is skipped.
+    // conflict being the one that hides its controls if this is skipped.
     refreshHistory();
     workChanged(command_label);
     command_label = "Reading the changes";
@@ -3735,7 +3772,7 @@ fn runRebase() void {
 
     // Refused before it began — a dirty tree, say: the plan stays on screen,
     // to run again once that is sorted. Otherwise it finished or stopped on
-    // a conflict, the banner takes it from there, and the list is done.
+    // a conflict, the toolbar takes it from there, and the list is done.
     if (command_error != null and r.state() == .none) return;
     clearSelection();
 }
@@ -4642,13 +4679,12 @@ fn appFrame() !dvui.App.Result {
     // toolbar and sidebar have nothing to say about a tab with none in it.
     const start_page = new_tab_open or repo == null;
     tabStrip();
-    if (!start_page) {
-        titlebar();
-        progressBanner();
-    }
-    confirmBar();
-    promptBar();
-    dropBar();
+    if (!start_page) titlebar();
+    // A name asked for in a dialog; a yes or no in a toast low on the
+    // right; a dropped branch's merge or rebase in a menu where it fell.
+    promptDialog();
+    confirmToast();
+    dropMenu();
 
     palette();
     repoDialog();
@@ -7482,7 +7518,10 @@ fn titlebar() void {
         });
         defer right.deinit();
         // Kept for the width it holds: the buttons stay centred over the
-        // history, not over the window.
+        // history, not over the window. And where a merge or a rebase under
+        // way says so, as GitComet's action bar does.
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        operationControls();
     }
 }
 
@@ -8044,9 +8083,13 @@ fn dialogInput(src: std.builtin.SourceLocation, id: usize, text: *std.ArrayList(
 /// A dialog's button: filled in the accent for the one it is for, outlined
 /// for the rest.
 fn dialogButton(src: std.builtin.SourceLocation, caption: []const u8, primary: bool) bool {
+    return dialogButtonTagged(src, caption, primary, frameTag("dialog", caption));
+}
+
+fn dialogButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, primary: bool, tag: ?[]const u8) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
-        .tag = frameTag("dialog", caption),
+        .tag = tag,
         .background = true,
         .color_fill = .{ .color = if (primary) style.accent() else style.surfaceRaised() },
         .border = dvui.Rect.all(if (primary) 0 else 1),
@@ -10393,39 +10436,47 @@ fn listedEarlier(group_index: usize, tab_index: usize, path: []const u8) bool {
     return false;
 }
 
-/// The banner for a merge, rebase or cherry-pick git stopped in the middle of.
+/// A merge, rebase or cherry-pick git stopped in the middle of, in the
+/// toolbar's right end as GitComet's action bar has it: what — REBASING,
+/// MERGING… — how far and how many conflicts, its whole story on hover;
+/// Abort, and the next thing to do, filled.
 ///
 /// Without it the only sign is that ordinary commands start refusing to run,
 /// which is the single most confusing state a git GUI can leave you in.
-fn progressBanner() void {
+fn operationControls() void {
     const h = history orelse return;
     if (h.state == .none) return;
 
-    var bar = noticeBar(@src(), style.get().yellow);
-    defer bar.deinit();
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
+    defer line.deinit();
 
-    var title_buf: [256]u8 = undefined;
-    dvui.label(@src(), "{s}", .{opTitle(&title_buf)}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .margin = .{ .w = style.space.md },
-        .padding = dvui.Rect.all(0),
-    });
-    dvui.label(@src(), "{s}", .{opDetail()}, .{
-        .font = style.small(),
-        .color_text = .{ .color = style.textMuted() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .max_size_content = .width(0),
-        .padding = dvui.Rect.all(0),
-    });
+    {
+        var what = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false, .margin = .{ .w = style.space.md } });
+        const word: []const u8 = switch (h.state) {
+            .merge => "MERGING",
+            .rebase => "REBASING",
+            .cherrypick => "CHERRY-PICKING",
+            .revert => "REVERTING",
+            .bisect => "BISECTING",
+            else => "IN PROGRESS",
+        };
+        dvui.label(@src(), "{s}", .{word}, .{ .font = style.smallBold(), .color_text = .{ .color = style.get().yellow }, .padding = dvui.Rect.all(0) });
+        var detail_buf: [64]u8 = undefined;
+        dvui.label(@src(), "{s}", .{opShort(&detail_buf)}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0) });
+        const r = what.data().borderRectScale().r;
+        what.deinit();
+        // The whole of it — which branch, onto what, the commit stopped on —
+        // under the pointer.
+        if (r.contains(dvui.currentWindow().mouse_pt)) {
+            var title_buf: [256]u8 = undefined;
+            dvui.tooltip(@src(), .{ .active_rect = r, .position = .vertical, .delay = 300_000 }, "{s}\n{s}", .{ opTitle(&title_buf), opDetail() }, .{ .font = style.small() });
+        }
+    }
 
     // Bisect and `git am` have no uniform continue/abort pair; the words
     // alone are still worth showing for those.
     const cmd = h.state.command() orelse return;
 
-    // Abort and Skip on the left, quieter; the next thing to do last, filled.
     const next = opNext();
     if (linkButtonTagged(@src(), "Abort", style.danger(), "op:abort")) requestAbortOperation();
     if (canSkip() and next != .skip) {
@@ -10435,16 +10486,27 @@ fn progressBanner() void {
         .resolve => {
             const viewing = viewingConflict();
             if (!viewing or conflictCount() > 1) {
-                var buf: [64]u8 = undefined;
-                const caption = if (viewing) "Next conflicted file" else std.fmt.bufPrint(&buf, "Resolve the conflicts ({d})", .{conflictCount()}) catch "Resolve the conflicts";
+                var buf: [32]u8 = undefined;
+                const caption = if (viewing) "Next file" else std.fmt.bufPrint(&buf, "Resolve ({d})", .{conflictCount()}) catch "Resolve";
                 if (opButton(@src(), caption, "op:resolve")) openNextConflict();
             }
         },
         // Nothing left of the commit once its conflicts were answered: git
         // refuses to continue with it, and skipping it loses nothing.
-        .skip => if (opButton(@src(), "Skip this empty commit", "op:skip")) requestLocal("Skipping", &.{ cmd, "--skip" }),
-        .proceed => if (opButton(@src(), "Continue — Ctrl+Enter", "op:continue")) requestContinue(),
+        .skip => if (opButton(@src(), "Skip empty", "op:skip")) requestLocal("Skipping", &.{ cmd, "--skip" }),
+        .proceed => if (opButton(@src(), "Continue", "op:continue")) requestContinue(),
     }
+}
+
+/// "3/7 · 2 conflicts": how far, how many left, short enough for the toolbar.
+fn opShort(buf: []u8) []const u8 {
+    const n = conflictCount();
+    const o = op_info;
+    if (o.total > 0) return (if (n > 0)
+        std.fmt.bufPrint(buf, "{d}/{d} · {d} conflict{s}", .{ @min(o.step, o.total), o.total, n, plural(n) })
+    else
+        std.fmt.bufPrint(buf, "{d}/{d} · resolved", .{ @min(o.step, o.total), o.total })) catch "";
+    return (if (n > 0) std.fmt.bufPrint(buf, "{d} conflict{s}", .{ n, plural(n) }) else std.fmt.bufPrint(buf, "resolved", .{})) catch "";
 }
 
 /// The strip's one filled button: the next thing to do.
@@ -10584,26 +10646,65 @@ fn openNextConflict() void {
     }
 }
 
-/// The shared shape of the two bars under the toolbar: a strip in a colour that
-/// says what it is, a message, and the buttons that answer it.
-fn noticeBar(src: std.builtin.SourceLocation, hue: dvui.Color) *dvui.BoxWidget {
-    return dvui.box(src, .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
+/// A toast: a card low on the right over the window, above the status bar,
+/// where a question waits for its answer — not a bar that pushes everything
+/// down.
+fn toastWindow(src: std.builtin.SourceLocation, rect: *dvui.Rect, hue: dvui.Color) *dvui.FloatingWindowWidget {
+    // Placed before dvui lays it out, from the size it had the frame before.
+    // Placed after, what is in it stays where dvui first put it — centred,
+    // as a dialog — until a frame comes that a quiet window never draws.
+    // Given a place of its own, dvui does not centre it at all.
+    const win = dvui.windowRect();
+    const w = rect.w;
+    const h = rect.h;
+    rect.x = @max(1, win.w - (if (w > 0) w else TOAST_W) - style.space.xl);
+    rect.y = @max(1, win.h - h - style.statusbar_height - style.space.lg);
+    const fw = dvui.floatingWindow(src, .{
+        .modal = false,
+        .rect = rect,
+        .resize = .none,
+        .window_avoid = .none,
+    }, .{
         .background = true,
-        .color_fill = .{ .color = hue.lerp(style.background(), 0.82) },
-        .min_size_content = .{ .h = 28 },
-        .border = .{ .h = 1 },
-        .color_border = .{ .color = hue.lerp(style.background(), 0.5) },
-        .padding = .{ .x = style.space.md, .w = style.space.md },
+        .color_fill = .{ .color = style.surfaceRaised() },
+        .border = .{ .x = 3, .y = 1, .w = 1, .h = 1 },
+        .color_border = .{ .color = hue },
+        .corners = style.radius.popover,
+        .min_size_content = .{ .w = TOAST_W },
+        .max_size_content = .width(TOAST_W),
+        .padding = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
     });
+    fw.autoSize();
+    // Its size only now known — the first time, or once its text changed:
+    // one more frame, placed from it.
+    const wd = fw.data();
+    if (wd.rect.w != w or wd.rect.h != h) dvui.refresh(null, @src(), wd.id);
+    return fw;
 }
 
-/// The yes/no for anything git cannot undo.
-fn confirmBar() void {
-    const c = confirm orelse return;
+const TOAST_W: f32 = 380;
 
-    var bar = noticeBar(@src(), style.danger());
-    defer bar.deinit();
+/// Text wrapped to the toast's width, which a label would widen instead.
+fn toastText(src: std.builtin.SourceLocation, text: []const u8, font: dvui.Font) void {
+    var tl = dvui.textLayout(src, .{}, .{ .expand = .horizontal, .max_size_content = .width(TOAST_W - 2 * style.space.md), .background = false, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.sm } });
+    tl.addText(text, .{ .font = font, .color_text = .{ .color = style.text() } });
+    tl.deinit();
+}
+
+var confirm_rect: dvui.Rect = .{};
+
+/// The yes or no for anything git cannot undo, as a toast: the question,
+/// and its answers — the one that does it named for what it does.
+fn confirmToast() void {
+    const c = confirm orelse {
+        confirm_rect = .{};
+        return;
+    };
+    // Esc is Cancel: the toast is what waits on an answer.
+    if (escapePressed()) return clearConfirm();
+
+    var fw = toastWindow(@src(), &confirm_rect, style.danger());
+    defer fw.deinit();
 
     var buf: [512]u8 = undefined;
     const short = c.arg[0..@min(7, c.arg.len)];
@@ -10633,20 +10734,56 @@ fn confirmBar() void {
             if (std.mem.indexOfScalar(u8, c.arg, ' ')) |sep| c.arg[sep + 1 ..] else c.arg,
         }),
     } catch "Are you sure? This cannot be undone.";
-    // Across what the buttons leave: no wider than that, so a long question
-    // is cut rather than pushing them off — and never narrower, or it is
-    // not there at all.
-    dvui.label(@src(), "{s}", .{text}, .{
-        .font = style.small(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .max_size_content = .width(0),
-        .padding = dvui.Rect.all(0),
-    });
-
+    {
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer head.deinit();
+        dvui.icon(@src(), "confirm_icon", dvui.entypo.warning, .{ .fill_color = .{ .color = style.danger() } }, .{ .min_size_content = .{ .w = 14, .h = 14 }, .gravity_y = 0, .margin = .{ .y = 2, .w = style.space.sm } });
+        toastText(@src(), text, style.small());
+    }
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+    defer line.deinit();
+    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
-    if (linkButtonTagged(@src(), "Yes, do it", style.danger(), "confirm:yes")) requestAction(.confirmed);
+    if (toastButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) requestAction(.confirmed);
+}
+
+/// The button that does what the toast asks, named for it.
+fn confirmVerb(kind: Confirm.Kind) []const u8 {
+    return switch (kind) {
+        .discard, .discard_hunk => "Discard",
+        .reset_hard => "Reset",
+        .stash_drop, .delete_branch_force, .delete_remote_branch, .delete_remote_tag => "Delete",
+        .force_push => "Force push",
+        .restore_file => "Replace",
+        .remove_worktree => "Remove",
+        .merge_request => "Merge",
+        .close_request => "Close",
+        .sign_out => "Sign out",
+        .stage_markers => "Stage anyway",
+        .abort_operation => "Abort",
+        .skip_step => "Skip",
+        .restart_file => "Start over",
+    };
+}
+
+/// A toast's filled button, in `hue`.
+fn toastButton(src: std.builtin.SourceLocation, caption: []const u8, hue: dvui.Color, tag: []const u8) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{ .draw_focus = false }, .{
+        .tag = tag,
+        .background = true,
+        .color_fill = .{ .color = hue },
+        .color_fill_hover = .{ .color = hue.lerp(style.text(), 0.15) },
+        .corners = style.radius.input,
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+    });
+    defer bw.deinit();
+    bw.processEvents();
+    bw.drawBackground();
+    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.smallBold(), .color_text = .{ .color = style.textOnAccent() }, .padding = dvui.Rect.all(0) });
+    return bw.clicked();
 }
 
 /// What a force push replaces, in commits: after a rebase the upstream's go
@@ -10673,68 +10810,48 @@ fn abortText(buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "Abort {s}? The branch goes back to where it was before, and the conflicts resolved so far are lost.", .{what}) catch "Abort?";
 }
 
-/// The one-field bar for the handful of commands that need a name first.
-fn promptBar() void {
-    const p = prompt orelse return;
+/// The one-field dialog for the handful of commands that need a name first:
+/// a branch, a tag, a remote, a stash, a worktree. Enter does it; Esc,
+/// Cancel or the × let it be.
+fn promptDialog() void {
+    const p = prompt orelse {
+        prompt_rect = .{};
+        return;
+    };
+    // Before it is drawn: taken after, the frame would still show it, and no
+    // key or click brings the next one.
+    if (escapePressed()) return clearPrompt();
+    var open = true;
+    const win = dvui.windowRect();
+    var fw = modalWindow(@src(), &prompt_rect, &open, style.background(), 0, dvui.Rect.all(0));
+    defer fw.deinit();
+    centerModal(fw.data(), win, null);
+    var hint_buf: [160]u8 = undefined;
+    dialogHeader(@src(), Prompt.icon(p.kind), Prompt.caption(p.kind), Prompt.hint(p.kind, p.arg, &hint_buf), &open);
 
-    var bar = noticeBar(@src(), style.accent());
-    defer bar.deinit();
-
-    dvui.label(@src(), "{s}", .{Prompt.caption(p.kind)}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .margin = .{ .w = style.space.sm },
-        .padding = dvui.Rect.all(0),
-    });
-
-    var field = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .background = true,
-        .color_fill = .{ .color = style.surfaceInput() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = style.border() },
-        .corners = style.radius.input,
-        .gravity_y = 0.5,
-        .min_size_content = .{ .w = 280 },
-        .margin = .{ .w = style.space.sm },
-    });
-
-    const te = textField(@src(), .{
-        .text = .{ .array_list = .{ .backing = &prompt_text, .allocator = gpa, .limit = 512 } },
-        .placeholder = Prompt.placeholder(p.kind),
-    }, .{
-        .expand = .horizontal,
-        .gravity_y = 0.5,
+    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .min_size_content = .{ .w = PROMPT_W },
+        .max_size_content = .width(PROMPT_W),
         .background = false,
-        .border = dvui.Rect.all(0),
-        .corners = style.radius.input,
-        .margin = dvui.Rect.all(0),
-        .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
-        .min_size_content = .{ .w = 0 },
-        .max_size_content = .width(0),
-        .font = style.small(),
+        .padding = dvui.Rect.all(style.space.xl),
     });
-
-    // Both read before `deinit`, which leaves the widget data undefined. Enter
-    // here means the same as clicking the button on the right, and the field
-    // takes focus on the frame it appears so the name can just be typed.
-    const entered = te.enter_pressed;
-    const field_id = te.data().id;
-    const first = dvui.firstFrame(field_id);
-    // A pre-filled field — a rename — starts with the cursor after the text,
-    // where dvui would put it before: typing then adds to the old name.
-    if (first) te.textLayout.selection.moveCursor(prompt_text.items.len, false);
-    te.deinit();
-    field.deinit();
-
-    if (first) dvui.focusWidget(field_id, null, null);
-
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    if (linkButton(@src(), "Cancel", style.textMuted())) clearPrompt();
-    const go = linkButtonTagged(@src(), Prompt.verb(p.kind), style.accent(), "prompt:go");
-    if (entered or go) requestAction(.prompt);
+    defer body.deinit();
+    var entered = false;
+    _ = dialogField(@src(), 0, Prompt.label(p.kind), &prompt_text, Prompt.placeholder(p.kind), true, &entered);
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        defer line.deinit();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (dialogButton(@src(), "Cancel", false)) open = false;
+        if (dialogButtonTagged(@src(), Prompt.verb(p.kind), true, "prompt:go")) entered = true;
+    }
+    if (entered) requestAction(.prompt) else if (!open) clearPrompt();
+    // Gone, or answered: the frame that no longer shows it.
+    if (entered or !open) dvui.refresh(null, @src(), null);
 }
+
+var prompt_rect: dvui.Rect = .{};
+const PROMPT_W: f32 = 420;
 
 fn conflictCount() usize {
     const w = work orelse return 0;
@@ -12882,7 +12999,7 @@ fn worktreeMenu(entry: git.Worktree, id: usize, rect: dvui.Rect.Physical, open_a
 
 /// One stash, with the two things you do to one.
 ///
-/// Drop goes through the confirmation bar: it is the one of the three that
+/// Drop goes through the confirmation toast: it is the one of the three that
 /// nothing gets back.
 fn stashRow(src: std.builtin.SourceLocation, entry: git.Stash, id: usize) void {
     var short_tag: [8]u8 = undefined;
@@ -13109,8 +13226,10 @@ const DRAG_NAME = "zit-branch";
 /// The branch being dragged, owned: the row it started on is rebuilt every
 /// frame, and the history under it on every poll.
 var drag_source: std.ArrayList(u8) = .empty;
-/// Where it was dropped, waiting for the bar to say merge or rebase.
+/// Where it was dropped, waiting for its menu to say merge or rebase.
 var drop: ?struct { source: []u8, target: []u8 } = null;
+/// Where it was let go: the menu opens there.
+var drop_at: dvui.Point.Natural = .{};
 
 /// Take a drop onto this row. True while a branch is dragged over it, for the
 /// highlight. Before the row's button sees the events, so the release is
@@ -13130,6 +13249,9 @@ fn branchDrop(wd: *dvui.WidgetData, ref: git.Ref) bool {
             e.handle(@src(), wd);
             dvui.dragEnd();
             setDrop(drag_source.items, ref.name);
+            drop_at = me.p.toNatural();
+            // Its menu is drawn at the top of the next frame.
+            dvui.refresh(null, @src(), null);
         }
     }
     return over;
@@ -13214,39 +13336,66 @@ fn clearDrop() void {
 const DropAction = enum { merge, rebase };
 var drop_action: DropAction = .merge;
 
-/// What a drop means, asked rather than guessed: GitKraken's two answers.
-fn dropBar() void {
+/// What a drop means, asked rather than guessed: a menu where the branch was
+/// let go, as GitKraken's, with the two things it can mean — merge it in, or
+/// rebase onto it. A click anywhere else, or Esc, lets it be.
+fn dropMenu() void {
     const d = drop orelse return;
+    if (escapePressed()) return clearDrop();
 
-    var bar = noticeBar(@src(), style.accent());
-    defer bar.deinit();
+    // The menu says when it closes — another window taking the keys —
+    // through the root of its chain, which no context widget is here to be.
+    var closed = false;
+    const prev_root = dvui.MenuWidget.Root.set(.{ .ptr = &closed, .close = dropMenuClosed });
+    defer _ = dvui.MenuWidget.Root.set(prev_root);
+    var chosen = false;
+    var menu_rect: dvui.Rect.Physical = .{};
+    {
+        var fw = contextMenu(drop_at);
+        defer fw.deinit();
+        menu_rect = fw.data().rectScale().r;
 
-    dvui.label(@src(), "{s} onto {s}:", .{ d.source, d.target }, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .max_size_content = .width(420),
-        .padding = dvui.Rect.all(0),
-    });
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    var buf: [300]u8 = undefined;
-    const merge = std.fmt.bufPrint(&buf, "Merge {s} into {s}", .{ d.source, d.target }) catch "Merge";
-    if (linkButton(@src(), merge, style.accent())) {
-        drop_action = .merge;
-        requestAction(.drop);
+        var buf: [300]u8 = undefined;
+        const merge = std.fmt.bufPrint(&buf, "Merge {s} into {s}", .{ d.source, d.target }) catch "Merge";
+        if (menuIcon(@src(), dvui.entypo.merge, merge, false)) {
+            chosen = true;
+            fw.close();
+            drop_action = .merge;
+            requestAction(.drop);
+        }
+        var buf2: [300]u8 = undefined;
+        // A remote branch is not rebased itself: the local one tracking it is.
+        const rebase = (if (isLocalBranch(d.source))
+            std.fmt.bufPrint(&buf2, "Rebase {s} onto {s}", .{ d.source, d.target })
+        else
+            std.fmt.bufPrint(&buf2, "Rebase the branch tracking {s} onto {s}", .{ d.source, d.target })) catch "Rebase";
+        if (menuIcon(@src(), dvui.entypo.level_up, rebase, false)) {
+            chosen = true;
+            fw.close();
+            drop_action = .rebase;
+            requestAction(.drop);
+        }
     }
-    var buf2: [300]u8 = undefined;
-    // A remote branch is not rebased itself: the local one tracking it is.
-    const rebase = (if (isLocalBranch(d.source))
-        std.fmt.bufPrint(&buf2, "Rebase {s} onto {s}", .{ d.source, d.target })
-    else
-        std.fmt.bufPrint(&buf2, "Rebase the branch tracking {s} onto {s}", .{ d.source, d.target })) catch "Rebase";
-    if (linkButton(@src(), rebase, style.accent())) {
-        drop_action = .rebase;
-        requestAction(.drop);
+    // Chosen, the drop is the action's to clear once it has run.
+    // A press anywhere else lets it be, as a right-click menu's does: dvui
+    // leaves that to the context widget, and the window under this menu
+    // keeps it open otherwise. Not taken: the press goes on to what it hit.
+    for (dvui.events()) |*e| {
+        if (e.handled) continue;
+        switch (e.evt) {
+            .mouse => |me| if (me.action == .press and !menu_rect.contains(me.p)) {
+                closed = true;
+            },
+            else => {},
+        }
     }
-    if (linkButton(@src(), "Cancel", style.textMuted())) clearDrop();
+    if (closed and !chosen) clearDrop();
+}
+
+fn dropMenuClosed(ptr: *anyopaque, reason: dvui.MenuWidget.CloseReason) void {
+    _ = reason;
+    const closed: *bool = @ptrCast(@alignCast(ptr));
+    closed.* = true;
 }
 
 /// The branch a remote ref would be checked out as, or a local name as is.
@@ -19553,7 +19702,7 @@ const features = [_]Feature{
     .{ .icon = dvui.entypo.archive, .title = "Conflicts", .items = &.{
         "Both sides, side by side",
         "Each region: ours, theirs, or both",
-        "Continue, skip or abort from the banner",
+        "Continue, skip or abort from the toolbar",
     } },
     .{ .icon = dvui.entypo.browser, .title = "Workspace", .items = &.{
         "Tabs and groups, dragged, kept on restart",
@@ -20827,7 +20976,7 @@ fn makeConflictedPair(tmp: *std.testing.TmpDir, dir: []const u8) !void {
 // reason this test is worth its runtime: without it `git merge --continue`
 // opens an editor, and `run.git` blocks the UI thread until something closes
 // it — a frozen window with no way back. A test that hangs here has found it.
-test "a conflicted merge is resolved and continued from the banner" {
+test "a conflicted merge is resolved and continued" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
@@ -20848,7 +20997,7 @@ test "a conflicted merge is resolved and continued from the banner" {
 
     // Expected to stop. A conflicted merge does not move HEAD, so this also
     // covers `gitDo` re-reading the history on its failure path — without that
-    // the banner never appears at all. A stop is not an error: no red line,
+    // the toolbar never says it is under way. A stop is not an error: no red line,
     // and the conflicted file is open.
     gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
@@ -20871,8 +21020,8 @@ test "a conflicted merge is resolved and continued from the banner" {
     try std.testing.expectEqual(@as(usize, 2), history.?.commits[0].parents.len);
 }
 
-// The other half of the banner. It also pins the libgit2 state mapping: a state
-// that came back as `.other` has no `command()`, so the banner would offer
+// The other half of the toolbar's controls. It also pins the libgit2 state
+// mapping: a state that came back as `.other` has no `command()`, so they would offer
 // nothing and leave the repository stuck mid-merge.
 test "a conflicted merge aborts back to a clean tree" {
     gpa = std.testing.allocator;
@@ -20902,6 +21051,59 @@ test "a conflicted merge aborts back to a clean tree" {
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expectEqual(@as(usize, 0), conflictCount());
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
+}
+
+// A merge under way, from the toolbar's end as a person goes at it: Resolve
+// opens the conflicted file, Abort asks in a toast — Esc lets it be, its
+// button does it.
+test "a merge under way is driven from the toolbar, its abort asked in a toast" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeConflictedPair(&tmp, dir);
+
+    openRepo(dir);
+    defer closeRepo();
+    defer clearCommandError();
+    defer clearConfirm();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    try expectNoTag("op:abort");
+
+    gitDo(&.{ "merge", "--no-edit", "other" });
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+    try dvui.testing.settle(frameArrowCursor);
+    clearSelection();
+    try dvui.testing.settle(frameArrowCursor);
+
+    try clickAt(try tagCenter("op:resolve"));
+    try std.testing.expect(viewingConflict());
+
+    try clickAt(try tagCenter("op:abort"));
+    try std.testing.expectEqual(Confirm.Kind.abort_operation, confirm.?.kind);
+    _ = try tagRect("confirm:yes");
+    try pressFrame(.escape, .none);
+    try std.testing.expect(confirm == null);
+    try expectNoTag("confirm:yes");
+    try std.testing.expectEqual(git.State.merge, history.?.state);
+
+    try clickAt(try tagCenter("op:abort"));
+    try clickAt(try tagCenter("confirm:yes"));
+    try pumpJobFrame();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(git.State.none, history.?.state);
+    try expectNoTag("op:abort");
 }
 
 // What could quietly break a merge in the middle of resolving it: staging a
@@ -21694,7 +21896,7 @@ test "blame names the author of each line" {
     try std.testing.expect(findCommit("adrift") != null);
 }
 
-test "a hard reset waits for the confirmation bar" {
+test "a hard reset waits for the confirmation" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
@@ -21733,7 +21935,7 @@ test "a hard reset waits for the confirmation bar" {
     try std.testing.expect(confirm == null);
 }
 
-test "the prompt bar creates a branch, and stays open when the name is taken" {
+test "the new branch dialog creates a branch, and stays open when the name is taken" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
@@ -21759,10 +21961,10 @@ test "the prompt bar creates a branch, and stays open when the name is taken" {
 
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
     try std.testing.expect(findRef("feature") != null);
-    // A create that worked closes the bar.
+    // A create that worked closes the dialog.
     try std.testing.expect(prompt == null);
 
-    // The same name again fails, and the bar stays up with the text in it so
+    // The same name again fails, and the dialog stays up with the text in it so
     // the name can be fixed rather than retyped.
     askName(.new_branch, "");
     try prompt_text.appendSlice(gpa, "feature");
@@ -21771,7 +21973,7 @@ test "the prompt bar creates a branch, and stays open when the name is taken" {
     try std.testing.expect(prompt != null);
 
     // A dash would make it an option: `--force`, `-D`. Refused before git
-    // sees it, with the bar still open.
+    // sees it, with the dialog still open.
     clearCommandError();
     askName(.new_branch, "");
     try prompt_text.appendSlice(gpa, "-D");
@@ -21779,6 +21981,26 @@ test "the prompt bar creates a branch, and stays open when the name is taken" {
     try std.testing.expect(command_error != null);
     try std.testing.expect(prompt != null);
     try std.testing.expect(findRef("-D") == null);
+
+    // On screen: a dialog over the window, typed into at once — Enter makes
+    // the branch — and Esc lets it be.
+    clearCommandError();
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    askName(.new_branch, "");
+    try dvui.testing.settle(frameArrowCursor);
+    _ = try tagRect("prompt:go");
+    try typeText("typed");
+    try pressFrame(.enter, .none);
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expect(findRef("typed") != null);
+    try std.testing.expect(prompt == null);
+    askName(.new_tag, "");
+    try dvui.testing.settle(frameArrowCursor);
+    try pressFrame(.escape, .none);
+    try std.testing.expect(prompt == null);
+    try expectNoTag("prompt:go");
 }
 
 // Rows are positioned by hand inside scroll areas and share widget ids with
@@ -21806,7 +22028,7 @@ test "the conflict, rebase and blame panes each render a frame" {
     defer closeRepo();
     defer clearCommandError();
 
-    // Conflicts, with the banner above them.
+    // Conflicts, the toolbar saying so.
     gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(git.State.merge, history.?.state);
     selectChange("lines.txt", .unstaged);
@@ -22504,7 +22726,7 @@ fn answerPrompt(text: []const u8) !void {
     try std.testing.expect(runAction());
 }
 
-/// Say yes to the open confirmation bar.
+/// Say yes to the open confirmation.
 fn answerConfirm() !void {
     try std.testing.expect(confirm != null);
     requestAction(.confirmed);
@@ -23109,7 +23331,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     try expectSubject(dir, "HEAD", "first");
     try expectGit(dir, &.{ "diff", "--quiet", "HEAD", "--", "a.txt" });
 
-    // A tag, from the commit's menu and the prompt bar.
+    // A tag, from the commit's menu and its dialog.
     try rightClickAt(try commitCenter("first"));
     try clickAt(try tagCenter("menu:Tag this commit"));
     try std.testing.expect(prompt != null);
@@ -24690,7 +24912,7 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
 
 // The gesture itself: press on one branch row, move across to another, let
 // go. Nothing but driving the mouse says the button gave the capture up.
-test "dragging a branch row onto another raises the drop bar" {
+test "dragging a branch row onto another opens the drop menu where it was let go" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
@@ -24744,6 +24966,37 @@ test "dragging a branch row onto another raises the drop bar" {
     const d = drop orelse return error.NoDrop;
     try std.testing.expectEqualStrings("feat", d.source);
     try std.testing.expectEqualStrings("main", d.target);
+
+    // Its two answers, in a menu by the row it fell on; Esc lets it be.
+    {
+        const merge = try tagRect("menu:Merge feat into main");
+        _ = try tagRect("menu:Rebase feat onto main");
+        try std.testing.expect(@abs(merge.y - to.y) < 40);
+    }
+    try pressFrame(.escape, .none);
+    try std.testing.expect(drop == null);
+    try expectNoTag("menu:Merge feat into main");
+
+    // As does a click outside it.
+    setDrop("feat", "main");
+    drop_at = to.toNatural();
+    try dvui.testing.settle(frameArrow);
+    {
+        const menu = try tagRect("menu:Merge feat into main");
+        try clickAt(.{ .x = menu.x + menu.w + 200, .y = menu.y + 200 });
+    }
+    try std.testing.expect(drop == null);
+    try expectNoTag("menu:Merge feat into main");
+
+    // And one of its rows does what it says.
+    setDrop("feat", "main");
+    drop_at = to.toNatural();
+    try dvui.testing.settle(frameArrow);
+    try clickAt(try tagCenter("menu:Merge feat into main"));
+    try pumpJobFrame();
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expect(drop == null);
+    try expectNoTag("menu:Merge feat into main");
 }
 
 /// The allocator a test runs Zit on, counting what goes through it.
@@ -24996,7 +25249,7 @@ test "a commit's files: all of its tree, and an unchanged one read whole" {
     try std.testing.expectEqual(@as(usize, 1), diff_all.len);
 }
 
-test "dragging a branch's tag in the graph onto another raises the drop bar" {
+test "dragging a branch's tag in the graph onto another opens the drop menu" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
@@ -25416,7 +25669,7 @@ test "dragging a tab onto another moves it there" {
         openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
     }
 
-    // See "dragging a branch row onto another raises the drop bar".
+    // See "dragging a branch row onto another opens the drop menu where it was let go".
     const frameArrow = struct {
         fn f() !dvui.App.Result {
             const r = try appFrame();
@@ -25965,7 +26218,7 @@ test "audit: the main controls do what they say when clicked" {
     try clickAt(try tagCenter("wip_row"));
     try std.testing.expectEqual(Selection.none, std.meta.activeTag(selection));
 
-    // Discard one file through its trash icon and the confirmation bar: the
+    // Discard one file through its trash icon and the confirmation: the
     // trash sits left of the stage icon.
     {
         const row = (dvui.tagGet("unstaged:one.txt") orelse return error.TagNotFound).rect;
@@ -25995,7 +26248,7 @@ test "audit: the main controls do what they say when clicked" {
     try std.testing.expect(findCommit("audit commit") == null);
     try std.testing.expectEqual(@as(usize, 1), work.?.staged.len);
 
-    // Right-click a branch, rename it from the menu through the prompt bar.
+    // Right-click a branch, rename it from the menu through its dialog.
     try rightClickAt(try tagCenter("feat"));
     try clickAt(try tagCenter("menu:Rename…"));
     try std.testing.expect(prompt != null);

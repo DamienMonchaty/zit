@@ -305,8 +305,8 @@ pub const DiffSide = enum {
     unstaged,
 };
 
-/// What git is in the middle of, if anything. Drives the banner that offers
-/// continue/abort.
+/// What git is in the middle of, if anything. Drives the toolbar's controls
+/// that offer continue/abort.
 pub const State = enum {
     none,
     merge,

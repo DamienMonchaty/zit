@@ -106,7 +106,7 @@ nothing. Every number here can be measured again with `zig build bench --
 
 **Conflicts**
 - Both sides side by side, region by region: ours, theirs, or both
-- Continue, skip or abort from the banner
+- Continue, skip or abort from the toolbar
 
 **Workspace**
 - Tabs and tab groups, restored at start

@@ -49,7 +49,7 @@ never freezes it.
 ## Conflicts
 
 - Both sides side by side, region by region: take ours, theirs, or both.
-- Continue, skip or abort from the banner.
+- Continue, skip or abort from the toolbar.
 
 ## Workspace
 
