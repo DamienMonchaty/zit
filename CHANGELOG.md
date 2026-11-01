@@ -173,6 +173,10 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- Picking a commit of thousands of files no longer freezes the window for
+  seconds: its files are listed without reading a line of them — 4 ms
+  instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened
+  is read alone. The same goes for two commits compared.
 - A merged or closed pull request's line says so — "Merged into main" —
   rather than "Ready to merge", and GitHub is no longer asked about it every
   few seconds. A description's task list shows its boxes, ticked or not:
