@@ -14584,34 +14584,45 @@ fn authorHeader() void {
 
     const needle = std.mem.trim(u8, author_filter.items, " ");
     const index = authorIndex();
-    var first: ?[]const u8 = null;
     var change: ?struct { key: []const u8, only: bool } = null;
-    var row: usize = 0;
 
+    // Who the menu lists, in its order — the list, not its rows: a
+    // history's authors can be thousands, and a row asks for its picture.
+    const Listed = struct { entry: AuthorEntry, picked: bool, has_commit: bool };
+    var listed: std.ArrayList(Listed) = .empty;
+    const arena = dvui.currentWindow().arena();
     // Those picked first, kept even where the history shown has none of
     // theirs: the only place they can be taken off from.
     for (author_only.items) |key| {
         const entry = authorByKey(key) orelse AuthorEntry{ .key = key, .name = keyName(key), .email = keyEmail(key), .count = 0 };
         if (!authorShownBy(entry, needle)) continue;
-        if (first == null) first = entry.key;
-        if (authorRow(row, entry, true, index.len > 0 and entry.count > 0)) |only| change = .{ .key = entry.key, .only = only };
-        row += 1;
+        listed.append(arena, .{ .entry = entry, .picked = true, .has_commit = index.len > 0 and entry.count > 0 }) catch break;
     }
     // You, then everyone else, newest first.
     for ([_]bool{ true, false }) |mine| {
         for (index) |entry| {
             if (isMe(entry) != mine or keyPicked(entry.key)) continue;
             if (!authorShownBy(entry, needle)) continue;
-            if (first == null) first = entry.key;
-            if (authorRow(row, entry, false, true)) |only| change = .{ .key = entry.key, .only = only };
-            row += 1;
+            listed.append(arena, .{ .entry = entry, .picked = false, .has_commit = true }) catch break;
         }
     }
-    if (row == 0) dropHeading(@src(), 0, "NO AUTHOR BY THAT NAME");
+    if (listed.items.len == 0) dropHeading(@src(), 0, "NO AUTHOR BY THAT NAME");
+
+    // Only the rows in sight are built.
+    {
+        var rows = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
+        defer rows.deinit();
+        const in_sight = rowsInSight(rows.data(), listed.items.len, AUTHOR_ROW_H);
+        rowsSpacer(@src(), 0, in_sight.first, AUTHOR_ROW_H);
+        for (listed.items[in_sight.first..in_sight.last], in_sight.first..) |l, i| {
+            if (authorRow(i, l.entry, l.picked, l.has_commit)) |only| change = .{ .key = l.entry.key, .only = only };
+        }
+        rowsSpacer(@src(), 1, listed.items.len - in_sight.last, AUTHOR_ROW_H);
+    }
 
     if (search_entered == field) {
         search_entered = null;
-        if (first) |key| change = .{ .key = key, .only = true };
+        if (listed.items.len > 0) change = .{ .key = listed.items[0].entry.key, .only = true };
     }
     if (change) |c| {
         if (c.only) {
@@ -14632,8 +14643,19 @@ fn authorShownBy(entry: AuthorEntry, needle: []const u8) bool {
 /// row itself — their picture, name, address, how many commits — whose click
 /// shows theirs alone. Null when neither was clicked; true for "theirs
 /// alone", false for the box.
+/// An author's row in the authors' menu, held to one height: the menu builds
+/// only the rows in sight and stands spacers for the rest. 28.15 is what its
+/// picture and padding came to.
+const AUTHOR_ROW_H: f32 = 29;
+
 fn authorRow(id: usize, entry: AuthorEntry, picked: bool, has_commit: bool) ?bool {
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false });
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .min_size_content = .{ .h = AUTHOR_ROW_H },
+        .max_size_content = .height(AUTHOR_ROW_H),
+        .background = false,
+    });
     defer line.deinit();
     var on = picked;
     const toggled = dvui.checkbox(@src(), &on, null, .{ .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = 2 } });
@@ -18155,6 +18177,10 @@ fn detailPanel() void {
 /// A commit: what it is, who made it — co-authors too — what it says, what
 /// it touched and where it sits; each part after the heading a section that
 /// folds.
+/// The commit pane's scroll, as dvui kept it for itself: here, for a test to
+/// scroll it.
+var commit_scroll: dvui.ScrollInfo = .{};
+
 fn commitDetail(id: git.Oid) void {
     ensureDiff();
     const commit = commitAt(id);
@@ -18163,7 +18189,7 @@ fn commitDetail(id: git.Oid) void {
     const rest = if (nl) |i| std.mem.trim(u8, whole[i..], " \t\r\n") else "";
     const split = splitTrailers(rest);
 
-    var scroll = dvui.scrollArea(@src(), .{}, .{
+    var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &commit_scroll }, .{
         .expand = .both,
         .background = false,
         .padding = .{ .h = style.space.sm },
@@ -18305,12 +18331,31 @@ fn clearFoldedDirs() void {
     commit_tree.clear();
 }
 
-/// ponytail: one widget per row, no virtualising — capped instead. A
-/// virtualised list like the graph's if a tree of this size needs scrolling.
-const MAX_FILE_ROWS = 2000;
+/// Which rows of a list, `count` of them `rh` high each, can be seen this
+/// frame: where its box `list` sits against the clip — the scroll area it is
+/// in, however deep — read in screen pixels. The rest are spacers, as in
+/// `sideRows`: a list in the middle of a scrolled pane, whose own scroll
+/// area it is not, built a widget for every row of it.
+fn rowsInSight(list: *dvui.WidgetData, count: usize, rh: f32) struct { first: usize, last: usize } {
+    const box = list.contentRectScale();
+    const clip = dvui.clipGet();
+    const row = rh * box.s;
+    if (row <= 0) return .{ .first = 0, .last = count };
+    const top = clip.y - box.r.y;
+    const first = @min(count, @as(usize, @intFromFloat(@max(0, top) / row)));
+    const last = @min(count, @as(usize, @intFromFloat(@max(0, top + clip.h) / row)) + 1);
+    return .{ .first = first, .last = @max(first, last) };
+}
+
+/// The rows of a list that `rowsInSight` leaves out: one spacer above them,
+/// one below.
+fn rowsSpacer(src: std.builtin.SourceLocation, id: usize, rows: usize, rh: f32) void {
+    if (rows == 0) return;
+    _ = dvui.spacer(src, .{ .id_extra = id, .min_size_content = .{ .h = @as(f32, @floatFromInt(rows)) * rh } });
+}
 
 /// A commit's files: changed ones, or all of them; as paths, or folder by
-/// folder with the folders folding away.
+/// folder with the folders folding away. Only the rows in sight are built.
 fn commitFiles(id: git.Oid) void {
     {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.xs } });
@@ -18350,9 +18395,15 @@ fn commitFiles(id: git.Oid) void {
         }
     };
 
+    const rh = style.row_height;
+    var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
+    defer list.deinit();
+
     if (changes_view != .tree) {
-        for (0..@min(paths_n, MAX_FILE_ROWS)) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), i, null);
-        if (paths_n > MAX_FILE_ROWS) sidebarNote(@src(), "More files than are listed here.");
+        const in_sight = rowsInSight(list.data(), paths_n, rh);
+        rowsSpacer(@src(), 0, in_sight.first, rh);
+        for (in_sight.first..in_sight.last) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), i, null);
+        rowsSpacer(@src(), 1, paths_n - in_sight.last, rh);
         return;
     }
 
@@ -18360,24 +18411,32 @@ fn commitFiles(id: git.Oid) void {
     var key = std.hash.Wyhash.init(@intFromBool(commit_all_files));
     key.update(std.mem.asBytes(&id));
     key.update(std.mem.asBytes(&paths_n));
-    const list: usize = if (commit_all_files) @intFromPtr(tree_files.paths.ptr) else @intFromPtr(diff_all.ptr);
-    key.update(std.mem.asBytes(&list));
+    const files: usize = if (commit_all_files) @intFromPtr(tree_files.paths.ptr) else @intFromPtr(diff_all.ptr);
+    key.update(std.mem.asBytes(&files));
     commit_tree.build(key.final(), paths_n, commit_all_files, Files.path);
 
+    // The lines unfolded: walked whole, a few pointers each, to know how
+    // many there are; built only where they can be seen.
+    var shown_n: usize = 0;
+    var counting: TreeShown = .{ .rows = commit_tree.rows, .folded = &folded_dirs };
+    while (counting.next()) |_| shown_n += 1;
+    const in_sight = rowsInSight(list.data(), shown_n, rh);
+    rowsSpacer(@src(), 0, in_sight.first, rh);
+
     var it: TreeShown = .{ .rows = commit_tree.rows, .folded = &folded_dirs };
-    var rows: usize = 0;
+    var row: usize = 0;
     var fold: ?[]const u8 = null;
-    while (it.next()) |shown| : (rows += 1) {
-        if (rows == MAX_FILE_ROWS) {
-            sidebarNote(@src(), "More files than are listed here.");
-            break;
-        }
+    while (it.next()) |shown| : (row += 1) {
+        if (row >= in_sight.last) break;
+        if (row < in_sight.first) continue;
         if (shown.row.file) |f| {
             fileRow(@src(), id, Files.path(commit_all_files, f), Files.status(commit_all_files, f), f, @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON);
         } else if (folderLine(@src(), shown.index, shown.row, shown.folded, null)) {
             fold = shown.row.path;
         }
     }
+    rowsSpacer(@src(), 1, shown_n - in_sight.last, rh);
+    // After the lines: folding changes which ones it walks.
     if (fold) |path| foldToggle(&folded_dirs, path);
 }
 
@@ -18658,7 +18717,15 @@ fn compareDetail() void {
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     defer scroll.deinit();
     if (diff == null) return;
-    for (diff_all, 0..) |file, i| fileRow(@src(), compare_to, file.path, file.status, i, null);
+    // Only the rows in sight, as a commit's: two commits far apart can
+    // differ by tens of thousands of files.
+    const rh = style.row_height;
+    var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
+    defer list.deinit();
+    const in_sight = rowsInSight(list.data(), diff_all.len, rh);
+    rowsSpacer(@src(), 0, in_sight.first, rh);
+    for (diff_all[in_sight.first..in_sight.last], in_sight.first..) |file, i| fileRow(@src(), compare_to, file.path, file.status, i, null);
+    rowsSpacer(@src(), 1, diff_all.len - in_sight.last, rh);
 }
 
 /// The working tree: what is staged, what is not, and the way to move a file
@@ -19117,6 +19184,8 @@ fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8
     const open = std.mem.eql(u8, selected_path.items, path);
     var row = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
+        // By its path, for a test to find which rows were built.
+        .tag = frameTag("file", path),
         .expand = .horizontal,
         .min_size_content = .{ .h = style.row_height },
         .background = open,
@@ -20925,6 +20994,7 @@ test "stage, commit and switch branches through the real git commands" {
 /// empty, and the next test to render a frame reads straight through it.
 fn resetUiGlobals() void {
     zoom = 1.0;
+    commit_scroll = .{};
     clearPickedChanges();
     picked_changes.deinit(gpa);
     picked_changes = .empty;
@@ -27164,4 +27234,82 @@ test "a commit date reads as a date, and fits its column" {
     try std.testing.expectEqual(@as(u8, '-'), text[4]);
     try std.testing.expectEqual(@as(u8, ':'), text[13]);
     try std.testing.expect(style.graphMono().textSize("2026-10-21 18:05").w <= style.time_column);
+}
+
+test "a commit's files: only the rows in sight are built, however many" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    for (0..300) |i| {
+        var name: [16]u8 = undefined;
+        try tmp.dir.writeFile(app_io, .{ .sub_path = try std.fmt.bufPrint(&name, "f{d:0>3}.txt", .{i}), .data = "x\n" });
+    }
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "three hundred" });
+    openRepo(dir);
+    defer closeRepo();
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+    selectCommit(history.?.commits[0].id);
+    try dvui.testing.settle(frameArrowCursor);
+
+    // The first of the 300 built, the last not: the pane shows a few dozen.
+    _ = try tagCenter("file:f000.txt");
+    try expectNoTag("file:f299.txt");
+
+    // Scrolled to the end of the pane: the other way round.
+    commit_scroll.viewport.y = commit_scroll.scrollMax(.vertical);
+    try dvui.testing.settle(frameArrowCursor);
+    _ = try tagCenter("file:f299.txt");
+    try expectNoTag("file:f000.txt");
+}
+
+
+test "the authors' menu builds the rows in sight, and its search still finds the rest" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    for (0..60) |i| {
+        var name: [32]u8 = undefined;
+        var mail: [48]u8 = undefined;
+        const n = try std.fmt.bufPrint(&name, "user.name=A{d:0>2}", .{i});
+        const m = try std.fmt.bufPrint(&mail, "user.email=a{d:0>2}@x.invalid", .{i});
+        try expectGit(dir, &.{ "-c", n, "-c", m, "commit", "-q", "--allow-empty", "-m", "c" });
+    }
+    openRepo(dir);
+    defer closeRepo();
+
+    // Wide: the author column only shows with room left for the messages,
+    // whatever widths the tests before this one left.
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1900, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    try dvui.testing.settle(frameArrowCursor);
+
+    // Newest first: the last to commit is in sight, the first is not built.
+    try clickAt(try tagCenter("header:author"));
+    _ = try tagCenter("author:A59");
+    try expectNoTag("author:A00");
+    // Asked for by name, it is the one row.
+    try typeText("A00");
+    try dvui.testing.settle(frameArrowCursor);
+    _ = try tagCenter("author:A00");
+    try expectNoTag("author:A59");
 }
