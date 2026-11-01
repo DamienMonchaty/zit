@@ -112,9 +112,8 @@ Every release of Zit, newest first. Downloads are on the
 - The toolbar is taller, its buttons larger with readable captions. Its left
   end is the branch alone, on a framed button — the repository is the tab's —
   and the branch menu is as tall as its branches, up to a bound, rather than
-  a fixed height. **Pull requests** has moved from the tab strip to the
-  toolbar, after Push, with how many are open; it shows them, and a second
-  click goes back to the history. A window too narrow for the captions shows
+  a fixed height. **Pull requests** has left the tab strip: the sidebar's section and the
+  palette open them. A window too narrow for the captions shows
   the icons alone, their captions on hover.
 - The history's branch names have a column of their own, **BRANCH / TAG**,
   before the graph, as in GitKraken: read from its left, joined to their commit

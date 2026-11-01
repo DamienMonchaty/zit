@@ -7454,9 +7454,6 @@ fn titlebar() void {
                 requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
             }
         }
-        // After Push, what comes after pushing a branch: the repository's
-        // pull requests, where it is on a host Zit speaks to.
-        if (pr.host != .none) pullsButton();
         toolbarDivider(@src(), 1);
         if (toolbarButton(@src(), "Branch", dvui.entypo.flow_branch, 0)) askName(.new_branch, "");
         if (toolbarButton(@src(), "Stash", dvui.entypo.save, 0)) requestLocal("Stashing", &.{ "stash", "push", "-u" });
@@ -7497,17 +7494,6 @@ fn rebasedSinceUpstream() bool {
     if (h.state != .none or h.tracking.ahead == 0 or h.tracking.behind == 0) return false;
     const move = h.last_move orelse return false;
     return std.mem.startsWith(u8, move.message, "rebase") or std.mem.startsWith(u8, move.message, "pull --rebase");
-}
-
-/// The repository's pull requests, in the toolbar: how many are open on its
-/// badge, lit while they are shown. A click shows them — they are opened,
-/// reviewed and made in their own view — and a second goes back to the
-/// history.
-fn pullsButton() void {
-    const shown = !new_tab_open and active_view == .pulls;
-    if (!toolbarButtonOn(@src(), "Pull requests", dvui.entypo.merge, pr.list.len, "toolbar:pulls", shown)) return;
-    new_tab_open = false;
-    active_view = if (shown) .graph else .pulls;
 }
 
 /// The toolbar's side zones, as wide as the panels under them were last
@@ -11614,8 +11600,6 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
     // The hover across the whole line, ⋯ included: drawn by hand, as the ref
     // lines' are.
     if (head_hover) header_rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
-    // The line parting it from the section above.
-    if (id > 0) sectionHairline(head.data());
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .expand = .horizontal,
@@ -17845,7 +17829,9 @@ fn accordion(src: std.builtin.SourceLocation, id: usize, title: []const u8, coun
 /// chevron in the text's colour, the section's icon, its name semi-bold.
 /// `faded`: everything in it out of the graph.
 fn sectionFace(folded: bool, icon: []const u8, title: []const u8, faded: bool) void {
-    dvui.icon(@src(), "section_chevron", if (folded) dvui.entypo.chevron_small_right else dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = if (faded) style.textFaint() else style.text() } }, .{
+    // In the toolbar's grey, as its buttons' captions are: a head says where
+    // things are, and white made it louder than what it heads.
+    dvui.icon(@src(), "section_chevron", if (folded) dvui.entypo.chevron_small_right else dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = if (faded) style.textFaint() else style.textMuted() } }, .{
         .min_size_content = .{ .w = 12, .h = 12 },
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.xs },
@@ -17857,7 +17843,7 @@ fn sectionFace(folded: bool, icon: []const u8, title: []const u8, faded: bool) v
     });
     dvui.label(@src(), "{s}", .{title}, .{
         .font = style.smallBold(),
-        .color_text = .{ .color = if (faded) style.textFaint() else style.text() },
+        .color_text = .{ .color = if (faded) style.textFaint() else style.textMuted() },
         .gravity_y = 0.5,
         .padding = dvui.Rect.all(0),
     });
@@ -17892,7 +17878,7 @@ fn panelTitle(title: []const u8, icon: ?[]const u8, count: ?usize) void {
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.sm },
     });
-    dvui.label(@src(), "{s}", .{title}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{s}", .{title}, .{ .font = style.smallBold(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     countPill(count orelse return);
 }
 
@@ -18008,7 +17994,7 @@ fn workingDetail() void {
             .gravity_y = 0.5,
             .margin = .{ .w = style.space.md },
         });
-        dvui.label(@src(), "Changed files", .{}, .{ .font = style.title(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "Changed files", .{}, .{ .font = style.title(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
 
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
