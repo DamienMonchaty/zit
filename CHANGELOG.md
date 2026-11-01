@@ -19,6 +19,11 @@ Every release of Zit, newest first. Downloads are on the
   when it is not 100 % — a click there resets it.
 
 ### Changed
+- The downloads are nearly half the size: 7.3 MB for Windows instead of
+  12.5, 3.2 MB for the Linux archive instead of 5.5. Nothing Zit uses is
+  gone — what is left out is code nothing calls: SDL's audio, joysticks and
+  cameras, dvui's debug window, the fonts of the theme Zit replaces as it
+  starts. The text is drawn exactly as before.
 - The author filter filters: the history is read again with the other
   authors' commits left out, each one kept joined to the nearest kept one
   before it, so the lanes still say how they follow one another — as
@@ -173,6 +178,23 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- On Windows, an open repository no longer costs a fifth of a core while
+  nothing happens: its working tree is watched, as on Linux, instead of read
+  again every 0.7 s — 0.5–0.8 % CPU when idle instead of 21–27 %, on a
+  repository of 2,300 files. A fetch that moves nothing is no longer taken
+  for a change.
+- Files touched without being changed — saved as they were, a branch
+  switched to and back, a tool that rewrites what it leaves alone — are
+  read and hashed once to see that nothing changed, not at every refresh:
+  2,300 of them made each read of the working tree 4–5 s on Windows, one
+  core kept busy, and it is 150 ms again after the first. Zit keeps what it
+  learned in a copy of the index of its own; the repository's index is not
+  written.
+- Changing what the graph shows — a branch hidden or shown alone,
+  First-parent, the remotes, an author — and Refresh no longer stop the
+  window while the history is read again: it is read on another thread, as
+  after a fetch, the graph on screen staying until the new one is in. A
+  read still out for the filter as it was is dropped, not shown first.
 - A commit's files, two commits compared and the authors' menu build only
   the rows on screen, as the history and the changes do: a frame with a
   commit of 2,000 files picked takes 2 ms of Zit's instead of 20, the menu
