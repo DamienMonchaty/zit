@@ -1630,7 +1630,7 @@ fn diffModeToggle(src: std.builtin.SourceLocation) void {
         .margin = .{ .x = style.space.sm, .w = style.space.lg },
     });
     defer track.deinit();
-    inline for (.{ false, true }, 0..) |split, i| {
+    for ([_]bool{ false, true }, 0..) |split, i| {
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = i,
@@ -1928,7 +1928,7 @@ fn appDeinit(win: *dvui.Window) void {
     pr_reply.deinit(gpa);
     pr_reply_id.deinit(gpa);
     split_rows.deinit(gpa);
-    inline for (.{ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| list.deinit(gpa);
+    for ([_]*std.ArrayList(u8){ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| list.deinit(gpa);
     if (action_input) |patch| gpa.free(patch);
     action_input = null;
 
@@ -8216,7 +8216,7 @@ fn branchSwitcher() void {
     });
     defer list.deinit();
     var shown: usize = 0;
-    inline for (.{ git.Ref.Kind.local, git.Ref.Kind.remote }, 0..) |kind, k| {
+    for ([_]git.Ref.Kind{ .local, .remote }, 0..) |kind, k| {
         var header = false;
         for (h.refs, 0..) |ref, i| {
             if (ref.kind != kind) continue;
@@ -11432,7 +11432,7 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
         defer list.deinit();
         if (history) |h| {
             var shown: usize = 0;
-            inline for (.{ git.Ref.Kind.local, git.Ref.Kind.remote }, 0..) |kind, k| {
+            for ([_]git.Ref.Kind{ .local, .remote }, 0..) |kind, k| {
                 var header = false;
                 for (h.refs, 0..) |ref, i| {
                     if (ref.kind != kind) continue;
@@ -11957,8 +11957,8 @@ fn refsSidebar() void {
     // these refs point into.
     var chosen: ?git.Ref = null;
 
-    inline for (@typeInfo(Section).@"enum".fields, 0..) |field, i| {
-        if (sidebarSection(@src(), @enumFromInt(field.value), i)) |ref| chosen = ref;
+    for (std.enums.values(Section), 0..) |section, i| {
+        if (sidebarSection(@src(), section, i)) |ref| chosen = ref;
     }
 
     if (chosen) |ref| checkout(ref);
@@ -15095,8 +15095,8 @@ fn parseQuery(text: []const u8, out: *[MAX_TERMS]Term) []Term {
         const raw = text[start..i];
         var term: Term = .{ .kind = .any, .text = std.mem.trim(u8, raw, "\"") };
         if (std.mem.indexOfScalar(u8, raw, ':')) |colon| {
-            const keys = .{ .{ "author", .author }, .{ "msg", .message }, .{ "message", .message }, .{ "sha", .sha }, .{ "after", .after }, .{ "before", .before }, .{ "path", .path }, .{ "code", .code } };
-            inline for (keys) |k| {
+            const keys = [_]struct { []const u8, @FieldType(Term, "kind") }{ .{ "author", .author }, .{ "msg", .message }, .{ "message", .message }, .{ "sha", .sha }, .{ "after", .after }, .{ "before", .before }, .{ "path", .path }, .{ "code", .code } };
+            for (keys) |k| {
                 if (std.ascii.eqlIgnoreCase(raw[0..colon], k[0])) {
                     term = .{ .kind = k[1], .text = std.mem.trim(u8, raw[colon + 1 ..], "\"") };
                 }
@@ -16051,7 +16051,7 @@ fn refExtrasWidth(ref: git.Ref, synced: bool) f32 {
     var buf: [24]u8 = undefined;
     var w: f32 = 0;
     if (synced) w += 11 + style.space.xs;
-    inline for (.{ ref.tracking.ahead, ref.tracking.behind }) |n| {
+    for ([_]usize{ ref.tracking.ahead, ref.tracking.behind }) |n| {
         if (n > 0) w += style.space.xs + 9 + style.tiny().textSize(std.fmt.bufPrint(&buf, "{d}", .{n}) catch "").w;
     }
     if (requestFor(ref)) |req| w += style.space.xs + style.tinyBold().textSize(std.fmt.bufPrint(&buf, "#{d}", .{req.number}) catch "").w;
@@ -16220,7 +16220,7 @@ fn inPickedRequest(id: git.Oid) bool {
 /// Icons rather than arrow characters: the fonts are cut down to what the
 /// UI already used.
 fn trackingMarks(t: git.Tracking, ink: dvui.Color) void {
-    inline for (.{ .{ t.ahead, dvui.entypo.arrow_up, "ahead" }, .{ t.behind, dvui.entypo.arrow_down, "behind" } }, 0..) |mark, i| {
+    for ([_]struct { usize, []const u8, []const u8 }{ .{ t.ahead, dvui.entypo.arrow_up, "ahead" }, .{ t.behind, dvui.entypo.arrow_down, "behind" } }, 0..) |mark, i| {
         if (mark[0] > 0) {
             dvui.icon(@src(), mark[2], mark[1], .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
                 .id_extra = i,
@@ -21023,7 +21023,7 @@ fn resetUiGlobals() void {
     resolve_undo.deinit(gpa);
     resolve_undo = .empty;
     pr_cards.deinit(gpa);
-    inline for (.{ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
+    for ([_]*std.ArrayList(u8){ &pr_new_head, &pr_new_assignees, &pr_new_labels, &pick_filter, &side_list }) |l| {
         l.deinit(gpa);
         l.* = .empty;
     }
@@ -21046,7 +21046,7 @@ fn resetUiGlobals() void {
     clearDrop();
     drag_source.deinit(gpa);
     drag_source = .empty;
-    inline for (.{ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| {
+    for ([_]*std.ArrayList(u8){ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| {
         list.deinit(gpa);
         list.* = .empty;
     }
