@@ -23,15 +23,49 @@ Private_Dirty moves with the moment it is read: 16.8 MB at 45 s, 8 MB at
 70 s in the same run, once the first fetch, the pull requests' list and a
 trim have gone by. Compare builds read at the same moment.
 
-Idle is now the watcher (`src/watch.zig`): nothing is read until inotify
-says something changed, and a 30 s poll is the net under it. What is left,
+Idle is now the watcher (`src/watch.zig`): nothing is read until inotify —
+ReadDirectoryChangesExW on Windows — says something changed, and a 30 s
+poll is the net under it. What is left,
 0.8 wake-ups a second, is not Zit's: 0.6 on the main thread inside SDL's
 event wait — the only timer Zit sets is that 30 s one — and 0.2 on a pool
 thread, about one tick in 30 s. 361 watches on that repository (its 354
 folders that git does not ignore, and `.git`'s few), against a limit of
-524,288 here; past `fs.inotify.max_user_watches`, and on Windows and macOS,
-it is the old 0.7 s poll, still without frames for a status that did not
-change.
+524,288 here; past `fs.inotify.max_user_watches`, and on macOS, it is the
+old 0.7 s poll, still without frames for a status that did not change.
+
+## Windows (2026-11-01)
+
+The first numbers there: an Intel Core i7-1185G7 under Windows 11,
+ReleaseSafe, a clone of a 1,039-commit, 2,300-file repository,
+`tools/measure.ps1` read 40 s after opening for 60 s, window focused, two
+runs of each build, alternated.
+
+| Build | Idle CPU | Wake-ups/s | Working set | Commit |
+|---|---|---|---|---|
+| The 0.7 s poll (as it was) | 21–27 % | 37–61 | 107–115 MB | 161–164 MB |
+| ReadDirectoryChangesExW, the 30 s net | 0.46–0.77 % | 0.9–1.5 | 97–99 MB | 156–158 MB |
+
+The poll was the cost: one status read is 339 ms there
+(`zig build bench`, `status`), 118 ms once `git status` has written fresh
+stats into the index — against 4–5 ms on Linux. What is left is mostly the
+30 s net: 118 ms every 30 s is 0.4 %, at the ceiling. With no repository
+open, one run: 0.95 %, 63 MB working set.
+
+The events are sorted as inotify's are, with two more rules, both taken from
+GitComet's monitor. A folder's own "modified" is dropped: its times move
+with every name in it — `.git`'s with every lock file git makes — and each of
+those comes as its own event. FETCH_HEAD is not a change, on Linux either:
+every fetch rewrites it, one that moves no ref too.
+
+**16 MB of commit a thread.** Zig's `std.Thread.spawn` commits a thread's
+whole stack on Windows, 16 MB by default: a program with one thread is
+17.4 MB of commit with it and 2.3 MB with a 1 MB stack, for the same working
+set. The watcher's thread asks for 1 MB; every other thread Zit starts still
+commits 16.
+
+A run measured while a build was compiling beside it read 2.6 % and 66
+wake-ups a second: a busy machine preempts Zit's threads, and each
+preemption is a context switch. Measure on a quiet one.
 
 ## Method
 
@@ -39,7 +73,11 @@ change.
    with a throwaway config and cache and reads `/proc`: RSS and VmHWM in
    `status`, Private_Dirty in `smaps_rollup` (RSS counts shared pages —
    the GPU driver's, the fonts — that are not Zit's to save), and the
-   process's ticks in `stat` over the idle window. `CACHE=dir` keeps the
+   process's ticks in `stat` over the idle window. On Windows,
+   `tools/measure.ps1` reads the same from the kernel: working set (the
+   RSS), private working set, commit, CPU time and every thread's context
+   switches; `-Focus` puts the window in front, `-Renderer` picks SDL's
+   renderer. `CACHE=dir` keeps the
    picture cache between runs, `SETTLE=s` waits longer before measuring.
 2. **Where the time goes.** `tools/profile.sh [repository] [samples]`
    samples every thread's stack with `eu-stack` on an unstripped build and
@@ -69,6 +107,43 @@ on a real one fetched into it (4,385 → 4,836 commits during one measurement).
 And keep the copy on disk, not in `/tmp`: on tmpfs a mapped file's pages are
 counted as the process's own dirty memory — 12 MB of git's pack index and
 packs showed up as Zit's until the clone moved (`.zig-cache/measure/`).
+
+## Files touched, not changed (2026-11-01)
+
+libgit2 tells a file unchanged by its stat info matching the index's;
+where it does not, it reads and hashes the file — through the line-ending
+filter, with `core.autocrlf` — and, unlike `git status`, writes nothing
+back, so the next read hashes it again. Every file whose times moved without
+its content did costs that at every read, for as long as nothing else
+rewrites the index.
+
+A clone of a 1,039-commit, 2,300-file repository on Windows (i7-1185G7),
+every tracked file `touch`ed, `zig build bench`, three runs:
+
+| Case | Median |
+|---|---|
+| `status`, the repository's index | 4,323–5,211 ms |
+| `status, kept` — `git.StatusCache` | 119–169 ms |
+
+The app on it, idle, `tools/measure.ps1`: develop keeps a core busy — 99–101 %
+CPU, the 0.7 s poll asking again before a read ends. With the cache, 5.9–6.3 %
+with the window in the background (a 150 ms read every 3 s), the same private
+memory (85–87 MB against 80–91).
+
+`git.StatusCache` keeps the stats a read refreshed in a copy of the index —
+GitComet's approach; the repository's index is never written. The copy is a
+file in Zit's cache, given the repository index's own modification time:
+libgit2 times its racily-clean check by the file an index was read from, so
+an in-memory index would call nothing racy. It is copied again when the
+repository's index is rewritten (its size, time or inode moves).
+
+Tried first: keeping the repository open between reads with the copy set
+on it. Same times, but 26 MB more private memory — its object cache and pack
+windows, kept for nothing a read needs. Each read opens it again, as before,
+and only the copy is kept.
+
+On a clone with fresh stats, nothing to gain: `status` and `status, kept`
+both 125 ms.
 
 ## Bench, 2026-10-29: git/git
 
@@ -290,6 +365,113 @@ branches.
 
 The test backend draws in software: 51 ms of each of its frames is that,
 not Zit, and is left out of the numbers above.
+
+## Binary size (2026-11-01)
+
+What the release builds weigh, ReleaseSafe and stripped, as `zig build
+dist` makes them:
+
+| | develop | After | |
+|---|---|---|---|
+| Linux x86_64 | 12,716,344 | 6,823,832 | −46 % |
+| Linux aarch64 | 11,518,600 | 5,974,264 | −48 % |
+| Windows x86_64 | 12,843,520 | 7,284,736 | −43 % |
+| Linux x86_64 archive | 5.5 MB (0.1.2) | 3.2 MB | |
+
+Where it went, from the symbols of an unstripped Linux build grouped by
+origin: SDL 3.1 MB (27 %) — its dynamic API linked every function, the
+software blitters, audio, joysticks and HID, cameras — then Zit 1.5 MB
+(`appFrame` alone 194 KB), std 1.3 MB, dvui 1.1 MB (its debug window
+0.6 MB), libgit2 and zlib 1.1 MB, fonts 0.9 MB (the ten Bitstream Vera faces
+of dvui's Adwaita theme 578 KB of it), FreeType 0.8 MB, mbedtls 0.7 MB.
+
+Each change measured alone against develop, Linux / Windows, in bytes:
+
+| Change | Linux | Windows |
+|---|---|---|
+| C libraries: a section per function, so the linker drops each unused one | −1,450,480 | −861,184 |
+| SDL, FreeType, mbedtls built ReleaseSmall | −2,000,624 | −1,597,440 |
+| SDL: video and events only, no dynamic API | −1,061,984 | −921,088 |
+| dvui: no tree-sitter, no tinyfiledialogs | −230,384 | −1,779,200 with FreeType out too |
+| dvui: no debug window | −664,160 | −623,616 |
+| dvui: Adwaita's fonts | −513,376 | −513,536 |
+| No unwind tables (`-Dtrace` keeps them) | −788,928 | — |
+| Icon: its 256 px image as a PNG | — | −259,584 |
+| Unstable sorts where the order is total | −50,112 | −47,616 |
+| Loops for ten `inline for`s | −6,544 | −8,704 |
+
+The dvui and SDL changes have no option to ask for: the build edits a
+copy of dvui's sources and SDL's config header, finding each place by the
+text around it, and fails saying where when a new version has moved it.
+
+Tried and not kept:
+
+- **stb_truetype for FreeType**, a dvui option: −845,552 on Linux, but
+  side by side on Windows its text is wider and softer — a line of the
+  history shows three fewer letters. FreeType built for size draws the same
+  pixels as before (0 of 67,580 differ).
+- **LTO:** −534,080 alone, but +366,160 on top of the rest, and the
+  Windows build no longer links (`wmemcpy`, `isnan`).
+- **dvui's Zig code ReleaseSmall** too: −2.3 MB, but its safety checks gone
+  in code that runs every frame.
+- **No `.pdata` on Windows** (−397,312): x64 code there is unwound through
+  it, and the system's exception dispatch walks through Zit's frames.
+- **HIDAPI alone off:** SDL's build breaks; joysticks have to go with it.
+- `inline for`s in Zit were not where duplication weighs: dvui's nineteen
+  slider copies (gone with its debug window), std.json's typed parsing
+  (72 instances), dvui's `log.err`s.
+
+## Lists built whole (2026-11-01)
+
+Three lists still built a widget for every row, every frame, the menu
+open or the commit picked: a commit's files (capped at 2,000 rows for it),
+two commits compared (no cap) and the authors' menu, where each row also
+asked for its picture. They build the rows in sight now: `rowsInSight`
+reads where the list's box sits against the clip — the scroll area it is in,
+however deep — so a list in the middle of the commit pane, whose own scroll
+it is not, does it too; spacers stand for the rest, as in `sideRows`.
+
+`appFrame` alone, median of 30 frames in the test backend, Windows
+(i7-1185G7):
+
+| | Before | After |
+|---|---|---|
+| A commit of 2,000 files picked | 20.4 ms | 2.1 ms |
+| The authors' menu open, 300 authors | 12.3 ms | 4.3 ms |
+
+Two commits compared go through the same rows and `rowsInSight`, and were
+not timed apart. The 2,000-row cap is gone: a commit of 20,000 files lists
+them all at the same cost.
+
+## Quadratic, measured (2026-11-01)
+
+An audit of the code merged since 0.1.2 named four loops inside loops.
+Measured on Windows (i7-1185G7) before changing any:
+
+| What | Before | After |
+|---|---|---|
+| A frame with 5,000 changes, all picked (`appFrame`) | 62.4 ms | 2.9 ms — none picked: 3.0 |
+| `parseConflicts`, 500 regions in 1.3 MB | 87.9 ms | 0.6 ms |
+| Resolving its 250 safe regions at once | 270 ms | 1.0 ms |
+| A frame, 5,000 commits, the oldest picked | 5.0 ms | not changed |
+| A frame, 5,000 commits, 3,000 branches against none | +1.5 ms | not changed |
+
+- **Picked changes** were a list, asked "is this one picked?" for every
+  row drawn and, counting them for the "Stage 5" link, for every change of
+  the list: 5,000 × 5,000 path comparisons a frame. A set beside the list
+  now, as `hidden_set` is beside the hidden refs.
+- **A conflict region's base** was looked for from the region to the end of
+  the file — to the end each time with git's default markers, which have
+  none. Up to the region's split now.
+- **"Resolve the safe ones"** replaced one region at a time, a copy of the
+  whole file for each. One pass now (`git.replaceRegions`).
+- **`History.indexOf`** goes through the history, asked a few times a
+  frame for the commit picked: nothing to measure at 5,000 commits. Left.
+- **The refs drawn on each line** are looked up through all of them: 1.5 ms
+  a frame at 3,000 branches, over a 4.3 ms frame — only while something
+  moves, since nothing draws at rest. A table of refs by commit would have
+  to be kept in step with every history read; left, as the search's
+  filtering was.
 
 ## Wrong, measured
 

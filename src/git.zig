@@ -16,6 +16,9 @@ const std = @import("std");
 
 pub const c = @cImport({
     @cInclude("git2.h");
+    // `git_repository_set_index`, and the status's count of files hashed.
+    @cInclude("git2/sys/repository.h");
+    @cInclude("git2/sys/diff.h");
 });
 
 pub const Error = error{Git};
@@ -533,11 +536,10 @@ pub fn parseConflicts(gpa: std.mem.Allocator, text: []const u8) error{OutOfMemor
         }
 
         // Only a `|||||||` before the split is this region's base; a later one
-        // belongs to the next conflict down the file.
-        const base_at = blk: {
-            const at = findMarker(text, ours_start, BASE_MARK) orelse break :blk null;
-            break :blk if (at < split) at else null;
-        };
+        // belongs to the next conflict down the file. Looked for up to the
+        // split alone: git's default markers have none, and a search to the
+        // end of the file for each region was 88 ms for 500 of them in 1 MB.
+        const base_at = findMarker(text[0..split], ours_start, BASE_MARK);
 
         const ours_end = base_at orelse split;
         const end = lineEnd(text, close);
@@ -586,6 +588,29 @@ pub fn replaceRegion(
     try out.appendSlice(gpa, text[0..conflict.start]);
     for (parts) |part| try out.appendSlice(gpa, part);
     try out.appendSlice(gpa, text[conflict.end..]);
+    return out.toOwnedSlice(gpa);
+}
+
+/// `text` with each of `regions` — in the order they come in it — replaced
+/// by its entry in `with`, or left as it is where that is null. One pass:
+/// replacing them one at a time copied the whole text once a region.
+pub fn replaceRegions(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    regions: []const Conflict,
+    with: []const ?[]const u8,
+) error{OutOfMemory}![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.ensureTotalCapacity(gpa, text.len);
+    var at: usize = 0;
+    for (regions, with) |region, replacement| {
+        const part = replacement orelse continue;
+        try out.appendSlice(gpa, text[at..region.start]);
+        try out.appendSlice(gpa, part);
+        at = region.end;
+    }
+    try out.appendSlice(gpa, text[at..]);
     return out.toOwnedSlice(gpa);
 }
 
@@ -977,10 +1002,126 @@ pub const Work = struct {
     arena: std.heap.ArenaAllocator,
     staged: []Change = &.{},
     unstaged: []Change = &.{},
+    /// Files libgit2 had to read and hash to tell whether they changed: those
+    /// whose stat info no longer matched the index's.
+    hashed: usize = 0,
 
     pub fn deinit(self: *Work) void {
         self.arena.deinit();
         self.* = undefined;
+    }
+};
+
+/// Status reads that do not hash, every time, the files touched without
+/// being changed. libgit2 tells a file unchanged by its stat info matching
+/// the index's; where it does not — a file saved as it was, a checkout in the
+/// second the index was written — it reads and hashes the file, at every
+/// read, until something writes the index back with the new stats, as
+/// `git status` does. Zit does not write the repository's index: the
+/// refreshed stats are kept in a copy of it (GitComet keeps them in memory
+/// the same way). libgit2 times its racily-clean check by the file an index
+/// was read from, so the copy is a file too — Zit's, in its cache, given the
+/// repository index's own modification time — copied again whenever the
+/// repository's index is rewritten.
+///
+/// Only the copy is kept between reads. Each read opens the repository
+/// again, as a plain read does, lends it the copy, and frees it: a
+/// repository kept open keeps its object cache and its pack windows, 26 MB
+/// of private memory on a 2,300-file repository, for nothing a read needs.
+pub const StatusCache = struct {
+    /// The repository this is for, as it was opened; owned.
+    path: []u8,
+    copy: *c.git_index,
+    /// The copy's file, NUL-terminated; owned.
+    copy_path: [:0]u8,
+    /// The repository's index, NUL-terminated; owned.
+    source_path: [:0]u8,
+    /// The repository's index as it was when copied. git writes a new file
+    /// and renames it over the old, so a rewrite is a new inode as well.
+    source: ?Stamp = null,
+
+    const Stamp = struct {
+        size: u64,
+        mtime: std.Io.Timestamp,
+        inode: std.Io.File.INode,
+
+        fn of(stat: std.Io.File.Stat) Stamp {
+            return .{ .size = stat.size, .mtime = stat.mtime, .inode = stat.inode };
+        }
+
+        fn eql(a: Stamp, b: Stamp) bool {
+            return a.size == b.size and a.mtime.nanoseconds == b.mtime.nanoseconds and a.inode == b.inode;
+        }
+    };
+
+    /// For the repository containing `path`, its index's copy kept at
+    /// `copy_path` — a file this cache alone writes.
+    pub fn open(gpa: std.mem.Allocator, path: []const u8, copy_path: []const u8) Error!StatusCache {
+        var repo = try Repo.open(path);
+        defer repo.deinit();
+        const owned_path = gpa.dupe(u8, path) catch return error.Git;
+        errdefer gpa.free(owned_path);
+        const owned_copy = gpa.dupeZ(u8, copy_path) catch return error.Git;
+        errdefer gpa.free(owned_copy);
+        const source_path = std.fmt.allocPrintSentinel(gpa, "{s}index", .{repo.gitdir()}, 0) catch return error.Git;
+        errdefer gpa.free(source_path);
+        var copy: ?*c.git_index = null;
+        try check(c.git_index_open(&copy, owned_copy.ptr));
+        return .{ .path = owned_path, .copy = copy.?, .copy_path = owned_copy, .source_path = source_path };
+    }
+
+    pub fn deinit(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) void {
+        c.git_index_free(self.copy);
+        std.Io.Dir.cwd().deleteFile(io, self.copy_path) catch {};
+        gpa.free(self.path);
+        gpa.free(self.copy_path);
+        gpa.free(self.source_path);
+        self.* = undefined;
+    }
+
+    pub fn readWork(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) Error!Work {
+        try self.sync(gpa, io);
+        var repo = try Repo.open(self.path);
+        defer repo.deinit();
+        // The repository holds a reference to the copy until it is freed;
+        // this cache keeps its own.
+        try check(c.git_repository_set_index(repo.ptr, self.copy));
+        return repo.readWorkWith(gpa, .refresh);
+    }
+
+    /// The copy made again if the repository's index has been rewritten
+    /// since it was taken.
+    fn sync(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) Error!void {
+        const cwd = std.Io.Dir.cwd();
+        // Read before the file, so that a rewrite between the two shows as a
+        // change at the next read rather than hiding behind this one.
+        const stat = cwd.statFile(io, self.source_path, .{}) catch |err| switch (err) {
+            // No index yet — a repository with nothing staged: an empty one.
+            error.FileNotFound => {
+                if (self.source != null) {
+                    try check(c.git_index_clear(self.copy));
+                    cwd.deleteFile(io, self.copy_path) catch {};
+                    self.source = null;
+                }
+                return;
+            },
+            else => return error.Git,
+        };
+        if (self.source) |s| if (s.eql(Stamp.of(stat))) return;
+
+        const bytes = cwd.readFileAlloc(io, self.source_path, gpa, .unlimited) catch return error.Git;
+        defer gpa.free(bytes);
+        cwd.writeFile(io, .{ .sub_path = self.copy_path, .data = bytes }) catch return error.Git;
+        // The repository index's time, not the copy's: an entry written in
+        // the same second as that index stays racily clean — hashed — as
+        // libgit2 would have it against the original.
+        {
+            var file = cwd.openFile(io, self.copy_path, .{ .mode = .read_write }) catch return error.Git;
+            defer file.close(io);
+            file.setTimestamps(io, .{ .access_timestamp = .{ .new = stat.mtime }, .modify_timestamp = .{ .new = stat.mtime } }) catch return error.Git;
+        }
+        try check(c.git_index_read(self.copy, 1));
+        self.source = Stamp.of(stat);
     }
 };
 
@@ -1175,7 +1316,9 @@ pub const Repo = struct {
         git_error_clear();
 
         const items = refs.toOwnedSlice(arena) catch return error.Git;
-        std.mem.sort(Ref, items, {}, refLessThan);
+        // Unstable: no two refs have the same kind and name, so the order
+        // is total and a stable sort would only add code.
+        std.mem.sortUnstable(Ref, items, {}, refLessThan);
         return items;
     }
 
@@ -1394,6 +1537,13 @@ pub const Repo = struct {
 
     /// Staged and unstaged changes, in a fresh snapshot.
     pub fn readWork(self: Repo, gpa: std.mem.Allocator) Error!Work {
+        return self.readWorkWith(gpa, .read_only);
+    }
+
+    /// `.refresh` writes the stats of files found unchanged back into the
+    /// index — which must be a `StatusCache`'s copy, never the
+    /// repository's own.
+    fn readWorkWith(self: Repo, gpa: std.mem.Allocator, index: enum { read_only, refresh }) Error!Work {
         var out: Work = .{ .arena = .init(gpa) };
         errdefer out.arena.deinit();
         const arena = out.arena.allocator();
@@ -1408,10 +1558,13 @@ pub const Repo = struct {
             c.GIT_STATUS_OPT_RENAMES_HEAD_TO_INDEX |
             c.GIT_STATUS_OPT_RENAMES_INDEX_TO_WORKDIR |
             c.GIT_STATUS_OPT_SORT_CASE_INSENSITIVELY;
+        if (index == .refresh) opts.flags |= c.GIT_STATUS_OPT_UPDATE_INDEX;
 
         var list: ?*c.git_status_list = null;
         try check(c.git_status_list_new(&list, self.ptr, &opts));
         defer c.git_status_list_free(list);
+        var perf: c.git_diff_perfdata = .{ .version = c.GIT_DIFF_PERFDATA_VERSION };
+        if (c.git_status_list_get_perfdata(&perf, list) == 0) out.hashed = perf.oid_calculations;
 
         var staged: std.ArrayList(Change) = .empty;
         var unstaged: std.ArrayList(Change) = .empty;
@@ -2293,7 +2446,7 @@ test "refs sort by kind, with the checked-out branch first" {
         .{ .name = "main", .kind = .local, .target = undefined, .head = true },
         .{ .name = "aaa", .kind = .local, .target = undefined, .head = false },
     };
-    std.mem.sort(Ref, &refs, {}, refLessThan);
+    std.mem.sortUnstable(Ref, &refs, {}, refLessThan);
 
     try std.testing.expectEqualStrings("main", refs[0].name);
     try std.testing.expectEqualStrings("aaa", refs[1].name);
@@ -2692,6 +2845,41 @@ test "diff3 style keeps the base out of both sides" {
     try std.testing.expectEqualStrings("mine\n", found[0].ours);
     try std.testing.expectEqualStrings("original\n", found[0].base);
     try std.testing.expectEqualStrings("yours\n", found[0].theirs);
+}
+
+test "a region's base is its own, never the next region's" {
+    const text =
+        "<<<<<<< HEAD\nfirst mine\n=======\nfirst yours\n>>>>>>> other\n" ++
+        "between\n" ++
+        "<<<<<<< HEAD\nsecond mine\n||||||| base\nsecond original\n=======\nsecond yours\n>>>>>>> other\n";
+
+    const found = try parseConflicts(std.testing.allocator, text);
+    defer std.testing.allocator.free(found);
+
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+    try std.testing.expect(!found[0].has_base);
+    try std.testing.expectEqualStrings("first mine\n", found[0].ours);
+    try std.testing.expect(found[1].has_base);
+    try std.testing.expectEqualStrings("second original\n", found[1].base);
+}
+
+test "regions replaced in one pass, the others left as they were" {
+    const a = std.testing.allocator;
+    const text = "a\n<<<<<<< HEAD\n1\n=======\n2\n>>>>>>> o\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\n<<<<<<< HEAD\n5\n=======\n6\n>>>>>>> o\nd\n";
+    const found = try parseConflicts(a, text);
+    defer a.free(found);
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+
+    const out = try replaceRegions(a, text, found, &.{ "one\n", null, "five\n" });
+    defer a.free(out);
+    try std.testing.expectEqualStrings("a\none\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\nfive\nd\n", out);
+
+    // Each the same as replacing that region alone.
+    const first = try replaceRegion(a, text, found[0], &.{"one\n"});
+    defer a.free(first);
+    const only_first = try replaceRegions(a, text, found, &.{ "one\n", null, null });
+    defer a.free(only_first);
+    try std.testing.expectEqualStrings(first, only_first);
 }
 
 test "a marker in the middle of a line is not a conflict" {
