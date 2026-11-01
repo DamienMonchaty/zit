@@ -19,6 +19,9 @@ Every release of Zit, newest first. Downloads are on the
   when it is not 100 % — a click there resets it.
 
 ### Changed
+- On Windows, Zit draws through Direct3D 12 where there is one, rather
+  than 11: about 30 MB less memory of its own and half the wake-ups, the
+  same pixels.
 - The downloads are nearly half the size: 7.3 MB for Windows instead of
   12.5, 3.2 MB for the Linux archive instead of 5.5. Nothing Zit uses is
   gone — what is left out is code nothing calls: SDL's audio, joysticks and
