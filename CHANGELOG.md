@@ -195,6 +195,11 @@ Every release of Zit, newest first. Downloads are on the
   window while the history is read again: it is read on another thread, as
   after a fetch, the graph on screen staying until the new one is in. A
   read still out for the filter as it was is dropped, not shown first.
+- A commit's files, two commits compared and the authors' menu build only
+  the rows on screen, as the history and the changes do: a frame with a
+  commit of 2,000 files picked takes 2 ms of Zit's instead of 20, the menu
+  open on 300 authors 4 ms instead of 12, and only the authors shown ask for
+  their picture. A commit's files are no longer cut at 2,000.
 - Picking a commit of thousands of files no longer freezes the window for
   seconds: its files are listed without reading a line of them — 4 ms
   instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened

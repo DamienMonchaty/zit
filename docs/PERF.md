@@ -413,6 +413,28 @@ Tried and not kept:
   slider copies (gone with its debug window), std.json's typed parsing
   (72 instances), dvui's `log.err`s.
 
+## Lists built whole (2026-11-01)
+
+Three lists still built a widget for every row, every frame, the menu
+open or the commit picked: a commit's files (capped at 2,000 rows for it),
+two commits compared (no cap) and the authors' menu, where each row also
+asked for its picture. They build the rows in sight now: `rowsInSight`
+reads where the list's box sits against the clip — the scroll area it is in,
+however deep — so a list in the middle of the commit pane, whose own scroll
+it is not, does it too; spacers stand for the rest, as in `sideRows`.
+
+`appFrame` alone, median of 30 frames in the test backend, Windows
+(i7-1185G7):
+
+| | Before | After |
+|---|---|---|
+| A commit of 2,000 files picked | 20.4 ms | 2.1 ms |
+| The authors' menu open, 300 authors | 12.3 ms | 4.3 ms |
+
+Two commits compared go through the same rows and `rowsInSight`, and were
+not timed apart. The 2,000-row cap is gone: a commit of 20,000 files lists
+them all at the same cost.
+
 ## Wrong, measured
 
 - **"Zit burns 20–50 % CPU when idle."** 17.8 % then 49.5 % in the first two
