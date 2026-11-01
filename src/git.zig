@@ -576,6 +576,49 @@ pub fn resolveConflict(
     };
 }
 
+/// What turned one text into another, kept to turn it back: the span that
+/// changed — between what the two share at the start and at the end — as it
+/// was before; and the text after, by its length and hash, to tell the
+/// text it is applied to is still that one.
+pub const Splice = struct {
+    start: usize,
+    /// The span's length in the text after.
+    len_after: usize,
+    /// The span as it was; owned.
+    before: []u8,
+    after_len: usize,
+    after_hash: u64,
+
+    pub fn deinit(self: Splice, gpa: std.mem.Allocator) void {
+        gpa.free(self.before);
+    }
+};
+
+pub fn spliceBetween(gpa: std.mem.Allocator, before: []const u8, after: []const u8) error{OutOfMemory}!Splice {
+    const head = std.mem.indexOfDiff(u8, before, after) orelse before.len;
+    const room = @min(before.len, after.len) - head;
+    var tail: usize = 0;
+    while (tail < room and before[before.len - 1 - tail] == after[after.len - 1 - tail]) tail += 1;
+    return .{
+        .start = head,
+        .len_after = after.len - head - tail,
+        .before = try gpa.dupe(u8, before[head .. before.len - tail]),
+        .after_len = after.len,
+        .after_hash = std.hash.Wyhash.hash(0, after),
+    };
+}
+
+/// `after` turned back into the text `splice` was taken from; null when
+/// `after` is not the text it left.
+pub fn spliceUndo(gpa: std.mem.Allocator, after: []const u8, splice: Splice) error{OutOfMemory}!?[]u8 {
+    if (after.len != splice.after_len or std.hash.Wyhash.hash(0, after) != splice.after_hash) return null;
+    const out = try gpa.alloc(u8, after.len - splice.len_after + splice.before.len);
+    @memcpy(out[0..splice.start], after[0..splice.start]);
+    @memcpy(out[splice.start..][0..splice.before.len], splice.before);
+    @memcpy(out[splice.start + splice.before.len ..], after[splice.start + splice.len_after ..]);
+    return out;
+}
+
 /// `text` with one region, markers and all, replaced by `parts` end to end.
 pub fn replaceRegion(
     gpa: std.mem.Allocator,
@@ -2981,4 +3024,34 @@ test "a filter of picked branches walks those, and only those" {
     try std.testing.expect(filter.walks(.{ .name = "a", .kind = .local, .target = z, .head = false }));
     try std.testing.expect(!filter.walks(.{ .name = "b", .kind = .local, .target = z, .head = true }));
     try std.testing.expect(filter.walks(.{ .name = "c", .kind = .remote, .target = z, .head = false }));
+}
+
+
+test "a splice takes a text back to what it was, and only the text it left" {
+    const a = std.testing.allocator;
+    const before = "one\ntwo\n<<<<<<< ours\nmine\n=======\nyours\n>>>>>>> theirs\nthree\n";
+    const after = "one\ntwo\nmine\nthree\n";
+    const step = try spliceBetween(a, before, after);
+    defer step.deinit(a);
+    // Only what changed is kept — the region, markers and all — not the
+    // lines around it.
+    try std.testing.expectEqual(@as(usize, "one\ntwo\n".len), step.start);
+    try std.testing.expect(std.mem.indexOf(u8, step.before, "two") == null);
+    try std.testing.expect(std.mem.indexOf(u8, step.before, "three") == null);
+
+    const back = (try spliceUndo(a, after, step)).?;
+    defer a.free(back);
+    try std.testing.expectEqualStrings(before, back);
+
+    // Not the text it left: nothing to take back.
+    try std.testing.expectEqual(@as(?[]u8, null), try spliceUndo(a, "one\ntwo\nyours\nthree\n", step));
+
+    // Nothing changed, or everything: still the way back.
+    for ([_][2][]const u8{ .{ "same\n", "same\n" }, .{ "a\n", "b\nc\n" }, .{ "", "x" } }) |pair| {
+        const s = try spliceBetween(a, pair[0], pair[1]);
+        defer s.deinit(a);
+        const b = (try spliceUndo(a, pair[1], s)).?;
+        defer a.free(b);
+        try std.testing.expectEqualStrings(pair[0], b);
+    }
 }
