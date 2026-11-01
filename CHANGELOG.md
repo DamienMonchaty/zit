@@ -173,6 +173,13 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- Files touched without being changed — saved as they were, a branch
+  switched to and back, a tool that rewrites what it leaves alone — are
+  read and hashed once to see that nothing changed, not at every refresh:
+  2,300 of them made each read of the working tree 4–5 s on Windows, one
+  core kept busy, and it is 150 ms again after the first. Zit keeps what it
+  learned in a copy of the index of its own; the repository's index is not
+  written.
 - Picking a commit of thousands of files no longer freezes the window for
   seconds: its files are listed without reading a line of them — 4 ms
   instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened

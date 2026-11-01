@@ -70,6 +70,43 @@ And keep the copy on disk, not in `/tmp`: on tmpfs a mapped file's pages are
 counted as the process's own dirty memory — 12 MB of git's pack index and
 packs showed up as Zit's until the clone moved (`.zig-cache/measure/`).
 
+## Files touched, not changed (2026-11-01)
+
+libgit2 tells a file unchanged by its stat info matching the index's;
+where it does not, it reads and hashes the file — through the line-ending
+filter, with `core.autocrlf` — and, unlike `git status`, writes nothing
+back, so the next read hashes it again. Every file whose times moved without
+its content did costs that at every read, for as long as nothing else
+rewrites the index.
+
+A clone of a 1,039-commit, 2,300-file repository on Windows (i7-1185G7),
+every tracked file `touch`ed, `zig build bench`, three runs:
+
+| Case | Median |
+|---|---|
+| `status`, the repository's index | 4,323–5,211 ms |
+| `status, kept` — `git.StatusCache` | 119–169 ms |
+
+The app on it, idle, `tools/measure.ps1`: develop keeps a core busy — 99–101 %
+CPU, the 0.7 s poll asking again before a read ends. With the cache, 5.9–6.3 %
+with the window in the background (a 150 ms read every 3 s), the same private
+memory (85–87 MB against 80–91).
+
+`git.StatusCache` keeps the stats a read refreshed in a copy of the index —
+GitComet's approach; the repository's index is never written. The copy is a
+file in Zit's cache, given the repository index's own modification time:
+libgit2 times its racily-clean check by the file an index was read from, so
+an in-memory index would call nothing racy. It is copied again when the
+repository's index is rewritten (its size, time or inode moves).
+
+Tried first: keeping the repository open between reads with the copy set
+on it. Same times, but 26 MB more private memory — its object cache and pack
+windows, kept for nothing a read needs. Each read opens it again, as before,
+and only the copy is kept.
+
+On a clone with fresh stats, nothing to gain: `status` and `status, kept`
+both 125 ms.
+
 ## Bench, 2026-10-29: git/git
 
 A clone of git/git (85,906 commits, 324 MB of `.git`), ReleaseSafe, Intel

@@ -1779,6 +1779,7 @@ fn appInit(win: *dvui.Window) !void {
         migrateFromZync(dir, "zit/avatars");
         avatars.init(gpa, app_io, dir);
     }
+    initStatusCache(init.environ_map.*);
     pr.init(gpa, app_io);
     github.init(gpa, app_io, config_dir.items);
 
@@ -1846,6 +1847,7 @@ fn appDeinit(win: *dvui.Window) void {
     if (work_load) |load| load.free();
     work_load = null;
     closeRepo();
+    status_cache_file.deinit(gpa);
     git.shutdown();
     avatars.deinit();
     pr.deinit();
@@ -2370,6 +2372,16 @@ const WorkLoad = struct {
     fn run(self: *WorkLoad) void {
         defer wakeUi();
         defer self.done.store(true, .release);
+        if (status_cache_file.items.len > 0 and status_cache_lock.tryLock()) {
+            defer status_cache_lock.unlock(app_io);
+            defer if (status_cache_drop.swap(false, .acq_rel)) dropStatusCache();
+            if (statusCacheFor(self.path)) |cache| {
+                if (cache.readWork(gpa, app_io)) |w| {
+                    self.work = w;
+                    return;
+                } else |_| dropStatusCache();
+            }
+        }
         var r = git.Repo.open(self.path) catch return;
         defer r.deinit();
         self.work = r.readWork(gpa) catch null;
@@ -2382,6 +2394,53 @@ const WorkLoad = struct {
         gpa.destroy(self);
     }
 };
+
+/// The status reads' copy of the index (`git.StatusCache`), kept from one
+/// read to the next, so that a file touched without being changed is hashed
+/// once rather than at every read. One read holds it at a time — a read
+/// after a command, with the timer's still out, reads without it — and it is
+/// for the repository last read.
+var status_cache: ?git.StatusCache = null;
+var status_cache_lock: std.Io.Mutex = .init;
+/// Set by `closeRepo` while a read holds the cache: dropped as that read
+/// ends, with its file.
+var status_cache_drop: std.atomic.Value(bool) = .init(false);
+/// Where the index's copy is kept: Zit's cache, under a name of this
+/// process's own. Empty — no cache — when there is no cache folder.
+var status_cache_file: std.ArrayList(u8) = .empty;
+
+/// The cache for `path`, opened — and the last repository's dropped — if
+/// it is not that one's. Called with `status_cache_lock` held.
+fn statusCacheFor(path: []const u8) ?*git.StatusCache {
+    if (status_cache) |cache| if (!std.mem.eql(u8, cache.path, path)) dropStatusCache();
+    if (status_cache == null) status_cache = git.StatusCache.open(gpa, path, status_cache_file.items) catch return null;
+    return &status_cache.?;
+}
+
+/// Called with `status_cache_lock` held, or with no read left to hold it.
+fn dropStatusCache() void {
+    if (status_cache) |*cache| cache.deinit(gpa, app_io);
+    status_cache = null;
+}
+
+/// The closed repository's cache let go of: now, or as the read holding it
+/// ends — which is not waited for, as `closeRepo` waits for no read.
+fn releaseStatusCache() void {
+    if (status_cache_lock.tryLock()) {
+        defer status_cache_lock.unlock(app_io);
+        dropStatusCache();
+    } else status_cache_drop.store(true, .release);
+}
+
+fn initStatusCache(env: std.process.Environ.Map) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = store.appDir(env, &buf, .cache, "") orelse return;
+    std.Io.Dir.cwd().createDirPath(app_io, dir) catch return;
+    var id: [8]u8 = undefined;
+    app_io.random(&id);
+    const sep = if (@import("builtin").os.tag == .windows) "\\" else "/";
+    status_cache_file.print(gpa, "{s}" ++ sep ++ "index-{x}", .{ dir, id[0..] }) catch status_cache_file.clearRetainingCapacity();
+}
 
 var work_load: ?*WorkLoad = null;
 var work_gen: u64 = 0;
@@ -2722,6 +2781,7 @@ fn closeRepo() void {
     // A status read still out is not waited for — on a large tree, or on
     // Windows, that is the tab switch frozen. `collectWorkLoad` throws its
     // result away for being another repository's, and frees it.
+    releaseStatusCache();
     if (repo) |*r| r.deinit();
     repo = null;
     if (history) |*h| h.deinit();
@@ -21135,6 +21195,78 @@ fn makeTestRepo(tmp: *std.testing.TmpDir, dir: []const u8, path: []const u8, dat
     try tmp.dir.writeFile(app_io, .{ .sub_path = path, .data = data });
     try expectGit(dir, &.{ "add", "-A" });
     try expectGit(dir, &.{ "commit", "-qm", "base" });
+}
+
+test "files touched without being changed are hashed once, and the repository's index is never written" {
+    app_io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var copy_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const copy = try std.fmt.bufPrint(&copy_buf, ".zig-cache/tmp/{s}/index", .{scratch.sub_path});
+
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b\n" });
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "c.txt", .data = "c\n" });
+    try expectGit(dir, &.{ "add", "-A" });
+    try expectGit(dir, &.{ "commit", "-qm", "two more" });
+
+    // Touched: the same bytes, another time — 2001, well before the index.
+    const touched: std.Io.Timestamp = .{ .nanoseconds = 978_307_200 * std.time.ns_per_s };
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| {
+        var f = try tmp.dir.openFile(app_io, name, .{ .mode = .read_write });
+        defer f.close(app_io);
+        try f.setTimestamps(app_io, .{ .access_timestamp = .{ .new = touched }, .modify_timestamp = .{ .new = touched } });
+    }
+    const index_before = try tmp.dir.readFileAlloc(app_io, ".git/index", a, .unlimited);
+    defer a.free(index_before);
+    const stat_before = try tmp.dir.statFile(app_io, ".git/index", .{});
+
+    var cache = try git.StatusCache.open(a, dir, copy);
+    defer cache.deinit(a, app_io);
+
+    // The first read hashes the three to find them unchanged; the next,
+    // none: their new stats are in the copy.
+    var first = try cache.readWork(a, app_io);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 0), first.unstaged.len);
+    try std.testing.expectEqual(@as(usize, 3), first.hashed);
+    var second = try cache.readWork(a, app_io);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 0), second.unstaged.len);
+    try std.testing.expectEqual(@as(usize, 0), second.hashed);
+
+    // The repository's own index is as it was — so a plain read still
+    // hashes them all.
+    const index_after = try tmp.dir.readFileAlloc(app_io, ".git/index", a, .unlimited);
+    defer a.free(index_after);
+    try std.testing.expectEqualSlices(u8, index_before, index_after);
+    try std.testing.expectEqual(stat_before.mtime.nanoseconds, (try tmp.dir.statFile(app_io, ".git/index", .{})).mtime.nanoseconds);
+    var r = try git.Repo.open(dir);
+    defer r.deinit();
+    var plain = try r.readWork(a);
+    defer plain.deinit();
+    try std.testing.expectEqual(@as(usize, 3), plain.hashed);
+
+    // A change is still one.
+    try tmp.dir.writeFile(app_io, .{ .sub_path = "b.txt", .data = "b, edited\n" });
+    var edited = try cache.readWork(a, app_io);
+    defer edited.deinit();
+    try std.testing.expectEqual(@as(usize, 1), edited.unstaged.len);
+    try std.testing.expectEqualStrings("b.txt", edited.unstaged[0].path);
+
+    // The repository's index rewritten by git: the copy taken again.
+    try expectGit(dir, &.{ "add", "b.txt" });
+    var staged = try cache.readWork(a, app_io);
+    defer staged.deinit();
+    try std.testing.expectEqual(@as(usize, 1), staged.staged.len);
+    try std.testing.expectEqual(@as(usize, 0), staged.unstaged.len);
 }
 
 // Twelve lines, edited at both ends: far enough apart that git's three lines of
