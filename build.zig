@@ -223,7 +223,44 @@ fn addZit(
         exe.link_data_sections = true;
     }
 
+    // SDL as Zit uses it: video and events, nothing else. Its dynamic API
+    // — a table of every SDL function, so that `SDL3_DYNAMIC_API` can swap a
+    // newer SDL in at run time — keeps all of them linked, used or not;
+    // `SDL_THREAD_SAFETY_ANALYSIS` is the switch SDL_dynapi.h leaves for
+    // turning it off (on clang its only other effect is attributes). And
+    // audio, joysticks (and with them HID), haptics, sensors, cameras and
+    // power are compiled out: dvui starts SDL with `SDL_INIT_VIDEO |
+    // SDL_INIT_EVENTS`.
+    if (Linked.of(b, exe).named("SDL3")) |sdl| leanSdl(sdl);
+
     return exe;
+}
+
+fn leanSdl(sdl: *std.Build.Step.Compile) void {
+    sdl.root_module.addCMacro("SDL_THREAD_SAFETY_ANALYSIS", "1");
+    for (sdl.root_module.include_dirs.items) |dir| switch (dir) {
+        .config_header_step => |config| if (std.mem.eql(u8, config.include_path, "SDL_build_config.h")) {
+            const unused = [_][]const u8{ "SDL_AUDIO", "SDL_JOYSTICK", "SDL_HAPTIC", "SDL_SENSOR", "SDL_CAMERA", "SDL_POWER" };
+            var it = config.values.iterator();
+            while (it.next()) |entry| for (unused) |prefix| {
+                if (!std.mem.startsWith(u8, entry.key_ptr.*, prefix)) continue;
+                if (std.mem.endsWith(u8, entry.key_ptr.*, "_DISABLED")) {
+                    entry.value_ptr.* = .{ .boolean = true };
+                } else if (entry.value_ptr.* == .boolean) {
+                    entry.value_ptr.* = .{ .boolean = false };
+                }
+            };
+        },
+        else => {},
+    };
+    // With joysticks and sensors compiled out SDL falls back on its dummy
+    // drivers, which its build leaves out on Windows (both) and Linux (the
+    // joystick's).
+    const sdl_src = sdl.step.owner.path("src");
+    sdl.root_module.addCSourceFiles(.{ .root = sdl_src, .files = &.{"joystick/dummy/SDL_sysjoystick.c"} });
+    if (sdl.rootModuleTarget().os.tag == .windows) {
+        sdl.root_module.addCSourceFiles(.{ .root = sdl_src, .files = &.{"sensor/dummy/SDL_dummysensor.c"} });
+    }
 }
 
 /// The static libraries `exe` links, at any depth — dvui's SDL, libgit2's
