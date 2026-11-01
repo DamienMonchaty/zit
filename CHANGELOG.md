@@ -190,6 +190,11 @@ Every release of Zit, newest first. Downloads are on the
   core kept busy, and it is 150 ms again after the first. Zit keeps what it
   learned in a copy of the index of its own; the repository's index is not
   written.
+- Changing what the graph shows — a branch hidden or shown alone,
+  First-parent, the remotes, an author — and Refresh no longer stop the
+  window while the history is read again: it is read on another thread, as
+  after a fetch, the graph on screen staying until the new one is in. A
+  read still out for the filter as it was is dropped, not shown first.
 - Picking a commit of thousands of files no longer freezes the window for
   seconds: its files are listed without reading a line of them — 4 ms
   instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened

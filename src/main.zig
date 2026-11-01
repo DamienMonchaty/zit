@@ -2355,6 +2355,18 @@ fn refreshHistory() void {
     startHistoryLoadQuiet();
 }
 
+/// The history read again for a filter just changed — a branch hidden or
+/// shown alone, First-parent, the remotes, an author — on another thread, as
+/// `refreshHistory` reads it: a click no longer stops the window for a
+/// revwalk, a second on a history the size of git's. A read already out
+/// was for the filter as it was: retired at once rather than waited for and
+/// shown first.
+fn refilterHistory() void {
+    if (@import("builtin").is_test) return reloadHistory();
+    history_again = false;
+    startHistoryLoadQuiet();
+}
+
 // === Working tree, read in the background ===
 //
 // The status is re-read on the poll timer. On Linux that is a few
@@ -3138,7 +3150,7 @@ fn runAction() bool {
         .network => startJob(),
         .tabs => runTabAction(),
         .refresh => {
-            reloadHistory();
+            refreshHistory();
             workChanged("Refreshing");
         },
         .open_repo => promptOpenRepo(),
@@ -4871,14 +4883,10 @@ fn appFrame() !dvui.App.Result {
     // until the poll timer comes round.
     if (runAction()) dvui.refresh(null, @src(), null);
 
-    if (graph_filter_dirty) {
+    if (graph_filter_dirty or authors_dirty) {
         graph_filter_dirty = false;
-        reloadHistory();
-        dvui.refresh(null, @src(), null);
-    }
-    if (authors_dirty) {
         authors_dirty = false;
-        refreshHistory();
+        refilterHistory();
         dvui.refresh(null, @src(), null);
     }
 
@@ -14776,7 +14784,7 @@ fn authorsChanged() void {
     graph_scroll.viewport.y = 0;
     // Not in the middle of a frame: the rows being drawn index the history
     // as it is. Once the frame is done.
-    if (in_frame) authors_dirty = true else refreshHistory();
+    if (in_frame) authors_dirty = true else refilterHistory();
 }
 
 var authors_dirty = false;
