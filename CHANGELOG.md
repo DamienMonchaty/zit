@@ -85,6 +85,15 @@ Every release of Zit, newest first. Downloads are on the
   suggestion reads as the change it is, the lines it replaces and what with,
   and Apply suggestion writes it into the file here: on the request's
   branch, and only while those lines still read as the comment saw them.
+  Its button then says Applied here, with See the change. A conversation
+  with a suggestion shows its code once: the lines around in grey, those it
+  replaces in red, what with in green. Under a file in Files changed, a
+  conversation is headed by its line — "Line 3" — not the file's name again.
+- A pull request opens with its head at once — its number, title, author
+  and branches, from the list — the rest loading under it, rather than a
+  blank pane. Read again, after an action or from its refresh icon, it stays
+  on screen, with the loading dots and what is being done — "Resolving",
+  "Reading" — in place of the icon.
   A reply can resolve its conversation in the same click, and `Ctrl Enter`
   sends it. The request's head and tabs run from one edge of the pane to
   the other.
@@ -160,6 +169,10 @@ Every release of Zit, newest first. Downloads are on the
 - Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
 
 ### Fixed
+- A merged or closed pull request's line says so — "Merged into main" —
+  rather than "Ready to merge", and GitHub is no longer asked about it every
+  few seconds. A description's task list shows its boxes, ticked or not:
+  they came out blank.
 - A pull request merged or closed from Zit leaves the list at once, and
   shows as merged or closed, rather than after a refresh by hand: it stays
   out of the lists GitHub sends back before it has caught up. Its branch

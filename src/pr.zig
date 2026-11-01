@@ -666,6 +666,11 @@ const DetailFetch = struct {
     }
 };
 
+/// Whether a read of the request in full is out.
+pub fn detailLoading() bool {
+    return detail_worker != null;
+}
+
 /// Read request `number` in full, off the UI thread.
 pub fn loadDetail(cwd: []const u8, number: u32) void {
     if (!initialised or host == .none or !github.signedIn()) return;
