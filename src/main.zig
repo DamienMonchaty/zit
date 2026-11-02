@@ -12805,7 +12805,7 @@ fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []c
 /// while it is open.
 fn menuSubRow(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8) ?dvui.Rect.Natural {
     var mi = dvui.menuItem(src, .{ .submenu = true }, .{
-        .tag = frameTag("menu", caption),
+        .tag = menuTag(caption),
         .expand = .horizontal,
         .corners = style.radius.input,
         .color_fill_hover = .{ .color = style.accentDim() },
@@ -12864,6 +12864,26 @@ fn focusOnce(id: dvui.Id) void {
     if (dvui.dataGet(null, id, "_zit_focused", bool) != null) return;
     dvui.dataSet(null, id, "_zit_focused", true);
     dvui.focusWidget(id, null, null);
+}
+
+/// "menu:caption", once per frame: a menu still closing the frame another
+/// opens would otherwise give two rows the same tag, which dvui reports —
+/// in red, and in its log.
+fn menuTag(caption: []const u8) ?[]const u8 {
+    const S = struct {
+        var frame: i128 = -1;
+        var seen: std.ArrayList(u64) = .empty;
+    };
+    const now = dvui.frameTimeNS();
+    if (now != S.frame) {
+        S.frame = now;
+        S.seen.clearRetainingCapacity();
+    }
+    const h = std.hash.Wyhash.hash(0, caption);
+    if (std.mem.indexOfScalar(u64, S.seen.items, h) != null) return null;
+    // Kept for the run, not from `gpa`: a few hashes a frame, reused.
+    S.seen.append(std.heap.page_allocator, h) catch return null;
+    return frameTag("menu", caption);
 }
 
 /// "prefix:name", allocated for this frame only: a tag a test can look a
@@ -15289,7 +15309,7 @@ fn menuIconAt(src: std.builtin.SourceLocation, id: usize, icon: []const u8, capt
 fn menuIconId(src: std.builtin.SourceLocation, id: usize, icon: []const u8, caption: []const u8, danger: bool) bool {
     var mi = dvui.menuItem(src, .{}, .{
         .id_extra = id,
-        .tag = frameTag("menu", caption),
+        .tag = menuTag(caption),
         .expand = .horizontal,
         .corners = style.radius.input,
         // Lit with a tint of the accent, not filled with it: the row
