@@ -59,6 +59,9 @@ pub const size = struct {
     pub const graph_meta: f32 = 10.5;
     /// Sha and date: a mono face reads larger than Inter at the same size.
     pub const graph_mono: f32 = 10;
+    /// A diff's code: as the commit list's messages read, a mono face a
+    /// half point under them.
+    pub const code: f32 = 11;
 };
 
 pub fn tab() dvui.Font {
@@ -114,6 +117,11 @@ pub fn section() dvui.Font {
 
 pub fn title() dvui.Font {
     return .find(.{ .family = UI_FAMILY, .size = size.title, .weight = .bold });
+}
+
+/// Code in a diff or a blame: its lines, signs and numbers.
+pub fn code() dvui.Font {
+    return .find(.{ .family = MONO_FAMILY, .size = size.code });
 }
 
 pub fn mono() dvui.Font {

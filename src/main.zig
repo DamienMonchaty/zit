@@ -6131,13 +6131,19 @@ fn foldedRun(id: usize, author: []const u8, hidden: usize) bool {
     return chipButton(@src(), dvui.entypo.chevron_small_down, std.fmt.bufPrint(&buf, "Show {d} more from {s}", .{ hidden, author }) catch "Show more", false);
 }
 
-/// A heading in a comment: above its text, not the same size as it.
-const MD_HEADING_SIZE: f32 = 15;
+/// A heading in a comment: this much over its text, not the same size.
+const MD_HEADING_STEP: f32 = 2.5;
 
 /// A comment's text, read the way the host would show it — enough of
 /// Markdown to read: headings, lists, quotes, code blocks; `**` and `` ` ``
 /// marks dropped rather than shown.
 fn markdownBody(body: []const u8) void {
+    markdownText(body, style.body());
+}
+
+/// As `markdownBody`, its text at `base`: a commit's message reads at the
+/// panel's size, a comment at the page's.
+fn markdownText(body: []const u8, base: dvui.Font) void {
     const a = dvui.currentWindow().arena();
     var code: ?*dvui.BoxWidget = null;
     defer if (code) |c| c.deinit();
@@ -6175,10 +6181,10 @@ fn markdownBody(body: []const u8) void {
         if (trimmed[0] == '#') {
             const words = std.mem.trimStart(u8, clean, "# ");
             var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = n, .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.xs } });
-            tl.addText(words, .{ .font = style.bodyBold().withSize(MD_HEADING_SIZE), .color_text = .{ .color = style.text() } });
+            tl.addText(words, .{ .font = style.bodyBold().withSize(base.size + MD_HEADING_STEP), .color_text = .{ .color = style.text() } });
             tl.deinit();
         } else if (std.mem.startsWith(u8, trimmed, "- ") or std.mem.startsWith(u8, trimmed, "* ") or std.mem.startsWith(u8, trimmed, "+ ")) {
-            var item = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = n, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.sm } });
+            var item = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = n, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.sm, .y = style.space.xs, .h = style.space.xs } });
             defer item.deinit();
             const checked = std.mem.startsWith(u8, trimmed[2..], "[x]") or std.mem.startsWith(u8, trimmed[2..], "[X]");
             const box_item = checked or std.mem.startsWith(u8, trimmed[2..], "[ ]");
@@ -6197,9 +6203,10 @@ fn markdownBody(body: []const u8) void {
                 });
                 if (checked) dvui.icon(@src(), "md_tick", dvui.entypo.check, .{ .fill_color = .{ .color = style.textOnAccent() } }, .{ .min_size_content = .{ .w = 9, .h = 9 }, .gravity_x = 0.5, .gravity_y = 0.5 });
                 tick.deinit();
-            } else dvui.label(@src(), "•", .{}, .{ .font = style.body(), .color_text = .{ .color = style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+            } else dvui.label(@src(), "•", .{}, .{ .font = base, .color_text = .{ .color = style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(if (box_item) std.mem.trimStart(u8, clean[2..], "[xX ] ") else clean[2..], .{ .font = style.body(), .color_text = .{ .color = style.text() } });
+            const words = std.mem.trimStart(u8, trimmed[2..], " ");
+            addInline(tl, if (box_item) std.mem.trimStart(u8, words, "[xX ] ") else words, base, style.text());
             tl.deinit();
         } else if (trimmed[0] == '>') {
             // Filled as the card under it: dvui fills a box with a border on
@@ -6207,13 +6214,28 @@ fn markdownBody(body: []const u8) void {
             var quote = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = n, .expand = .horizontal, .background = true, .color_fill = .{ .color = style.surface() }, .border = .{ .x = 3 }, .color_border = .{ .color = style.border() }, .padding = .{ .x = style.space.sm }, .margin = .{ .y = 2, .h = 2 } });
             defer quote.deinit();
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(std.mem.trimStart(u8, clean, "> "), .{ .font = style.body(), .color_text = .{ .color = style.textMuted() } });
+            addInline(tl, std.mem.trimStart(u8, trimmed, "> "), base, style.textMuted());
             tl.deinit();
         } else {
             var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = n, .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(clean, .{ .font = style.body(), .color_text = .{ .color = style.text() } });
+            addInline(tl, trimmed, base, style.text());
             tl.deinit();
         }
+    }
+}
+
+/// A line's words into `tl`: `` `code` `` in the mono face and the accent,
+/// the rest without its `**` marks.
+fn addInline(tl: *dvui.TextLayoutWidget, text: []const u8, base: dvui.Font, ink: dvui.Color) void {
+    const a = dvui.currentWindow().arena();
+    var parts = std.mem.splitScalar(u8, text, '`');
+    var code = false;
+    while (parts.next()) |part| : (code = !code) {
+        if (part.len == 0) continue;
+        if (code)
+            tl.addText(part, .{ .font = style.mono().withSize(base.size - 0.5), .color_text = .{ .color = style.accent() } })
+        else
+            tl.addText(plainInline(a, part), .{ .font = base, .color_text = .{ .color = ink } });
     }
 }
 
@@ -18479,7 +18501,7 @@ fn codeLine(file: git.FileDiff, index: usize) void {
         .deletion => style.danger(),
         else => style.textFaint(),
     };
-    dvui.label(@src(), "{s}", .{git.linePrefix(line.kind)}, .{ .font = style.mono(), .color_text = .{ .color = sign_color }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{s}", .{git.linePrefix(line.kind)}, .{ .font = style.code(), .color_text = .{ .color = sign_color }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
 
     var tokens_buf: [128]syntax.Token = undefined;
     var tokens = syntax.tokenize(syntax.langOf(file.path), text, &tokens_buf);
@@ -18515,7 +18537,7 @@ fn codeLine(file: git.FileDiff, index: usize) void {
             if (b <= a) continue;
             const marked = if (span) |sp| a >= sp[0] and b <= sp[1] else false;
             tl.addText(text[a..b], .{
-                .font = style.mono(),
+                .font = style.code(),
                 .color_text = .{ .color = syntaxColor(tok.kind) },
                 .color_fill = if (marked) .{ .color = strong } else null,
             });
@@ -18630,7 +18652,7 @@ fn lineNumber(src: std.builtin.SourceLocation, n: u32) void {
     });
     defer column.deinit();
     dvui.label(@src(), "{s}", .{text}, .{
-        .font = style.mono(),
+        .font = style.code(),
         .color_text = .{ .color = style.textFaint() },
         .gravity_y = 0.5,
         .gravity_x = 1.0,
@@ -18794,7 +18816,7 @@ fn commitDetail(id: git.Oid) void {
         if (split.text.len > 0) {
             var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
             defer body.deinit();
-            markdownBody(unwrapMessage(dvui.currentWindow().arena(), split.text));
+            markdownText(unwrapMessage(dvui.currentWindow().arena(), split.text), style.small());
         }
 
         // The trailers apart, in the mono face git wrote them in;
@@ -18994,21 +19016,33 @@ fn commitFiles(id: git.Oid) void {
 
     if (!commit_all_files) {
         if (diff_all.len == 0) return sidebarNote(@src(), "This commit changed no files.");
-        fileCounts();
     }
+    if (diff_all.len > 0) fileFilters();
 
-    const paths_n = if (commit_all_files) blk: {
+    const total_n = if (commit_all_files) blk: {
         loadTreeFiles(id);
         break :blk tree_files.paths.len;
     } else diff_all.len;
     const Files = struct {
         fn path(all: bool, i: usize) []const u8 {
-            return if (all) tree_files.paths[i] else diff_all[i].path;
+            const at = files_shown[i];
+            return if (all) tree_files.paths[at] else diff_all[at].path;
         }
         fn status(all: bool, i: usize) git.Status {
+            const at = files_shown[i];
+            return if (all) (if (at < tree_files.status.len) tree_files.status[at] else .unchanged) else diff_all[at].status;
+        }
+        fn raw(all: bool, i: usize) git.Status {
             return if (all) (if (i < tree_files.status.len) tree_files.status[i] else .unchanged) else diff_all[i].status;
         }
     };
+    {
+        var shown: std.ArrayList(usize) = .empty;
+        const a = dvui.currentWindow().arena();
+        for (0..total_n) |i| if (file_filter.matches(Files.raw(commit_all_files, i))) shown.append(a, i) catch {};
+        files_shown = shown.items;
+    }
+    const paths_n = files_shown.len;
 
     const rh = style.row_height;
     var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
@@ -19017,7 +19051,7 @@ fn commitFiles(id: git.Oid) void {
     if (changes_view != .tree) {
         const in_sight = rowsInSight(list.data(), paths_n, rh);
         rowsSpacer(@src(), 0, in_sight.first, rh);
-        for (in_sight.first..in_sight.last) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), i, null);
+        for (in_sight.first..in_sight.last) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), files_shown[i], null);
         rowsSpacer(@src(), 1, paths_n - in_sight.last, rh);
         return;
     }
@@ -19028,6 +19062,7 @@ fn commitFiles(id: git.Oid) void {
     key.update(std.mem.asBytes(&paths_n));
     const files: usize = if (commit_all_files) @intFromPtr(tree_files.paths.ptr) else @intFromPtr(diff_all.ptr);
     key.update(std.mem.asBytes(&files));
+    key.update(std.mem.asBytes(&file_filter));
     commit_tree.build(key.final(), paths_n, commit_all_files, Files.path);
 
     // The lines unfolded: walked whole, a few pointers each, to know how
@@ -19045,7 +19080,7 @@ fn commitFiles(id: git.Oid) void {
         if (row >= in_sight.last) break;
         if (row < in_sight.first) continue;
         if (shown.row.file) |f| {
-            fileRow(@src(), id, Files.path(commit_all_files, f), Files.status(commit_all_files, f), f, @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON);
+            fileRow(@src(), id, Files.path(commit_all_files, f), Files.status(commit_all_files, f), files_shown[f], @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON);
         } else if (folderLine(@src(), shown.index, shown.row, shown.folded, null)) {
             fold = shown.row.path;
         }
@@ -19272,28 +19307,100 @@ fn detailLine(src: std.builtin.SourceLocation, id: usize, caption: []const u8, v
     dvui.label(@src(), "{s}", .{value}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
 }
 
-/// "2 added · 1 deleted · 3 modified", over a commit's files.
-fn fileCounts() void {
-    var n = [_]usize{0} ** 4;
-    for (diff_all) |file| switch (file.status) {
-        .added => n[0] += 1,
-        .deleted => n[1] += 1,
-        .renamed => n[2] += 1,
-        else => n[3] += 1,
-    };
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .h = style.space.xs } });
+/// Which of a commit's files the list shows: all of them, or those of one
+/// kind.
+const FileFilter = enum {
+    all,
+    modified,
+    added,
+    deleted,
+    renamed,
+
+    fn matches(self: FileFilter, status: git.Status) bool {
+        return switch (self) {
+            .all => true,
+            .added => status == .added,
+            .deleted => status == .deleted,
+            .renamed => status == .renamed,
+            .modified => status != .added and status != .deleted and status != .renamed and status != .unchanged,
+        };
+    }
+
+    fn icon(self: FileFilter) []const u8 {
+        return switch (self) {
+            .all => dvui.entypo.documents,
+            .modified => dvui.entypo.edit,
+            .added => dvui.entypo.plus,
+            .deleted => dvui.entypo.minus,
+            .renamed => dvui.entypo.arrow_long_right,
+        };
+    }
+
+    fn hue(self: FileFilter) dvui.Color {
+        return switch (self) {
+            .all => style.textMuted(),
+            .modified => style.fileStatusColor(.modified),
+            .added => style.fileStatusColor(.added),
+            .deleted => style.fileStatusColor(.deleted),
+            .renamed => style.fileStatusColor(.renamed),
+        };
+    }
+};
+var file_filter: FileFilter = .all;
+
+/// Over a commit's files, a tab per kind: its mark in its colour and how
+/// many — the one picked lit, the empty ones faded. A click shows only those.
+fn fileFilters() void {
+    var n = std.enums.EnumArray(FileFilter, usize).initFill(0);
+    for (diff_all) |file| {
+        n.getPtr(.all).* += 1;
+        for ([_]FileFilter{ .modified, .added, .deleted, .renamed }) |f| {
+            if (f.matches(file.status)) n.getPtr(f).* += 1;
+        }
+    }
+    // A kind this commit has none of shows nothing: back to all of them.
+    if (n.get(file_filter) == 0) file_filter = .all;
+
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.sm } });
     defer line.deinit();
-    const kinds = [_]struct { []const u8, dvui.Color }{
-        .{ "added", style.success() },
-        .{ "deleted", style.danger() },
-        .{ "renamed", style.get().blue },
-        .{ "modified", style.get().orange },
-    };
-    for (kinds, n, 0..) |kind, count, i| {
-        if (count == 0) continue;
-        dvui.label(@src(), "{d} {s}", .{ count, kind[0] }, .{ .id_extra = i, .font = style.tiny(), .color_text = .{ .color = kind[1] }, .margin = .{ .w = style.space.md }, .padding = dvui.Rect.all(0) });
+    for (std.enums.values(FileFilter), 0..) |f, i| {
+        const count = n.get(f);
+        const on = file_filter == f;
+        const usable = count > 0;
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{ .draw_focus = false }, .{
+            .id_extra = i,
+            .tag = frameTag("files", @tagName(f)),
+            .background = true,
+            .color_fill = .{ .color = if (on) style.accentDim() else dvui.Color.transparent },
+            .color_fill_hover = .{ .color = if (on) style.accentDim() else if (usable) style.rowHover() else dvui.Color.transparent },
+            .corners = style.radius.input,
+            .margin = .{ .w = style.space.xs },
+            .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
+        });
+        bw.processEvents();
+        bw.drawBackground();
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+            defer row.deinit();
+            const faded = !usable;
+            dvui.icon(@src(), "filter_icon", f.icon(), .{ .fill_color = .{ .color = if (faded) style.textFaint() else f.hue() } }, .{
+                .min_size_content = .{ .w = 11, .h = 11 },
+                .gravity_y = 0.5,
+                .margin = .{ .w = style.space.xs },
+            });
+            if (f == .all) dvui.label(@src(), "All", .{}, .{ .font = style.tiny(), .color_text = .{ .color = if (on) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
+            dvui.label(@src(), "{d}", .{count}, .{ .font = if (on) style.tinyBold() else style.tiny(), .color_text = .{ .color = if (faded) style.textFaint() else if (on) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        }
+        if (bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{d} {s}", .{ count, if (f == .all) "files" else @tagName(f) }, .{ .font = style.small() });
+        if (usable and bw.clicked()) file_filter = f;
+        bw.deinit();
     }
 }
+
+/// The files the list shows, under the filter, by their place in the whole
+/// list: what the tree and the rows read their paths through.
+var files_shown: []const usize = &.{};
 
 /// A comparison: the two ends, and every file that differs between them.
 fn compareDetail() void {
@@ -28199,5 +28306,6 @@ test "changes picked: asked by path, taken off again, one side at a time" {
     try std.testing.expect(!isChangePicked(.staged, "c.txt"));
     try std.testing.expectEqual(@as(u32, 0), picked_set.count());
 }
+
 
 
