@@ -9168,7 +9168,7 @@ const SettingsPage = struct { id: usize, icon: []const u8, title: []const u8, hi
 const settings_pages = [_]?SettingsPage{
     null,
     .{ .id = 5, .icon = dvui.entypo.cog, .title = "General", .hint = "Tabs, new repositories, fetching" },
-    .{ .id = 3, .icon = dvui.entypo.merge, .title = "GitHub", .hint = "Pull requests, issues, checks and the account" },
+    .{ .id = 3, .icon = dvui.entypo.merge, .title = "Integrations", .hint = "GitHub: pull requests, issues, checks and the account" },
     .{ .id = 0, .icon = dvui.entypo.palette, .title = "Appearance", .hint = "Dark or light, and how the graph is drawn" },
     null,
     .{ .id = 1, .icon = dvui.entypo.user, .title = "Git identity", .hint = "The name and email your commits carry" },
@@ -9184,7 +9184,7 @@ const REPO_PAGE = 7;
 fn settingsDialog() void {
     if (!settings_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &settings_rect, &settings_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &settings_rect, &settings_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
@@ -9201,11 +9201,15 @@ fn settingsDialog() void {
         });
         defer split.deinit();
         settingsNav();
-        var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
+        // Its ground the dialog's: dvui's scroll container paints its own,
+        // the window's darker one, under whatever it holds.
+        var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false, .color_fill = .{ .color = style.surface() } });
         defer scroll.deinit();
+        // On the dialog's ground, over the scroll container's darker one.
         var body = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .background = false,
+            .background = true,
+            .color_fill = .{ .color = style.surface() },
             .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.xl },
         });
         defer body.deinit();
@@ -9233,14 +9237,6 @@ fn settingsDialog() void {
 
             settingsField(@src(), "External editor", "What a file from a diff opens with");
             if (editorChoice()) changed = true;
-            const editor = textField(@src(), .{
-                .text = .{ .array_list = .{ .backing = &editor_cmd, .allocator = gpa, .limit = 256 } },
-                .placeholder = "Or a command of your own — code -n, nvim-qt…",
-            }, settingsInput().override(.{
-                .tag = "editor_cmd",
-            }));
-            if (editor.text_changed) changed = true;
-            editor.deinit();
 
             settingsField(@src(), "Terminal", "What Terminal opens, in the repository's folder");
             if (terminalChoice()) changed = true;
@@ -9465,14 +9461,24 @@ var keys_rect: dvui.Rect = .{};
 fn keysDialog() void {
     if (!keys_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &keys_rect, &keys_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &keys_rect, &keys_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
     dialogHeader(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", "Everything here is a key away", &keys_open);
+    // No taller than most of the window: the list scrolls under its head.
+    var scroll = dvui.scrollArea(@src(), .{}, .{
+        .min_size_content = .{ .w = 520 + 2 * style.space.xl, .h = @min(560, win.h * 0.7) },
+        .max_size_content = .height(@min(560, win.h * 0.7)),
+        .background = false,
+        .color_fill = .{ .color = style.surface() },
+    });
+    defer scroll.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = 520 },
-        .background = false,
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
         .padding = .{ .x = style.space.xl, .y = style.space.xs, .w = style.space.xl, .h = style.space.xl },
     });
     defer body.deinit();
@@ -9564,9 +9570,12 @@ const settings_body_pad: dvui.Rect = .{ .x = 0, .y = style.space.xs, .w = 0, .h 
 /// A dialog's head: its icon on a tile, its title and a line under it, and
 /// the × that closes it.
 fn dialogHeader(src: std.builtin.SourceLocation, icon: []const u8, title: []const u8, hint: []const u8, open: *bool) void {
+    // The dialog's own ground, said outright: dvui fills a box with a border
+    // on one side in the theme's darker colour unless told.
     var head = dvui.box(src, .{ .dir = .horizontal }, .{
         .expand = .horizontal,
-        .background = false,
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
         .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.lg, .h = style.space.lg },
@@ -9599,7 +9608,8 @@ fn dialogBody(src: std.builtin.SourceLocation, width: ?f32) *dvui.BoxWidget {
 fn dialogFooter(src: std.builtin.SourceLocation) *dvui.BoxWidget {
     return dvui.box(src, .{ .dir = .horizontal }, .{
         .expand = .horizontal,
-        .background = false,
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
         .border = .{ .y = 1 },
         .color_border = .{ .color = style.border() },
         .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.lg },
@@ -9790,7 +9800,8 @@ const SettingsCard = struct {
         }
         return .{ .inner = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .background = false,
+            .background = true,
+            .color_fill = .{ .color = style.surface() },
             .border = .{ .y = 1 },
             .color_border = .{ .color = style.border() },
             .padding = .{ .y = style.space.sm },
@@ -10133,8 +10144,7 @@ fn loadEditors() void {
 }
 
 /// The editor setting, as a select: the system's choice, or each editor
-/// found here; a command of your own goes in the field under it. True when
-/// it changed.
+/// found here. True when it changed.
 fn editorChoice() bool {
     loadEditors();
     const current = std.mem.trim(u8, editor_cmd.items, " ");
@@ -16929,6 +16939,33 @@ fn avatar(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?d
 /// As `avatar`, `d` across: the commit pane's is bigger than a graph node.
 fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color, d: f32) void {
     const name = commit.author;
+    // Pictures off in the settings: a dot, in the lane's colour or the
+    // author's — no picture asked for, no initials.
+    if (!show_avatars) {
+        const dot = d * 0.5;
+        var room = dvui.box(src, .{}, .{
+            .id_extra = id,
+            .rect = if (at) |p| dvui.Rect{ .x = p.x, .y = p.y, .w = d, .h = d } else null,
+            .background = false,
+            .min_size_content = .{ .w = d, .h = d },
+            .max_size_content = .size(.{ .w = d, .h = d }),
+            .gravity_y = 0.5,
+            .margin = if (at == null) .{ .w = style.space.sm } else dvui.Rect.all(0),
+            .padding = dvui.Rect.all(0),
+        });
+        defer room.deinit();
+        var disc = dvui.box(@src(), .{}, .{
+            .background = true,
+            .color_fill = .{ .color = ring orelse style.laneColor(std.hash.Wyhash.hash(0, name) % 6) },
+            .corners = .all(dot / 2),
+            .min_size_content = .{ .w = dot, .h = dot },
+            .max_size_content = .size(.{ .w = dot, .h = dot }),
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+        });
+        disc.deinit();
+        return;
+    }
     const rect: ?dvui.Rect = if (at) |p| .{ .x = p.x, .y = p.y, .w = d, .h = d } else null;
     const border: dvui.Rect = if (ring != null) dvui.Rect.all(1.5) else dvui.Rect.all(0);
 
@@ -19499,18 +19536,18 @@ fn commitFiles(id: git.Oid) void {
             .corners = style.radius.input,
             .padding = dvui.Rect.all(2),
         });
-        viewToggle(@src(), .path, "Path", dvui.entypo.list);
-        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree);
+        viewToggle(@src(), .path, "Path", dvui.entypo.list, true);
+        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree, true);
         track.deinit();
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        dvui.label(@src(), "All files", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        // The kinds between, on the same line.
+        if (diff_all.len > 0) fileFilters() else _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        dvui.label(@src(), "All", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
         if (toggle(@src(), commit_all_files)) commit_all_files = !commit_all_files;
     }
 
     if (!commit_all_files) {
         if (diff_all.len == 0) return sidebarNote(@src(), "This commit changed no files.");
     }
-    if (diff_all.len > 0) fileFilters();
 
     const total_n = if (commit_all_files) blk: {
         loadTreeFiles(id);
@@ -19854,12 +19891,12 @@ fn fileFilters() void {
     // A kind this commit has none of shows nothing: back to all of them.
     if (n.get(file_filter) == 0) file_filter = .all;
 
-    // One bar the width of the panel, framed as Path / Tree above it, its
-    // kinds in segments of one width.
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.sm } });
-    defer line.deinit();
+    // Between Path / Tree and All files, framed as they are, its kinds in
+    // segments of one width.
     var track = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
         .expand = .horizontal,
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm, .w = style.space.sm },
         .background = true,
         .color_fill = .{ .color = style.surfaceInput() },
         .border = dvui.Rect.all(1),
@@ -19895,7 +19932,6 @@ fn fileFilters() void {
                 .gravity_y = 0.5,
                 .margin = .{ .w = style.space.xs },
             });
-            if (f == .all) dvui.label(@src(), "All", .{}, .{ .font = style.tiny(), .color_text = .{ .color = if (on) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
             dvui.label(@src(), "{d}", .{count}, .{ .font = if (on) style.tinyBold() else style.tiny(), .color_text = .{ .color = if (faded) style.textFaint() else if (on) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         }
         if (bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{d} {s}", .{ count, if (f == .all) "files" else @tagName(f) }, .{ .font = style.small() });
@@ -19987,8 +20023,8 @@ fn workingDetail() void {
             .corners = style.radius.input,
             .padding = dvui.Rect.all(2),
         });
-        viewToggle(@src(), .path, "Path", dvui.entypo.list);
-        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree);
+        viewToggle(@src(), .path, "Path", dvui.entypo.list, false);
+        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree, false);
         track.deinit();
     }
 
@@ -20484,7 +20520,8 @@ fn statusFlag(src: std.builtin.SourceLocation, status: git.Status) void {
     });
 }
 
-fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []const u8, icon: []const u8) void {
+/// `bare`: the icon alone, its caption on hover — where the line is short.
+fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []const u8, icon: []const u8, bare: bool) void {
     const selected = changes_view == view;
 
     var bw: dvui.ButtonWidget = undefined;
@@ -20514,15 +20551,16 @@ fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []con
         dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
             .min_size_content = .{ .w = 10, .h = 10 },
             .gravity_y = 0.5,
-            .margin = .{ .w = style.space.xs },
+            .margin = .{ .w = if (bare) 0 else style.space.xs },
         });
-        dvui.label(@src(), "{s}", .{caption}, .{
+        if (!bare) dvui.label(@src(), "{s}", .{caption}, .{
             .font = if (selected) style.tinyBold() else style.tiny(),
             .color_text = .{ .color = color },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
     }
+    if (bare and bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{caption}, .{ .font = style.small() });
 
     if (bw.clicked()) changes_view = view;
 }
@@ -21302,55 +21340,102 @@ fn scopeMenu(src: std.builtin.SourceLocation) void {
 fn recentMessages(src: std.builtin.SourceLocation) void {
     const h = history orelse return;
     if (h.commits.len == 0) return;
-    var dd: dvui.DropdownWidget = undefined;
-    pillInit(&dd, src, "recent_messages", .{ .w = style.space.md });
-    pillFace(&dd, dvui.entypo.clock, "");
-    if (dd.dropped()) {
-        dropHeading(@src(), 0, "RECENT MESSAGES");
-        var seen: [12][]const u8 = undefined;
-        var n: usize = 0;
-        for (h.commits[0..@min(h.commits.len, 200)]) |c| {
-            if (c.summary.len == 0) continue;
-            const had = for (seen[0..n]) |x| {
-                if (std.mem.eql(u8, x, c.summary)) break true;
-            } else false;
-            if (had) continue;
-            seen[n] = c.summary;
-            n += 1;
-            if (dropChoice(&dd, dvui.entypo.text_document, c.summary, "")) {
-                commit_summary.clearRetainingCapacity();
-                commit_summary.appendSlice(gpa, c.summary) catch {};
-            }
-            if (n == seen.len) break;
+    const p = pillMenu(src, "recent_messages", dvui.entypo.clock, .{ .w = style.space.md }, "Recent messages");
+    defer p.end();
+    const m = p.menu orelse return;
+    dropHeading(@src(), 0, "RECENT MESSAGES");
+    var list = pickList();
+    defer list.deinit();
+    var seen: [12][]const u8 = undefined;
+    var n: usize = 0;
+    for (h.commits[0..@min(h.commits.len, 200)]) |c| {
+        if (c.summary.len == 0) continue;
+        const had = for (seen[0..n]) |x| {
+            if (std.mem.eql(u8, x, c.summary)) break true;
+        } else false;
+        if (had) continue;
+        seen[n] = c.summary;
+        n += 1;
+        // Cut at a width, not the whole message: the menu would span the window.
+        var fit: [MAX_SHOWN_LINE]u8 = undefined;
+        if (pickRow(n, fitText(&fit, c.summary, style.small(), 420), "", false, null)) {
+            commit_summary.clearRetainingCapacity();
+            commit_summary.appendSlice(gpa, c.summary) catch {};
+            m.close();
         }
+        if (n == seen.len) break;
     }
-    dd.deinit();
 }
 
 /// Everyone who has authored a commit here, to credit as a co-author.
 fn coAuthorMenu(src: std.builtin.SourceLocation) void {
     const h = history orelse return;
-    var dd: dvui.DropdownWidget = undefined;
-    pillInit(&dd, src, "co_authors", .{ .w = style.space.xs });
-    pillFace(&dd, dvui.entypo.add_user, "");
-    const r = dd.data().borderRectScale().r;
-    if (r.contains(dvui.currentWindow().mouse_pt)) dvui.tooltip(@src(), .{ .active_rect = r, .position = .vertical, .delay = 400_000 }, "Add a co-author", .{}, .{ .font = style.small() });
-    if (dd.dropped()) {
-        var seen: [30][]const u8 = undefined;
-        var n: usize = 0;
-        for (h.commits) |c| {
-            if (c.email.len == 0) continue;
-            const had = for (seen[0..n]) |x| {
-                if (std.mem.eql(u8, x, c.email)) break true;
-            } else false;
-            if (had) continue;
-            seen[n] = c.email;
-            n += 1;
-            if (dropChoice(&dd, dvui.entypo.user, c.author, c.email)) addCoAuthor(c.author, c.email);
-            if (n == seen.len) break;
+    const p = pillMenu(src, "co_authors", dvui.entypo.add_user, .{ .w = style.space.xs }, "Add a co-author");
+    defer p.end();
+    const m = p.menu orelse return;
+    dropHeading(@src(), 0, "ADD A CO-AUTHOR");
+    var list = pickList();
+    defer list.deinit();
+    var seen: [30][]const u8 = undefined;
+    var n: usize = 0;
+    for (h.commits) |c| {
+        if (c.email.len == 0) continue;
+        const had = for (seen[0..n]) |x| {
+            if (std.mem.eql(u8, x, c.email)) break true;
+        } else false;
+        if (had) continue;
+        seen[n] = c.email;
+        n += 1;
+        if (pickRow(n, c.author, c.email, false, null)) {
+            addCoAuthor(c.author, c.email);
+            m.close();
         }
+        if (n == seen.len) break;
     }
-    dd.deinit();
+}
+
+/// A pill whose menu drops as a select's does: under it, or over it where
+/// the window has no room below — never on top of it. Its list scrolls past
+/// a height.
+fn pillMenu(src: std.builtin.SourceLocation, tag: []const u8, icon: []const u8, margin: dvui.Rect, hint: []const u8) Picker {
+    var button = DropButton.begin(src, .{
+        .tag = tag,
+        .min_size_content = .{ .h = 26 },
+        .gravity_y = 0.5,
+        .background = false,
+        .margin = margin,
+        .padding = dvui.Rect.all(0),
+        .corners = style.radius.input,
+    });
+    button.min_w = 280;
+    {
+        const lit = button.item.show_active or button.item.mouse_over;
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .both,
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.sm, .w = style.space.xs },
+        });
+        defer face.deinit();
+        dvui.icon(@src(), "pill_icon", icon, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 11, .h = 11 },
+            .gravity_y = 0.5,
+        });
+        dvui.icon(@src(), "pill_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textFaint() } }, .{
+            .min_size_content = .{ .w = 10, .h = 10 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = 2 },
+        });
+    }
+    // Said on hover while its menu is shut: its place read before `open`,
+    // which is the end of the button.
+    const r = button.item.data().borderRectScale().r;
+    const menu = button.open();
+    if (menu == null and r.contains(dvui.currentWindow().mouse_pt)) dvui.tooltip(@src(), .{ .active_rect = r, .position = .vertical, .delay = 400_000 }, "{s}", .{hint}, .{ .font = style.small() });
+    return .{ .button = button, .menu = menu, .id = 0 };
 }
 
 /// One fact about the commit about to be made, as a chip: an icon and a word
@@ -21572,7 +21657,7 @@ const features = [_]Feature{
 fn featuresDialog() void {
     if (!features_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &features_rect, &features_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &features_rect, &features_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
@@ -25457,7 +25542,7 @@ test "the avatar's menu opens the signing card, and asks before signing out" {
     try std.testing.expect(settings_open);
     try std.testing.expectEqual(@as(usize, 6), settings_page);
     // Another section from the list, and back.
-    try clickAt(try tagCenter("settings:GitHub"));
+    try clickAt(try tagCenter("settings:Integrations"));
     try std.testing.expectEqual(@as(usize, 3), settings_page);
     try clickAt(try tagCenter("settings:Commit signing"));
     try std.testing.expectEqual(@as(usize, 6), settings_page);
@@ -28865,6 +28950,9 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
+
+
+
 
 
 
