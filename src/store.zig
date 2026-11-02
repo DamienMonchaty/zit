@@ -68,6 +68,12 @@ pub const File = struct {
     /// What opens a file from a diff: a command, the file's path after it.
     /// Empty: the system's own choice for the file.
     editor: []const u8 = "",
+    /// The terminal Terminal opens, by its command; empty: $TERMINAL, then
+    /// the first of the usual ones found.
+    terminal: []const u8 = "",
+    /// Authors' pictures, from Gravatar or GitHub; off, their initials and
+    /// nothing asked of either.
+    avatars: bool = true,
     /// GitHub, through Zit's own sign-in: pull requests, issues, checks, the
     /// account. Off, Zit is a git client and nothing more.
     integrations: bool = true,

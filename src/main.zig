@@ -302,6 +302,9 @@ fn loadWorkspace() void {
     default_branch.appendSlice(gpa, loaded.file.default_branch) catch {};
     editor_cmd.clearRetainingCapacity();
     editor_cmd.appendSlice(gpa, loaded.file.editor) catch {};
+    terminal_cmd.clearRetainingCapacity();
+    terminal_cmd.appendSlice(gpa, loaded.file.terminal) catch {};
+    show_avatars = loaded.file.avatars;
 
     // Turned off, the tabs are still written — so turning it back on brings
     // them back — but not opened.
@@ -446,6 +449,8 @@ fn writeWorkspace() bool {
         .remember_tabs = remember_tabs,
         .default_branch = default_branch.items,
         .editor = editor_cmd.items,
+        .terminal = terminal_cmd.items,
+        .avatars = show_avatars,
         .prune = prune_on_fetch,
         .integrations = integrations,
         .zoom = zoom,
@@ -511,6 +516,11 @@ fn setIntegrations(on: bool) void {
 var default_branch: std.ArrayList(u8) = .empty;
 /// The command a file opens with; empty for the system's own choice.
 var editor_cmd: std.ArrayList(u8) = .empty;
+/// The terminal Terminal opens, one of `known_terminals`; empty for the
+/// first found.
+var terminal_cmd: std.ArrayList(u8) = .empty;
+/// Authors' pictures shown, fetched; off, their initials only.
+var show_avatars: bool = true;
 
 /// The arguments of a fetch of every remote, pruning or not as set; `quiet`
 /// for the timer's own. Where git's own config says whether to prune — for
@@ -2028,11 +2038,14 @@ fn appDeinit(win: *dvui.Window) void {
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     editor_cmd.deinit(gpa);
+    terminal_cmd.deinit(gpa);
     signing_key.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
     if (repo_prefs_job) |j| j.deinit(app_io);
     repo_name_local.deinit(gpa);
     repo_email_local.deinit(gpa);
+    repo_settings_path.deinit(gpa);
+    if (editors_job) |j| j.deinit(app_io);
     if (repo_config_job) |j| j.deinit(app_io);
     git_template_path.deinit(gpa);
     commit_sent.deinit(gpa);
@@ -3119,12 +3132,25 @@ fn openTerminal() void {
     if (repo == null) return;
     // Windows Terminal where there is one, the console otherwise; `start`
     // gives either its own window and returns.
+    // The one picked in the settings first — only ever one of
+    // `known_terminals`, so a name safe in a command line.
+    const chosen = std.mem.trim(u8, terminal_cmd.items, " ");
+    const windows_line: []const u8 = if (std.mem.eql(u8, chosen, "wt"))
+        "start wt -d ."
+    else if (std.mem.eql(u8, chosen, "pwsh"))
+        "start pwsh"
+    else if (std.mem.eql(u8, chosen, "powershell"))
+        "start powershell"
+    else if (std.mem.eql(u8, chosen, "cmd"))
+        "start cmd"
+    else
+        "where wt >nul 2>nul && start wt -d . || start cmd";
     const argv: []const []const u8 = if (@import("builtin").os.tag == .windows)
-        &.{ "cmd.exe", "/s", "/c", "where wt >nul 2>nul && start wt -d . || start cmd" }
+        &.{ "cmd.exe", "/s", "/c", windows_line }
     else
         &.{
             "sh", "-c",
-            \\for t in "$TERMINAL" x-terminal-emulator konsole gnome-terminal kitty alacritty wezterm foot ghostty xfce4-terminal tilix xterm; do
+            \\for t in "$1" "$TERMINAL" x-terminal-emulator konsole gnome-terminal kitty alacritty wezterm foot ghostty xfce4-terminal tilix xterm; do
             \\  [ -n "$t" ] && command -v "$t" >/dev/null 2>&1 || continue
             \\  case "${t##*/}" in
             \\    konsole) set -- --workdir "$PWD" ;;
@@ -3139,6 +3165,9 @@ fn openTerminal() void {
             \\  exit 0
             \\done
             \\exit 1
+            ,
+            "sh",
+            chosen,
         };
     const ok = run.launch(app_io, repo_path.items, argv) catch return setCommandError("Could not start a terminal.");
     if (!ok) setCommandError("No terminal found. Set $TERMINAL to the one you use.");
@@ -9117,6 +9146,12 @@ fn openSettings(section: usize) void {
     settings_rect = .{};
     signing_loaded = false;
     repo_prefs_loaded = false;
+    editors_loaded = false;
+    // The repository whose settings show: the one open, to start with.
+    if (repo != null) {
+        repo_settings_path.clearRetainingCapacity();
+        repo_settings_path.appendSlice(gpa, repo_path.items) catch {};
+    }
     settings_page = section;
 }
 
@@ -9139,11 +9174,12 @@ const settings_pages = [_]?SettingsPage{
     .{ .id = 1, .icon = dvui.entypo.user, .title = "Git identity", .hint = "The name and email your commits carry" },
     .{ .id = 2, .icon = dvui.entypo.pencil, .title = "Commit messages", .hint = "Ticket, conventional commits, template" },
     .{ .id = 6, .icon = dvui.entypo.lock, .title = "Commit signing", .hint = "GPG or SSH, for commits and tags" },
-    // Only while a repository is open: the last group, left out otherwise.
     null,
-    .{ .id = 7, .icon = dvui.entypo.folder, .title = "This repository", .hint = "Its own identity, pull and signing — in its .git/config" },
+    .{ .id = REPO_PAGE, .icon = dvui.entypo.folder, .title = "Repositories", .hint = "Its own identity, pull and signing — in its .git/config" },
 };
-const settings_groups = [_][]const u8{ "Zit", "Commits", "Repository" };
+const settings_groups = [_][]const u8{ "Zit", "Commits", "Repositories" };
+/// The page of one repository's settings, which it the nav lists by name.
+const REPO_PAGE = 7;
 
 fn settingsDialog() void {
     if (!settings_open) return;
@@ -9195,15 +9231,19 @@ fn settingsDialog() void {
             if (branch.text_changed) changed = true;
             branch.deinit();
 
-            settingsField(@src(), "External editor", "What a file opens with from a diff — code, subl, zed… Empty: the system's choice");
+            settingsField(@src(), "External editor", "What a file from a diff opens with");
+            if (editorChoice()) changed = true;
             const editor = textField(@src(), .{
                 .text = .{ .array_list = .{ .backing = &editor_cmd, .allocator = gpa, .limit = 256 } },
-                .placeholder = "code",
+                .placeholder = "Or a command of your own — code -n, nvim-qt…",
             }, settingsInput().override(.{
                 .tag = "editor_cmd",
             }));
             if (editor.text_changed) changed = true;
             editor.deinit();
+
+            settingsField(@src(), "Terminal", "What Terminal opens, in the repository's folder");
+            if (terminalChoice()) changed = true;
 
             settingsField(@src(), "Fetch in the background", "Every remote, quietly — the counts on Pull and Push stay true");
             {
@@ -9275,15 +9315,13 @@ fn settingsDialog() void {
                 if (themeCard(@src(), 0, "Dark", true) and !dark_theme) setTheme(true);
                 if (themeCard(@src(), 1, "Light", false) and dark_theme) setTheme(false);
             }
-            // GitKraken's narrow graph — each commit its author's picture — or
-            // the lanes as wide as they need.
-            var compact = graphCompact();
-            if (dvui.checkbox(@src(), &compact, "Compact graph: authors' pictures only, no lanes", .{ .font = style.small(), .margin = settings_body_pad })) {
-                graph_width = if (compact) GRAPH_COMPACT_W else 0;
-                saveWorkspace();
+            {
+                var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
+                defer section.deinit();
+                if (settingsSwitch(0, &show_avatars, "Show profile pictures", "From Gravatar and GitHub. Off: initials, nothing asked")) saveWorkspace();
             }
         }
-        if (SettingsCard.begin(7)) |card| {
+        if (SettingsCard.begin(REPO_PAGE)) |card| {
             defer card.end();
             repoSettings();
         }
@@ -9652,11 +9690,48 @@ fn settingsNav() void {
     var group: usize = 0;
     for (settings_pages, 0..) |entry, i| {
         const page = entry orelse {
-            if (repo == null and std.mem.eql(u8, settings_groups[group], "Repository")) break;
             settingsGroup(@src(), group, settings_groups[group]);
             group += 1;
             continue;
         };
+        // The repositories' group: an entry for each, its badge for an icon.
+        if (page.id == REPO_PAGE) {
+            const known = knownRepos();
+            if (known.len == 0) dvui.label(@src(), "None yet", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.sm, .y = style.space.sm } });
+            for (known, 0..) |path, r| {
+                const on = settings_page == REPO_PAGE and std.mem.eql(u8, path, repo_settings_path.items);
+                var rb: dvui.ButtonWidget = undefined;
+                rb.init(@src(), .{ .draw_focus = false }, .{
+                    .id_extra = 1000 + r,
+                    .tag = frameTag("settings_repo", git.repoName(path)),
+                    .expand = .horizontal,
+                    .background = true,
+                    .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
+                    .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
+                    .corners = style.radius.input,
+                    .margin = .{ .h = 2 },
+                    .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
+                });
+                rb.processEvents();
+                rb.drawBackground();
+                {
+                    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+                    defer row.deinit();
+                    tabBadge(git.repoName(path), on);
+                    var fit: [MAX_SHOWN_LINE]u8 = undefined;
+                    dvui.label(@src(), "{s}", .{fitText(&fit, git.repoName(path), style.small(), 130)}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = if (on) style.text() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+                }
+                if (rb.hovered()) dvui.tooltip(@src(), .{ .active_rect = rb.data().borderRectScale().r, .position = .horizontal, .delay = 400_000 }, "{s}", .{path}, .{ .font = style.small() });
+                if (rb.clicked()) {
+                    settings_page = REPO_PAGE;
+                    repo_settings_path.clearRetainingCapacity();
+                    repo_settings_path.appendSlice(gpa, path) catch {};
+                    repo_prefs_loaded = false;
+                }
+                rb.deinit();
+            }
+            continue;
+        }
         const shown = settings_page == page.id;
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
@@ -9708,8 +9783,10 @@ const SettingsCard = struct {
             iconTile(@src(), page.icon, 32, 16);
             var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
             defer col.deinit();
-            dvui.label(@src(), "{s}", .{page.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-            dvui.label(@src(), "{s}", .{page.hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 1 } });
+            // A repository's page goes by its name, its folder under it.
+            const one = id == REPO_PAGE and repo_settings_path.items.len > 0;
+            dvui.label(@src(), "{s}", .{if (one) git.repoName(repo_settings_path.items) else page.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
+            dvui.label(@src(), "{s}", .{if (one) repo_settings_path.items else page.hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 1 } });
         }
         return .{ .inner = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
@@ -9785,6 +9862,9 @@ fn loadSigning() void {
 
 var repo_prefs_loaded = false;
 var repo_prefs_job: ?*run.Capture = null;
+/// Which repository's settings the page shows, picked from every one Zit
+/// knows; owned.
+var repo_settings_path: std.ArrayList(u8) = .empty;
 var repo_name_local: std.ArrayList(u8) = .empty;
 var repo_email_local: std.ArrayList(u8) = .empty;
 /// How `git pull` joins what it fetched: as set everywhere, or here.
@@ -9795,9 +9875,9 @@ var repo_sign: Tri = .global;
 const Tri = enum { global, on, off };
 
 fn loadRepoPrefs() void {
-    if (repo_prefs_loaded or repo == null) return;
+    if (repo_prefs_loaded or repo_settings_path.items.len == 0) return;
     const job_now = repo_prefs_job orelse blk: {
-        const started = run.Capture.start(gpa, app_io, repo_path.items, &.{ "git", "config", "--local", "--get-regexp", "^(user\\.name|user\\.email|pull\\.rebase|pull\\.ff|fetch\\.prune|commit\\.gpgsign)$" }) catch {
+        const started = run.Capture.start(gpa, app_io, repo_settings_path.items, &.{ "git", "config", "--local", "--get-regexp", "^(user\\.name|user\\.email|pull\\.rebase|pull\\.ff|fetch\\.prune|commit\\.gpgsign)$" }) catch {
             repo_prefs_loaded = true;
             return;
         };
@@ -9807,6 +9887,8 @@ fn loadRepoPrefs() void {
     if (!job_now.finished()) return;
     repo_prefs_job = null;
     defer job_now.deinit(app_io);
+    // Asked about another repository than the one picked since: again.
+    if (!std.mem.eql(u8, job_now.cwd, repo_settings_path.items)) return;
 
     repo_prefs_loaded = true;
     repo_name_local.clearRetainingCapacity();
@@ -9838,13 +9920,15 @@ fn loadRepoPrefs() void {
     }
 }
 
-/// `git config --local key value` here — the empty value unsets it.
+/// `git config --local key value` in the repository picked — the empty
+/// value unsets it.
 fn setLocalConfig(key: []const u8, value: []const u8) void {
-    if (repo == null) return;
+    const where = repo_settings_path.items;
+    if (where.len == 0) return;
     var outcome = (if (value.len == 0)
-        run.git(gpa, app_io, repo_path.items, &.{ "config", "--local", "--unset-all", key })
+        run.git(gpa, app_io, where, &.{ "config", "--local", "--unset-all", key })
     else
-        run.git(gpa, app_io, repo_path.items, &.{ "config", "--local", key, value })) catch return setCommandError("Could not run git. Is it on your PATH?");
+        run.git(gpa, app_io, where, &.{ "config", "--local", key, value })) catch return setCommandError("Could not run git. Is it on your PATH?");
     defer outcome.deinit(gpa);
     // Unsetting what was never set is git's exit 5: nothing to say.
     if (!outcome.ok and value.len > 0) setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
@@ -9866,15 +9950,35 @@ fn choiceChips(id: usize, options: []const []const u8, current: usize) ?usize {
 
 /// The page: who commits here, how pull joins, whether fetch prunes and
 /// commits are signed — each "as everywhere" until set.
+/// Every repository Zit knows: the one open, its tabs, then the ones it
+/// remembers — each once.
+fn knownRepos() []const []const u8 {
+    const a = dvui.currentWindow().arena();
+    var known: std.ArrayList([]const u8) = .empty;
+    if (repo != null and !isOpenTab(repo_path.items)) known.append(a, repo_path.items) catch {};
+    for (groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
+        if (!listedEarlier(gi, ti, tab.path)) known.append(a, tab.path) catch {};
+    };
+    for (recent.items) |path| if (!isOpenTab(path)) known.append(a, path) catch {};
+    return known.items;
+}
+
 fn repoSettings() void {
-    loadRepoPrefs();
     var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
     defer section.deinit();
-    if (!repo_prefs_loaded) {
-        dvui.label(@src(), "Reading the repository's config…", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
+
+    const known = knownRepos();
+    if (known.len == 0) {
+        dvui.label(@src(), "No repository yet. Open one and its settings are here.", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
         return;
     }
-    dvui.label(@src(), "{s}", .{repo_path.items}, .{ .font = style.mono(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.sm } });
+    if (repo_settings_path.items.len == 0) repo_settings_path.appendSlice(gpa, known[0]) catch {};
+
+    loadRepoPrefs();
+    if (!repo_prefs_loaded) {
+        dvui.label(@src(), "Reading its config…", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
+        return;
+    }
 
     settingsField(@src(), "Name and email here", "Commits in this repository only — work or personal. Empty: the global ones");
     {
@@ -9929,8 +10033,8 @@ fn repoSettings() void {
             1 => "true",
             else => "false",
         });
-        // What Fetch passes follows: read the repository's config again.
-        startRepoConfig();
+        // What Fetch passes follows: the open repository's config read again.
+        if (repo != null and std.mem.eql(u8, repo_settings_path.items, repo_path.items)) startRepoConfig();
     }
 
     settingsField(@src(), "Sign commits", "Every commit made here signed with your key — commit.gpgsign");
@@ -9942,6 +10046,152 @@ fn repoSettings() void {
         });
     }
 }
+
+/// The editors a file can open with, by the command that starts each, and
+/// the name it goes by.
+const known_editors = [_]struct { []const u8, []const u8 }{
+    .{ "code", "VS Code" },
+    .{ "codium", "VSCodium" },
+    .{ "cursor", "Cursor" },
+    .{ "zed", "Zed" },
+    .{ "subl", "Sublime Text" },
+    .{ "idea", "IntelliJ IDEA" },
+    .{ "webstorm", "WebStorm" },
+    .{ "notepad++", "Notepad++" },
+    .{ "kate", "Kate" },
+    .{ "gnome-text-editor", "Text Editor" },
+    .{ "gedit", "gedit" },
+    .{ "mousepad", "Mousepad" },
+};
+/// The terminals Terminal can open, by command and name.
+const known_terminals = if (@import("builtin").os.tag == .windows) [_]struct { []const u8, []const u8 }{
+    .{ "wt", "Windows Terminal" },
+    .{ "pwsh", "PowerShell 7" },
+    .{ "powershell", "Windows PowerShell" },
+    .{ "cmd", "Command Prompt" },
+} else [_]struct { []const u8, []const u8 }{
+    .{ "konsole", "Konsole" },
+    .{ "gnome-terminal", "GNOME Terminal" },
+    .{ "kitty", "kitty" },
+    .{ "alacritty", "Alacritty" },
+    .{ "wezterm", "WezTerm" },
+    .{ "ghostty", "Ghostty" },
+    .{ "foot", "foot" },
+    .{ "xfce4-terminal", "Xfce Terminal" },
+    .{ "tilix", "Tilix" },
+    .{ "xterm", "xterm" },
+};
+/// Which of them this machine has, found once the settings open.
+var editors_found = [_]bool{false} ** known_editors.len;
+var terminals_found = [_]bool{false} ** known_terminals.len;
+var editors_loaded = false;
+var editors_job: ?*run.Capture = null;
+
+/// Each known editor whose command is on the PATH, one name a line: one
+/// shell for all of them, off the window's thread.
+fn loadEditors() void {
+    if (editors_loaded) return;
+    const job_now = editors_job orelse blk: {
+        const a = dvui.currentWindow().arena();
+        var names: std.ArrayList(u8) = .empty;
+        for (known_editors) |e| {
+            names.appendSlice(a, e[0]) catch {};
+            names.append(a, ' ') catch {};
+        }
+        for (known_terminals) |e| {
+            names.appendSlice(a, e[0]) catch {};
+            names.append(a, ' ') catch {};
+        }
+        const script = if (@import("builtin").os.tag == .windows)
+            std.fmt.allocPrint(a, "for %e in ({s}) do @where %e >nul 2>nul && @echo %e", .{names.items}) catch return
+        else
+            std.fmt.allocPrint(a, "for e in {s}; do command -v \"$e\" >/dev/null 2>&1 && echo \"$e\"; done; true", .{names.items}) catch return;
+        const argv: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "cmd.exe", "/c", script } else &.{ "sh", "-c", script };
+        const started = run.Capture.start(gpa, app_io, ".", argv) catch {
+            editors_loaded = true;
+            return;
+        };
+        editors_job = started;
+        break :blk started;
+    };
+    if (!job_now.finished()) return;
+    editors_job = null;
+    defer job_now.deinit(app_io);
+    editors_loaded = true;
+    editors_found = @splat(false);
+    terminals_found = @splat(false);
+    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
+    while (lines.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " \t\r");
+        for (known_editors, 0..) |e, i| if (std.mem.eql(u8, e[0], name)) {
+            editors_found[i] = true;
+        };
+        for (known_terminals, 0..) |e, i| if (std.mem.eql(u8, e[0], name)) {
+            terminals_found[i] = true;
+        };
+    }
+}
+
+/// The editor setting, as a select: the system's choice, or each editor
+/// found here; a command of your own goes in the field under it. True when
+/// it changed.
+fn editorChoice() bool {
+    loadEditors();
+    const current = std.mem.trim(u8, editor_cmd.items, " ");
+    var face: []const u8 = if (current.len == 0) "System default" else current;
+    for (known_editors) |e| if (std.mem.eql(u8, e[0], current)) {
+        face = e[1];
+    };
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
+    defer cell.deinit();
+    const p = picker(EDITOR_PICKER, face, "", "settings:editor");
+    defer p.end();
+    const m = p.menu orelse return false;
+    if (!editors_loaded) dvui.label(@src(), "Looking for the editors on this computer…", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
+    var picked: ?[]const u8 = null;
+    if (pickRow(0, "System default", "what the system opens the file with", current.len == 0, null)) picked = "";
+    for (known_editors, 0..) |e, i| {
+        if (!editors_found[i]) continue;
+        if (pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
+    }
+    const cmd = picked orelse return false;
+    m.close();
+    editor_cmd.clearRetainingCapacity();
+    editor_cmd.appendSlice(gpa, cmd) catch {};
+    return true;
+}
+
+/// The terminal setting, as a select: the first found, or one of those
+/// installed here. True when it changed.
+fn terminalChoice() bool {
+    loadEditors();
+    const current = std.mem.trim(u8, terminal_cmd.items, " ");
+    var face: []const u8 = "Automatic";
+    for (known_terminals) |e| if (std.mem.eql(u8, e[0], current)) {
+        face = e[1];
+    };
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
+    defer cell.deinit();
+    const p = picker(TERMINAL_PICKER, face, "", "settings:terminal");
+    defer p.end();
+    const m = p.menu orelse return false;
+    if (!editors_loaded) dvui.label(@src(), "Looking for the terminals on this computer…", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
+    var picked: ?[]const u8 = null;
+    if (pickRow(0, "Automatic", if (@import("builtin").os.tag == .windows) "Windows Terminal where there is one" else "$TERMINAL, then the first found", current.len == 0, null)) picked = "";
+    for (known_terminals, 0..) |e, i| {
+        if (!terminals_found[i]) continue;
+        if (pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
+    }
+    const cmd = picked orelse return false;
+    m.close();
+    terminal_cmd.clearRetainingCapacity();
+    terminal_cmd.appendSlice(gpa, cmd) catch {};
+    return true;
+}
+
+/// Picker ids of the settings' selects, apart from those of the dialogs.
+const EDITOR_PICKER = 50;
+const TERMINAL_PICKER = 51;
 
 /// `path` — the repository's file — in the editor the settings name, or the
 /// system's choice for it.
@@ -16704,7 +16954,8 @@ fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, a
     // goes without a sha: asking with the commit's would answer with its
     // author's picture.
     const unborn = std.mem.allEqual(u8, std.mem.asBytes(&commit.id), 0);
-    if (avatars.get(commit.email, if (unborn) "" else git.oidHex(commit.id, &hex))) |png| {
+    // Off in the settings: not even asked for, the initials below.
+    if (if (show_avatars) avatars.get(commit.email, if (unborn) "" else git.oidHex(commit.id, &hex)) else null) |png| {
         _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = png, .name = "avatar" } }, .shrink = .both }, .{
             .expand = .both,
             // Half of what is left inside the ring: half the whole disc
@@ -22108,6 +22359,8 @@ fn resetUiGlobals() void {
     default_branch = .empty;
     editor_cmd.deinit(gpa);
     editor_cmd = .empty;
+    terminal_cmd.deinit(gpa);
+    terminal_cmd = .empty;
     signing_key.deinit(gpa);
     signing_key = .empty;
     signing_loaded = false;
@@ -22118,6 +22371,11 @@ fn resetUiGlobals() void {
     repo_name_local = .empty;
     repo_email_local.deinit(gpa);
     repo_email_local = .empty;
+    repo_settings_path.deinit(gpa);
+    repo_settings_path = .empty;
+    if (editors_job) |j| j.deinit(app_io);
+    editors_job = null;
+    editors_loaded = false;
     if (signing_job) |j| j.deinit(app_io);
     signing_job = null;
     if (repo_config_job) |j| j.deinit(app_io);
@@ -28589,6 +28847,7 @@ test "a repository's own settings are written to its config and read back" {
     try makeTestRepo(&tmp, dir, "a.txt", "a\n");
     openRepo(dir);
     defer closeRepo();
+    repo_settings_path.appendSlice(gpa, dir) catch unreachable;
 
     setLocalConfig("user.name", "Work Me");
     setLocalConfig("pull.ff", "only");
@@ -28606,4 +28865,6 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
+
+
 
