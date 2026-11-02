@@ -10,7 +10,7 @@ instead.
 
 ## Building
 
-You need [Zig 0.16](https://ziglang.org/download/) and `git`. libgit2 and SDL
+You need [Zig 0.17](https://ziglang.org/download/) and `git`. libgit2 and SDL
 are built along with Zit.
 
 ```sh
@@ -68,7 +68,7 @@ it, and match the style of the code around it.
      commits: RSS, peak RSS, Private_Dirty and idle CPU, each under its
      ceiling — the script fails when one is over;
    - `zig build bench` against the last release's numbers, `--vs`;
-   - a Debug build (`-Doptimize=Debug`) used for a minute on a real
+   - a Debug build (`-Doptimize=debug`) used for a minute on a real
      repository: its stack traces and its leak report at exit reach what
      the tests do not.
 2. Set the new version in `build.zig.zon` (the app reads it from there)

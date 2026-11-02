@@ -4,7 +4,7 @@ The details behind the [README](../README.md): building, testing, and the shape 
 
 ## Build
 
-    zig build          # needs zig 0.16.0; libgit2 is built from source
+    zig build          # needs zig 0.17.0; libgit2 is built from source
     zig build run -- /path/to/repo
     zig build dist     # release executables in zig-out/dist/
 

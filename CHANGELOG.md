@@ -3,6 +3,11 @@
 Every release of Zit, newest first. Downloads are on the
 [Releases](https://github.com/DamienMonchaty/zit/releases) page.
 
+## Unreleased
+
+### Changed
+- Zit is built with Zig 0.17, and dvui 0.6 with the SDL 3.4.18 it brings.
+
 ## [0.1.3] — 2026-11-02
 
 ### Added
