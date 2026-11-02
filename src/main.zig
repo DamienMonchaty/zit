@@ -16715,7 +16715,9 @@ fn commitRow(
         if (shown) if (lane) |l| {
             // From the last tag's edge, not the margin after it.
             const from = (chips_end.x + chips_end.w - rs.r.x) / rs.s - style.space.sm;
-            const to = style.space.lg + branchColumn() + laneX(l.lane) - style.avatar / 2 - 1;
+            // To the node's edge: a merge's disc, or a commit's picture or dot.
+            const edge = if (commit.parents.len > 1) style.avatar / 2 else nodeRadius();
+            const to = style.space.lg + branchColumn() + laneX(l.lane) - edge - 1;
             if (to > from) rs.rectToPhysical(.{ .x = from, .y = rh / 2 - 0.75, .w = to - from, .h = 1.5 })
                 .fill(.{}, .{ .color = .{ .color = hue.? }, .fade = 0 });
         };
@@ -17014,11 +17016,19 @@ fn avatar(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?d
     avatarSized(src, id, commit, at, ring, style.avatar);
 }
 
+/// How far from a commit's centre its node reaches: its picture's radius,
+/// or its dot's with pictures off — where lines to it stop.
+fn nodeRadius() f32 {
+    return if (show_avatars) style.avatar / 2 else style.avatar * DOT_SCALE / 2;
+}
+/// A dot's size against a picture's.
+const DOT_SCALE: f32 = 0.5;
+
 /// A graph node with pictures off: a dot in the lane's colour or the
 /// author's — no picture asked for, no initials.
 fn avatarDot(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color, d: f32) void {
     const name = commit.author;
-    const dot = d * 0.5;
+    const dot = d * DOT_SCALE;
     var room = dvui.box(src, .{}, .{
         .id_extra = id,
         .rect = if (at) |p| dvui.Rect{ .x = p.x, .y = p.y, .w = d, .h = d } else null,
@@ -17520,7 +17530,7 @@ fn drawLanes(
     if (extra > 0) if (headLane()) |hl| {
         const x = laneX(hl.lane);
         const top = @max(0.5 * rh + style.avatar / 2 + 2, @as(f32, @floatFromInt(first)) * rh);
-        const bottom = @min((@as(f32, @floatFromInt(hl.index + extra)) + 0.5) * rh - style.avatar / 2 - 2, @as(f32, @floatFromInt(last)) * rh);
+        const bottom = @min((@as(f32, @floatFromInt(hl.index + extra)) + 0.5) * rh - nodeRadius() - 2, @as(f32, @floatFromInt(last)) * rh);
         var y = top;
         while (y + 2 <= bottom) : (y += 5) {
             rs.rectToPhysical(.{ .x = x - 1, .y = y, .w = 2, .h = 2 }).fill(.{}, .{ .color = .{ .color = hl.color }, .fade = 0 });
@@ -29128,6 +29138,7 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
+
 
 
 
