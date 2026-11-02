@@ -11976,7 +11976,10 @@ fn tabBadge(name: []const u8, active: bool) void {
         .background = true,
         .color_fill = .{ .color = if (active) style.accentDim() else style.border() },
         .corners = dvui.CornerRect.all(4),
-        .min_size_content = .{ .w = 18, .h = 18 },
+        // One width whether one letter or two: the letters centred in it,
+        // and badges down a list lined up.
+        .min_size_content = .{ .w = BADGE_W, .h = 18 },
+        .max_size_content = .size(.{ .w = BADGE_W, .h = 18 }),
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.sm },
     });
@@ -11992,6 +11995,8 @@ fn tabBadge(name: []const u8, active: bool) void {
         .padding = .{ .x = 2, .w = 2 },
     });
 }
+
+const BADGE_W: f32 = 28;
 
 /// What says a pill opens a menu: a chevron after its text, and the hand
 /// cursor over it.
@@ -19720,8 +19725,8 @@ fn commitFiles(id: git.Oid) void {
             .corners = style.radius.input,
             .padding = dvui.Rect.all(2),
         });
-        viewToggle(@src(), .path, "Path", dvui.entypo.list, true);
-        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree, true);
+        viewToggle(@src(), .path, "Path", dvui.entypo.list);
+        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree);
         track.deinit();
         // The kinds between, on the same line.
         if (diff_all.len > 0) fileFilters();
@@ -20207,8 +20212,8 @@ fn workingDetail() void {
             .corners = style.radius.input,
             .padding = dvui.Rect.all(2),
         });
-        viewToggle(@src(), .path, "Path", dvui.entypo.list, false);
-        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree, false);
+        viewToggle(@src(), .path, "Path", dvui.entypo.list);
+        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree);
         track.deinit();
     }
 
@@ -20707,8 +20712,7 @@ fn statusFlag(src: std.builtin.SourceLocation, status: git.Status) void {
     });
 }
 
-/// `bare`: the icon alone, its caption on hover — where the line is short.
-fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []const u8, icon: []const u8, bare: bool) void {
+fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []const u8, icon: []const u8) void {
     const selected = changes_view == view;
 
     var bw: dvui.ButtonWidget = undefined;
@@ -20738,16 +20742,15 @@ fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []con
         dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
             .min_size_content = .{ .w = 10, .h = 10 },
             .gravity_y = 0.5,
-            .margin = .{ .w = if (bare) 0 else style.space.xs },
+            .margin = .{ .w = style.space.xs },
         });
-        if (!bare) dvui.label(@src(), "{s}", .{caption}, .{
+        dvui.label(@src(), "{s}", .{caption}, .{
             .font = if (selected) style.tinyBold() else style.tiny(),
             .color_text = .{ .color = color },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
     }
-    if (bare and bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{caption}, .{ .font = style.small() });
 
     if (bw.clicked()) changes_view = view;
 }
@@ -29138,6 +29141,7 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
+
 
 
 
