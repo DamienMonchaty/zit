@@ -28959,7 +28959,7 @@ test "audit: the main controls do what they say when clicked" {
     try clickAt(try tagCenter("menu:Settings — Ctrl+,"));
     try std.testing.expect(settings_open);
     try clickAt(try tagCenter("settings:Appearance"));
-    try clickAt(try tagCenter("theme:Light"));
+    try clickAt(try tagCenter("theme:Zit Light"));
     try std.testing.expect(!dark_theme);
     try pressFrame(.escape, .none);
     try std.testing.expect(!settings_open);
