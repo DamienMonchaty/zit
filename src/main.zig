@@ -529,7 +529,7 @@ var editor_cmd: std.ArrayList(u8) = .empty;
 /// The terminal Terminal opens, one of `known_terminals`; empty for the
 /// first found.
 var terminal_cmd: std.ArrayList(u8) = .empty;
-/// Authors' pictures shown, fetched; off, their initials only.
+/// Authors' pictures on the graph's commits; off, a dot for each.
 var show_avatars: bool = true;
 
 /// The arguments of a fetch of every remote, pruning or not as set; `quiet`
@@ -1806,16 +1806,18 @@ fn diffModeToggle(src: std.builtin.SourceLocation) void {
     }
 }
 
-/// Which sidebar sections are folded away.
+/// The sidebar's sections, in the order it shows them: what is on disk
+/// first — the branches, the worktrees, the stashes — then the host's pull
+/// requests and issues, the tags last.
 const Section = enum(u8) {
     local,
     /// Each remote with its branches under it, the way GitKraken nests them.
     remotes,
-    tags,
     worktrees,
+    stashes,
     pulls,
     issues,
-    stashes,
+    tags,
 
     fn label(self: Section) []const u8 {
         return switch (self) {
@@ -8290,18 +8292,10 @@ fn titlebar() void {
             "No upstream to pull from: push this branch first";
         const pullable = idle and on_branch and tracking.upstream != null;
         {
-            // Pull and its ways, one split button: the frame around both
-            // while the pointer is on either, a rule between.
+            // Pull and its ways, one split button: each half lit on its own
+            // as the other buttons are, a rule between.
             var split = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
             defer split.deinit();
-            const frame = split.data().borderRectScale();
-            if (pullable and frame.r.contains(dvui.currentWindow().mouse_pt)) {
-                // Inset by the buttons' margins, so it hugs what lights up.
-                var r = frame.r;
-                r.x += 2 * frame.s;
-                r.w -= 4 * frame.s;
-                r.stroke(dvui.CornerRect.Physical.all(6 * frame.s), .{ .thickness = frame.s, .color = .{ .color = style.border() } });
-            }
             if (toolButton(@src(), "Pull", dvui.entypo.download, .{ .badge = if (rebased) 0 else tracking.behind, .busy = std.mem.eql(u8, running, "Pulling"), .usable = pullable, .hint = pull_hint })) {
                 requestNetwork("Pulling", &.{"pull"});
             }
@@ -9345,7 +9339,7 @@ fn settingsDialog() void {
             {
                 var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
                 defer section.deinit();
-                if (settingsSwitch(0, &show_avatars, "Show profile pictures", "From Gravatar and GitHub. Off: initials, nothing asked")) saveWorkspace();
+                if (settingsSwitch(0, &show_avatars, "Pictures in the graph", "Each commit its author's picture. Off: a dot")) saveWorkspace();
             }
         }
         if (SettingsCard.begin(REPO_PAGE)) |card| {
@@ -11174,10 +11168,9 @@ fn userMenu() void {
         dvui.label(@src(), "{s}", .{if (set) me.email else "Commits need a name and an email"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0) });
     }
     menuSeparator(0);
-    var pick: enum { none, settings, keys, theme, signing, sign_in, sign_out } = .none;
+    var pick: enum { none, settings, keys, signing, sign_in, sign_out } = .none;
     if (menuIcon(@src(), dvui.entypo.cog, "Settings — Ctrl+,", false)) pick = .settings;
     if (menuIcon(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", false)) pick = .keys;
-    if (menuIcon(@src(), if (dark_theme) dvui.entypo.light_up else dvui.entypo.moon, if (dark_theme) "Light theme" else "Dark theme", false)) pick = .theme;
     if (menuIcon(@src(), dvui.entypo.lock, "Commit signature", false)) pick = .signing;
     // GitHub's account, only while Zit talks to GitHub at all.
     if (integrations) {
@@ -11199,7 +11192,6 @@ fn userMenu() void {
             keys_open = true;
             keys_rect = .{};
         },
-        .theme => setTheme(!dark_theme),
         .signing => openSettings(6),
         .sign_in => {
             openIdentity();
@@ -12904,11 +12896,27 @@ fn searchField(
     tag: []const u8,
     margin: dvui.Rect,
 ) dvui.Id {
+    return searchFieldIn(src, backing, placeholder, tag, margin, true);
+}
+
+/// As `searchField`, `framed` or not: unframed, it sits in a frame of the
+/// caller's, with what else that holds beside it.
+fn searchFieldIn(
+    src: std.builtin.SourceLocation,
+    backing: *std.ArrayList(u8),
+    placeholder: []const u8,
+    tag: []const u8,
+    margin: dvui.Rect,
+    framed: bool,
+) dvui.Id {
     var field = dvui.box(src, .{ .dir = .horizontal }, .{
         .expand = .horizontal,
-        .background = true,
+        // Centred on the line of an unframed one's frame; in a menu's column
+        // a gravity would move it down the column.
+        .gravity_y = if (framed) null else 0.5,
+        .background = framed,
         .color_fill = .{ .color = style.surfaceInput() },
-        .border = dvui.Rect.all(1),
+        .border = dvui.Rect.all(if (framed) 1 else 0),
         .color_border = .{ .color = style.border() },
         .corners = style.radius.input,
         .margin = margin,
@@ -16083,17 +16091,18 @@ fn floatingSearch() void {
     var float: dvui.FloatingWidget = undefined;
     float.init(@src(), .{}, .{ .rect = .{ .x = area.x + (area.w - w) / 2, .y = area.y + 30, .w = w, .h = 42 } });
     defer float.deinit();
+    // The card is the field: one frame, the count and the × inside it.
     var card = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .both,
         .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
+        .color_fill = .{ .color = style.surfaceInput() },
         .border = dvui.Rect.all(1),
-        .color_border = .{ .color = style.border() },
+        .color_border = .{ .color = style.accent().opacity(0.5) },
         .corners = style.radius.input,
-        .padding = dvui.Rect.all(style.space.xs),
+        .padding = .{ .x = style.space.xs, .w = style.space.xs },
     });
     defer card.deinit();
-    focusOnce(searchField(@src(), &commit_filter, "Search commits — author:, msg:, path:, code:, after:", "commit_filter", dvui.Rect.all(0)));
+    focusOnce(searchFieldIn(@src(), &commit_filter, "Search commits — author:, msg:, path:, code:, after:", "commit_filter", dvui.Rect.all(0), false));
     if (search_hits.running != null) loadingSpinner(@src());
     if (list_filtering) {
         dvui.label(@src(), "{d} of {d}", .{ list_matches, list_total }, .{
@@ -16999,39 +17008,42 @@ fn commitMenu(
 /// colour as a ring round it; null lays it out inline, for the list a search
 /// leaves when the lanes are gone.
 fn avatar(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color) void {
+    // Pictures off in the settings — in the graph only: a dot there.
+    if (!show_avatars) return avatarDot(src, id, commit, at, ring, style.avatar);
     avatarSized(src, id, commit, at, ring, style.avatar);
+}
+
+/// A graph node with pictures off: a dot in the lane's colour or the
+/// author's — no picture asked for, no initials.
+fn avatarDot(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color, d: f32) void {
+    const name = commit.author;
+    const dot = d * 0.5;
+    var room = dvui.box(src, .{}, .{
+        .id_extra = id,
+        .rect = if (at) |p| dvui.Rect{ .x = p.x, .y = p.y, .w = d, .h = d } else null,
+        .background = false,
+        .min_size_content = .{ .w = d, .h = d },
+        .max_size_content = .size(.{ .w = d, .h = d }),
+        .gravity_y = 0.5,
+        .margin = if (at == null) .{ .w = style.space.sm } else dvui.Rect.all(0),
+        .padding = dvui.Rect.all(0),
+    });
+    defer room.deinit();
+    var disc = dvui.box(@src(), .{}, .{
+        .background = true,
+        .color_fill = .{ .color = ring orelse style.laneColor(std.hash.Wyhash.hash(0, name) % 6) },
+        .corners = .all(dot / 2),
+        .min_size_content = .{ .w = dot, .h = dot },
+        .max_size_content = .size(.{ .w = dot, .h = dot }),
+        .gravity_x = 0.5,
+        .gravity_y = 0.5,
+    });
+    disc.deinit();
 }
 
 /// As `avatar`, `d` across: the commit pane's is bigger than a graph node.
 fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color, d: f32) void {
     const name = commit.author;
-    // Pictures off in the settings: a dot, in the lane's colour or the
-    // author's — no picture asked for, no initials.
-    if (!show_avatars) {
-        const dot = d * 0.5;
-        var room = dvui.box(src, .{}, .{
-            .id_extra = id,
-            .rect = if (at) |p| dvui.Rect{ .x = p.x, .y = p.y, .w = d, .h = d } else null,
-            .background = false,
-            .min_size_content = .{ .w = d, .h = d },
-            .max_size_content = .size(.{ .w = d, .h = d }),
-            .gravity_y = 0.5,
-            .margin = if (at == null) .{ .w = style.space.sm } else dvui.Rect.all(0),
-            .padding = dvui.Rect.all(0),
-        });
-        defer room.deinit();
-        var disc = dvui.box(@src(), .{}, .{
-            .background = true,
-            .color_fill = .{ .color = ring orelse style.laneColor(std.hash.Wyhash.hash(0, name) % 6) },
-            .corners = .all(dot / 2),
-            .min_size_content = .{ .w = dot, .h = dot },
-            .max_size_content = .size(.{ .w = dot, .h = dot }),
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-        });
-        disc.deinit();
-        return;
-    }
     const rect: ?dvui.Rect = if (at) |p| .{ .x = p.x, .y = p.y, .w = d, .h = d } else null;
     const border: dvui.Rect = if (ring != null) dvui.Rect.all(1.5) else dvui.Rect.all(0);
 
@@ -17057,8 +17069,7 @@ fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, a
     // goes without a sha: asking with the commit's would answer with its
     // author's picture.
     const unborn = std.mem.allEqual(u8, std.mem.asBytes(&commit.id), 0);
-    // Off in the settings: not even asked for, the initials below.
-    if (if (show_avatars) avatars.get(commit.email, if (unborn) "" else git.oidHex(commit.id, &hex)) else null) |png| {
+    if (avatars.get(commit.email, if (unborn) "" else git.oidHex(commit.id, &hex))) |png| {
         _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = png, .name = "avatar" } }, .shrink = .both }, .{
             .expand = .both,
             // Half of what is left inside the ring: half the whole disc
@@ -19607,8 +19618,9 @@ fn commitFiles(id: git.Oid) void {
         viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree, true);
         track.deinit();
         // The kinds between, on the same line.
-        if (diff_all.len > 0) fileFilters() else _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        dvui.label(@src(), "All", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
+        if (diff_all.len > 0) fileFilters();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        dvui.label(@src(), "All files", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
         if (toggle(@src(), commit_all_files)) commit_all_files = !commit_all_files;
     }
 
@@ -19958,10 +19970,9 @@ fn fileFilters() void {
     // A kind this commit has none of shows nothing: back to all of them.
     if (n.get(file_filter) == 0) file_filter = .all;
 
-    // Between Path / Tree and All files, framed as they are, its kinds in
-    // segments of one width.
-    var track = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
-        .expand = .horizontal,
+    // Between Path / Tree and All files, framed as they are: All, then only
+    // the kinds this commit has, each as wide as it needs.
+    var track = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .gravity_y = 0.5,
         .margin = .{ .x = style.space.sm, .w = style.space.sm },
         .background = true,
@@ -19974,19 +19985,19 @@ fn fileFilters() void {
     defer track.deinit();
     for (std.enums.values(FileFilter), 0..) |f, i| {
         const count = n.get(f);
+        if (count == 0 and f != .all) continue;
         const on = file_filter == f;
         const usable = count > 0;
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = i,
             .tag = frameTag("files", @tagName(f)),
-            .expand = .horizontal,
             .background = true,
             .color_fill = .{ .color = if (on) style.accentDim() else dvui.Color.transparent },
             .color_fill_hover = .{ .color = if (on) style.accentDim() else if (usable) style.rowHover() else dvui.Color.transparent },
             .corners = style.radius.input,
             .margin = dvui.Rect.all(0),
-            .padding = .{ .x = style.space.xs, .y = 3, .w = style.space.xs, .h = 3 },
+            .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.sm, .h = 3 },
         });
         bw.processEvents();
         bw.drawBackground();
@@ -29017,6 +29028,7 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
+
 
 
 
