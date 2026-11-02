@@ -74,6 +74,11 @@ pub const File = struct {
     /// Authors' pictures, from Gravatar or GitHub; off, their initials and
     /// nothing asked of either.
     avatars: bool = true,
+    /// The theme by its name; empty, Zit Dark or Light as `dark` says.
+    theme: []const u8 = "",
+    /// The app's text and the editor's, as factors on their sizes.
+    ui_text: f32 = 1,
+    code_text: f32 = 1,
     /// GitHub, through Zit's own sign-in: pull requests, issues, checks, the
     /// account. Off, Zit is a git client and nothing more.
     integrations: bool = true,

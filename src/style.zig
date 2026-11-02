@@ -40,21 +40,26 @@ const fonts: []const dvui.Font.Source = &.{
     },
 };
 
-/// Type scale: a point over the dense one Zit started with, towards GitComet's
-/// comfortable density — the one it starts people on — in Inter, whose tall
-/// x-height reads larger than most faces at the same size.
+/// The app's text and the editor's (a diff's or a blame's code), each as a
+/// factor on the sizes below: set in Appearance, apart from the zoom.
+pub var ui_scale: f32 = 1;
+pub var code_scale: f32 = 1;
+
+/// Type scale, in Inter, whose tall x-height reads larger than most faces at
+/// the same size: one size for what is read — the commit list's message —
+/// titles over it, meta under it.
 pub const size = struct {
     pub const tiny: f32 = 10.5;
     pub const small: f32 = 11.5;
-    pub const body: f32 = 12.5;
+    /// The commit list's message size, and the app's: one size reads as one.
+    pub const body: f32 = 11.5;
     pub const section: f32 = 10.5;
     pub const title: f32 = 13.5;
-    pub const mono: f32 = 12;
+    pub const mono: f32 = 11;
     /// Tab names: read from across the window, not scanned in a list.
-    pub const tab: f32 = 12;
+    pub const tab: f32 = 11.5;
     /// The commit list: a message to read, its author and date under it in
     /// weight, never in size so far that they cannot be read.
-    /// Half a point under the rest: the list is scanned more than read.
     pub const graph: f32 = 11.5;
     pub const graph_meta: f32 = 10.5;
     /// Sha and date: a mono face reads larger than Inter at the same size.
@@ -65,67 +70,67 @@ pub const size = struct {
 };
 
 pub fn tab() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tab });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tab });
 }
 
 pub fn tabBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tab, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tab, .weight = .bold });
 }
 
 /// A commit's message in the graph.
 pub fn graphText() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.graph });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.graph });
 }
 
 /// Author and date in the graph: under the message, never competing with it.
 pub fn graphMeta() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.graph_meta });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.graph_meta });
 }
 
 pub fn graphMono() dvui.Font {
-    return .find(.{ .family = MONO_FAMILY, .size = size.graph_mono });
+    return .find(.{ .family = MONO_FAMILY, .size = ui_scale * size.graph_mono });
 }
 
 pub fn body() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.body });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.body });
 }
 
 pub fn bodyBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.body, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.body, .weight = .bold });
 }
 
 pub fn small() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.small, .line_height_factor = 1.15 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.small, .line_height_factor = 1.15 });
 }
 
 pub fn smallBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.small, .weight = .bold, .line_height_factor = 1.15 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.small, .weight = .bold, .line_height_factor = 1.15 });
 }
 
 pub fn tinyBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tiny, .weight = .bold, .line_height_factor = 1.1 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tiny, .weight = .bold, .line_height_factor = 1.1 });
 }
 
 pub fn tiny() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tiny, .line_height_factor = 1.1 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tiny, .line_height_factor = 1.1 });
 }
 
 /// Panel headers. Small and bold beats large and light for a sidebar.
 pub fn section() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.section, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.section, .weight = .bold });
 }
 
 pub fn title() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.title, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.title, .weight = .bold });
 }
 
 /// Code in a diff or a blame: its lines, signs and numbers.
 pub fn code() dvui.Font {
-    return .find(.{ .family = MONO_FAMILY, .size = size.code });
+    return .find(.{ .family = MONO_FAMILY, .size = code_scale * size.code });
 }
 
 pub fn mono() dvui.Font {
-    return .find(.{ .family = MONO_FAMILY, .size = size.mono });
+    return .find(.{ .family = MONO_FAMILY, .size = ui_scale * size.mono });
 }
 
 // === Spacing / geometry ===
@@ -362,20 +367,6 @@ pub fn success() dvui.Color {
 
 // === Git-specific colours ===
 
-/// The miniature of a theme on its card in the settings: fixed, not read from
-/// the palette, because both cards show at once and only one theme is loaded.
-pub fn themePreview(dark: bool) struct { background: dvui.Color, panel: dvui.Color, line: dvui.Color } {
-    return if (dark) .{
-        .background = .{ .r = 0x1c, .g = 0x1b, .b = 0x24 },
-        .panel = .{ .r = 0x24, .g = 0x23, .b = 0x2e },
-        .line = .{ .r = 0x3c, .g = 0x3a, .b = 0x4a },
-    } else .{
-        .background = .{ .r = 0xff, .g = 0xff, .b = 0xff },
-        .panel = .{ .r = 0xf3, .g = 0xf2, .b = 0xf8 },
-        .line = .{ .r = 0xd6, .g = 0xd2, .b = 0xe2 },
-    };
-}
-
 /// A lane's colour faint enough to lie under text: the band that joins a
 /// commit's node to its message, and — stronger — the selected row, so the
 /// selection says which branch it is on.
@@ -452,6 +443,37 @@ fn pick(v: ?ColorValue, fallback: dvui.Color) dvui.Color {
 /// of them, so a broken user theme cannot leave the app unstyled.
 const theme_dark = @embedFile("theme/zit_dark.json");
 const theme_light = @embedFile("theme/zit_light.json");
+
+/// A theme to pick: its name, its file, light or dark, and the three
+/// colours its card shows — ground, panel, line — with its accent.
+pub const Theme = struct {
+    name: []const u8,
+    json: []const u8,
+    dark: bool,
+    preview: [4]u24,
+};
+
+/// Zit's own two, then Catppuccin's four.
+pub const themes = [_]Theme{
+    .{ .name = "Zit Dark", .json = theme_dark, .dark = true, .preview = .{ 0x1c1b24, 0x24232e, 0x3c3a4a, 0xa66cff } },
+    .{ .name = "Zit Light", .json = theme_light, .dark = false, .preview = .{ 0xffffff, 0xf3f2f8, 0xd6d2e2, 0x7c3aed } },
+    .{ .name = "Catppuccin Latte", .json = @embedFile("theme/catppuccin_latte.json"), .dark = false, .preview = .{ 0xeff1f5, 0xe6e9ef, 0xbcc0cc, 0x8839ef } },
+    .{ .name = "Catppuccin Frappé", .json = @embedFile("theme/catppuccin_frappe.json"), .dark = true, .preview = .{ 0x303446, 0x292c3c, 0x51576d, 0xca9ee6 } },
+    .{ .name = "Catppuccin Macchiato", .json = @embedFile("theme/catppuccin_macchiato.json"), .dark = true, .preview = .{ 0x24273a, 0x1e2030, 0x494d64, 0xc6a0f6 } },
+    .{ .name = "Catppuccin Mocha", .json = @embedFile("theme/catppuccin_mocha.json"), .dark = true, .preview = .{ 0x1e1e2e, 0x181825, 0x45475a, 0xcba6f7 } },
+};
+
+pub fn hex(v: u24) dvui.Color {
+    return .{ .r = @intCast(v >> 16), .g = @intCast((v >> 8) & 0xff), .b = @intCast(v & 0xff) };
+}
+
+/// Put theme `index` of `themes` on.
+pub fn applyTheme(allocator: std.mem.Allocator, index: usize) !void {
+    const t = themes[@min(index, themes.len - 1)];
+    var parsed = try std.json.parseFromSlice(ThemeFile, allocator, t.json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    apply(parsed.value, t.name, t.dark);
+}
 
 pub fn applyEmbedded(allocator: std.mem.Allocator, dark: bool) !void {
     const bytes = if (dark) theme_dark else theme_light;

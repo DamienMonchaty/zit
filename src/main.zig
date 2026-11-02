@@ -344,6 +344,13 @@ fn loadWorkspace() void {
     ensureWorkspaceGroups();
     active_ws = if (groups.items.len > 0) groups.items[active_group].ws else 0;
     dark_theme = loaded.file.dark;
+    theme_index = if (dark_theme) 0 else 1;
+    for (style.themes, 0..) |t, i| if (std.mem.eql(u8, t.name, loaded.file.theme)) {
+        theme_index = i;
+        dark_theme = t.dark;
+    };
+    style.ui_scale = std.math.clamp(loaded.file.ui_text, 0.8, 1.3);
+    style.code_scale = std.math.clamp(loaded.file.code_text, 0.8, 1.5);
     for (loaded.file.recent) |path| addRecent(path, false);
     commit_prefs = loaded.file.commit;
     auto_fetch_minutes = loaded.file.auto_fetch_minutes;
@@ -440,6 +447,9 @@ fn writeWorkspace() bool {
         .active_group = active_group,
         .active_repo = active_tab,
         .dark = dark_theme,
+        .theme = style.themes[theme_index].name,
+        .ui_text = style.ui_scale,
+        .code_text = style.code_scale,
         .recent = recent.items,
         .auto_fetch_minutes = auto_fetch_minutes,
         .show_remote_branches = graph_show_remote,
@@ -989,6 +999,8 @@ var changes_view: ChangesView = .path;
 
 /// Which compiled-in theme is on.
 var dark_theme: bool = true;
+/// The theme on, by its place in `style.themes`.
+var theme_index: usize = 0;
 
 /// A destructive action waiting for a yes.
 ///
@@ -1944,7 +1956,8 @@ fn migrateFromZync(dir: []const u8, tail: []const u8) void {
 /// Put the chosen theme on. Split out of `appInit` because the settings menu
 /// calls it too, and a failure means the same thing in both places.
 fn applyTheme() void {
-    style.applyEmbedded(gpa, dark_theme) catch |err| {
+    dark_theme = style.themes[theme_index].dark;
+    style.applyTheme(gpa, theme_index) catch |err| {
         // Only reachable if the compiled-in JSON is malformed, which is a build
         // problem, not a user one — but an unstyled window beats no window.
         std.log.warn("theme not applied ({s}), falling back to the dvui default", .{@errorName(err)});
@@ -6415,9 +6428,9 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
         else
             .{ "Open", style.success() };
         statePill(word, hue);
-        dvui.label(@src(), "#{d}", .{d.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "#{d}", .{d.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE * style.ui_scale), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
-        tl.addText(d.title, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.text() } });
+        tl.addText(d.title, .{ .font = style.title().withSize(PR_TITLE_SIZE * style.ui_scale), .color_text = .{ .color = style.text() } });
         tl.deinit();
 
         // What to do with it, short of answering it: icons at the end of
@@ -9169,7 +9182,7 @@ const settings_pages = [_]?SettingsPage{
     null,
     .{ .id = 5, .icon = dvui.entypo.cog, .title = "General", .hint = "Tabs, new repositories, fetching" },
     .{ .id = 3, .icon = dvui.entypo.merge, .title = "Integrations", .hint = "GitHub: pull requests, issues, checks and the account" },
-    .{ .id = 0, .icon = dvui.entypo.palette, .title = "Appearance", .hint = "Dark or light, and how the graph is drawn" },
+    .{ .id = 0, .icon = dvui.entypo.palette, .title = "Appearance", .hint = "The theme, the size of the text, the pictures" },
     null,
     .{ .id = 1, .icon = dvui.entypo.user, .title = "Git identity", .hint = "The name and email your commits carry" },
     .{ .id = 2, .icon = dvui.entypo.pencil, .title = "Commit messages", .hint = "Ticket, conventional commits, template" },
@@ -9300,16 +9313,34 @@ fn settingsDialog() void {
         }
         if (SettingsCard.begin(0)) |card| {
             defer card.end();
-            {
+            // Three a row: Zit's own, then Catppuccin's.
+            for (0..(style.themes.len + 2) / 3) |r| {
                 var cards = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
+                    .id_extra = r,
                     .expand = .horizontal,
                     .background = false,
                     .padding = settings_body_pad,
                 });
                 defer cards.deinit();
-
-                if (themeCard(@src(), 0, "Dark", true) and !dark_theme) setTheme(true);
-                if (themeCard(@src(), 1, "Light", false) and dark_theme) setTheme(false);
+                for (r * 3..@min(r * 3 + 3, style.themes.len)) |i| {
+                    if (themeCard(@src(), i) and i != theme_index) pickTheme(i);
+                }
+            }
+            {
+                var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
+                defer section.deinit();
+                settingsField(@src(), "Text size", "The app's words, apart from the zoom");
+                const ui_steps = [_]f32{ 0.9, 1, 1.08, 1.16 };
+                if (choiceChips(10, &.{ "Small", "Default", "Large", "Larger" }, nearestStep(&ui_steps, style.ui_scale))) |i| {
+                    style.ui_scale = ui_steps[i];
+                    saveWorkspace();
+                }
+                settingsField(@src(), "Editor text size", "The code of a diff or a blame");
+                const code_steps = [_]f32{ 10.0 / 11.0, 1, 12.0 / 11.0, 13.0 / 11.0, 14.0 / 11.0 };
+                if (choiceChips(11, &.{ "10", "11", "12", "13", "14" }, nearestStep(&code_steps, style.code_scale))) |i| {
+                    style.code_scale = code_steps[i];
+                    saveWorkspace();
+                }
             }
             {
                 var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
@@ -9559,8 +9590,13 @@ fn shortcutCard(src: std.builtin.SourceLocation, id: usize) *dvui.BoxWidget {
     });
 }
 
+/// Light or dark, from a key or a menu: Zit's own of either.
 fn setTheme(dark: bool) void {
-    dark_theme = dark;
+    pickTheme(if (dark) 0 else 1);
+}
+
+fn pickTheme(index: usize) void {
+    theme_index = index;
     applyTheme();
     saveWorkspace();
 }
@@ -9946,6 +9982,16 @@ fn setLocalConfig(key: []const u8, value: []const u8) void {
     repo_prefs_loaded = false;
 }
 
+/// Which of `steps` `value` is closest to: a saved factor read back as the
+/// chip it was picked from.
+fn nearestStep(steps: []const f32, value: f32) usize {
+    var best: usize = 0;
+    for (steps, 0..) |v, i| if (@abs(v - value) < @abs(steps[best] - value)) {
+        best = i;
+    };
+    return best;
+}
+
 /// One choice out of a few, as a row of chips: the one picked ticked.
 fn choiceChips(id: usize, options: []const []const u8, current: usize) ?usize {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .background = false });
@@ -10263,8 +10309,10 @@ fn settingsHeading(src: std.builtin.SourceLocation, caption: []const u8) void {
 
 /// A theme to pick, drawn in its own colours: a strip of background, a
 /// surface and an accent, so it is chosen by looking rather than by name.
-fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, dark: bool) bool {
-    const selected = dark == dark_theme;
+fn themeCard(src: std.builtin.SourceLocation, id: usize) bool {
+    const t = style.themes[id];
+    const caption = t.name;
+    const selected = id == theme_index;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = frameTag("theme", caption),
@@ -10288,10 +10336,10 @@ fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, da
     });
     defer card.deinit();
 
-    const preview_colors = style.themePreview(dark);
-    const bg = preview_colors.background;
-    const panel = preview_colors.panel;
-    const line = preview_colors.line;
+    const bg = style.hex(t.preview[0]);
+    const panel = style.hex(t.preview[1]);
+    const line = style.hex(t.preview[2]);
+    const accent = style.hex(t.preview[3]);
     {
         var preview = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
@@ -10322,7 +10370,7 @@ fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, da
                 .expand = .horizontal,
                 .min_size_content = .{ .h = 8 },
                 .background = true,
-                .color_fill = .{ .color = if (i == 0) style.accent() else line },
+                .color_fill = .{ .color = if (i == 0) accent else line },
                 .corners = style.radius.tag,
                 .margin = .{ .h = 6, .w = if (i == 2) 30 else 0 },
             });
@@ -10334,7 +10382,7 @@ fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, da
         var caption_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer caption_row.deinit();
         dvui.label(@src(), "{s}", .{caption}, .{
-            .font = style.bodyBold(),
+            .font = style.smallBold(),
             .color_text = .{ .color = style.text() },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
@@ -10573,9 +10621,7 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Switch theme, light or dark", .icon = dvui.entypo.light_up, .needs_repo = false, .run = struct {
         fn f() void {
-            dark_theme = !dark_theme;
-            applyTheme();
-            saveWorkspace();
+            setTheme(!dark_theme);
         }
     }.f },
 };
@@ -17771,7 +17817,8 @@ fn diffPanel() void {
         else => null,
     };
 
-    const rh = style.diff_row;
+    // Taller with a larger editor text, never shorter.
+    const rh = style.diff_row * @max(1, style.code_scale);
     const total_rows = if (diff_split) split_rows.items.len else diff_rows;
     diff_scroll.virtual_size.h = @as(f32, @floatFromInt(total_rows)) * rh;
 
@@ -18139,7 +18186,7 @@ fn blamePanel() void {
         return;
     };
 
-    const rh = style.diff_row;
+    const rh = style.diff_row * @max(1, style.code_scale);
     blame_scroll.virtual_size.h = @as(f32, @floatFromInt(b.lines.len)) * rh;
 
     var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &blame_scroll }, .{
@@ -19338,7 +19385,7 @@ fn commitDetail(id: git.Oid) void {
 
         var title = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
         dropStaleTextSelection(title);
-        title.addText(commitSummary(id), .{ .font = style.title().withSize(15), .color_text = .{ .color = style.text() } });
+        title.addText(commitSummary(id), .{ .font = style.title().withSize(15 * style.ui_scale), .color_text = .{ .color = style.text() } });
         title.deinit();
 
         // The message past its title, read as the host would show it: its
@@ -28950,6 +28997,7 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
+
 
 
 
