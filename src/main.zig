@@ -4734,6 +4734,80 @@ const COMMIT_TYPES = [_][]const u8{ "feat", "fix", "refactor", "perf", "docs", "
 /// Summary lines git log keeps whole; past the first, most tools cut them.
 const SUMMARY_SOFT = 50;
 const SUMMARY_HARD = 72;
+
+/// Where a summary longer than `limit` is cut: at its last space before
+/// the limit, or at the limit for one long word. Null when it fits.
+fn summaryCut(summary: []const u8, limit: usize) ?usize {
+    if (summary.len <= limit) return null;
+    const space = std.mem.lastIndexOfScalar(u8, summary[0 .. limit + 1], ' ') orelse return limit;
+    return if (space == 0) limit else space;
+}
+
+/// The summary's last overflow went to the description: said under it
+/// until the summary is emptied — committed, or cleared.
+var summary_moved = false;
+
+/// What git's conventions say of the summary, said rather than done behind
+/// its back: where its overflow went, a full stop to drop, a length that
+/// reads long in a log.
+fn summaryNotes() void {
+    const summary = std.mem.trim(u8, commit_summary.items, " ");
+    if (summary.len == 0) {
+        summary_moved = false;
+        return;
+    }
+    const line_len = if (commitSummaryLine(dvui.currentWindow().arena())) |line| line.len else |_| summary.len;
+    if (summary_moved) summaryNote(0, dvui.entypo.info_with_circle, style.accent(), "Past 72 characters: the rest went on in the description.").deinit();
+    if (summary[summary.len - 1] == '.') {
+        var line = summaryNote(1, dvui.entypo.warning, style.get().orange, "A summary ends without a full stop.");
+        defer line.deinit();
+        if (linkButtonTagged(@src(), "Remove it", style.get().orange, "commit:drop_stop")) {
+            commit_summary.shrinkRetainingCapacity(std.mem.trimEnd(u8, commit_summary.items, ". ").len);
+        }
+    } else if (line_len > SUMMARY_SOFT and !summary_moved) {
+        summaryNote(2, dvui.entypo.light_bulb, style.textFaint(), "Under 50 characters reads best in a log.").deinit();
+    }
+}
+
+/// One note under the summary: its icon and words in `hue`; the caller
+/// adds what to do about it, then `deinit`s.
+fn summaryNote(id: usize, icon: []const u8, hue: dvui.Color, text: []const u8) *dvui.BoxWidget {
+    const line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .h = style.space.xs } });
+    dvui.icon(@src(), "note_icon", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 11, .h = 11 }, .gravity_y = 0.5, .margin = .{ .w = style.space.xs } });
+    dvui.label(@src(), "{s}", .{text}, .{ .font = style.tiny(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    return line;
+}
+
+/// A summary past 72 columns — its prefix counted, the type or the ticket
+/// the settings add — moved past its last word that fits to the head of
+/// the description. True when something moved.
+fn overflowSummary() bool {
+    const summary = commit_summary.items;
+    const line_len = if (commitSummaryLine(dvui.currentWindow().arena())) |line| line.len else |_| summary.len;
+    const prefix = line_len -| std.mem.trim(u8, summary, " ").len;
+    const cut = summaryCut(summary, @max(20, SUMMARY_HARD -| prefix)) orelse return false;
+    const rest = std.mem.trim(u8, summary[cut..], " ");
+    var next: std.ArrayList(u8) = .empty;
+    next.appendSlice(gpa, rest) catch return false;
+    if (commit_description.items.len > 0) {
+        next.append(gpa, '\n') catch {};
+        next.appendSlice(gpa, commit_description.items) catch {};
+    }
+    commit_description.deinit(gpa);
+    commit_description = next;
+    commit_summary.shrinkRetainingCapacity(std.mem.trimEnd(u8, summary[0..cut], " ").len);
+    return true;
+}
+
+test "a summary past 72 is cut at its last word that fits" {
+    const long = "Settings for this repository, and a file opened in your editor of choice today";
+    try std.testing.expect(long.len > 72);
+    const cut = summaryCut(long, 72).?;
+    try std.testing.expectEqualStrings("Settings for this repository, and a file opened in your editor of choice", long[0..cut]);
+    try std.testing.expect(summaryCut("short", 72) == null);
+    // One word longer than the limit: cut at the limit.
+    try std.testing.expectEqual(@as(?usize, 5), summaryCut("abcdefghij", 5));
+}
 const BODY_WIDTH = 72;
 
 /// The ticket a branch is named after — its first `ABC-123`: two or more
@@ -21321,11 +21395,18 @@ fn commitBox() void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer row.deinit();
         commitTypeMenu(@src());
-        commitField(@src(), &commit_scope, "scope", false, 0, "commit_scope");
+        _ = commitField(@src(), &commit_scope, "scope", false, 0, "commit_scope");
         scopeMenu(@src());
     }
-    commitField(@src(), &commit_summary, "Commit summary", false, 0, "commit_summary");
-    commitField(@src(), &commit_description, "Description (optional)", true, 52, "commit_description");
+    _ = commitField(@src(), &commit_summary, "Commit summary", false, 0, "commit_summary");
+    const description_field = commitField(@src(), &commit_description, "Description (optional)", true, 52, "commit_description");
+    // Past 72 the summary goes on in the description, the typing with it.
+    if (overflowSummary()) {
+        summary_moved = true;
+        dvui.focusWidget(description_field, null, null);
+        dvui.refresh(null, @src(), null);
+    }
+    summaryNotes();
 
     // What the settings add, shown before it is committed rather than found
     // in the log afterwards.
@@ -21411,7 +21492,7 @@ fn commitField(
     multiline: bool,
     height: f32,
     tag: []const u8,
-) void {
+) dvui.Id {
     var field = dvui.box(src, .{}, .{
         .expand = .horizontal,
         .background = true,
@@ -21441,7 +21522,9 @@ fn commitField(
         .max_size_content = .width(0),
         .font = style.small(),
     });
+    const id = te.data().id;
     te.deinit();
+    return id;
 }
 
 /// A small pill that opens a menu: icon, text, chevron.
@@ -29152,3 +29235,40 @@ test "a repository's own settings are written to its config and read back" {
 
 
 
+
+test "a summary typed past 72 goes on in the description, and says so" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
+    defer t.deinit();
+    try style.applyEmbedded(gpa, true);
+    openRepo(dir);
+    defer closeRepo();
+    try dvui.testing.settle(frameArrowCursor);
+
+    // Key by key, as it is typed: the move happens mid-word, and the rest of
+    // the word follows it into the description.
+    try clickAt(try tagCenter("commit_summary"));
+    for ("Settings for this repository, and a file opened in your editor of choice today") |ch| try typeText(&.{ch});
+    try dvui.testing.settle(frameArrowCursor);
+    try std.testing.expectEqualStrings("Settings for this repository, and a file opened in your editor of choice", commit_summary.items);
+    try std.testing.expectEqualStrings("today", commit_description.items);
+    try std.testing.expect(summary_moved);
+    try std.testing.expect(dvui.tagGet("commit:drop_stop") == null);
+
+    // A full stop is pointed out, and dropped in a click.
+    commit_summary.clearRetainingCapacity();
+    commit_description.clearRetainingCapacity();
+    try commit_summary.appendSlice(gpa, "Fix the parser.");
+    try dvui.testing.settle(frameArrowCursor);
+    try clickAt(try tagCenter("commit:drop_stop"));
+    try std.testing.expectEqualStrings("Fix the parser", commit_summary.items);
+}
