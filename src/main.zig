@@ -495,12 +495,35 @@ fn setZoom(to: f32) void {
     saveWorkspace();
 }
 
+/// The 6 key where it types a minus — AZERTY: SDL names the number row by
+/// its digits on a French keyboard, so its "-" comes as 6. Asked of the
+/// layout itself, so elsewhere Ctrl+6 stays nothing.
+fn minusOnSix(ke: dvui.Event.Key) bool {
+    if (ke.code != .six) return false;
+    if (@import("builtin").is_test) return false;
+    const c = dvui.backend.c;
+    return c.SDL_GetKeyFromScancode(c.SDL_SCANCODE_6, c.SDL_KMOD_NONE, false) == c.SDLK_MINUS;
+}
+
+/// A "+" with a key of its own — QWERTZ: SDL calls it SDLK_PLUS, which dvui
+/// has no name for, so it arrives unnamed. Whether the layout's "+" key is
+/// the one down, asked of SDL.
+fn plusKey(ke: dvui.Event.Key) bool {
+    if (ke.code != .unknown) return false;
+    if (@import("builtin").is_test) return false;
+    const c = dvui.backend.c;
+    const sc = c.SDL_GetScancodeFromKey(c.SDLK_PLUS, null);
+    if (sc == c.SDL_SCANCODE_UNKNOWN) return false;
+    const keys = c.SDL_GetKeyboardState(null);
+    return keys[@intCast(sc)];
+}
+
 /// What a key asks of the zoom: the step, or back to 100 %. The keypad's as
 /// well as the main row's; Cmd on a Mac, through dvui's own binds.
 fn zoomKey(ke: dvui.Event.Key) ?f32 {
     const mod = ke.mod.control() and !ke.mod.alt();
-    if ((mod and (ke.code == .equal or ke.code == .kp_add)) or ke.matchBind("zoom_in")) return zoom + 0.1;
-    if ((mod and (ke.code == .minus or ke.code == .kp_subtract)) or ke.matchBind("zoom_out")) return zoom - 0.1;
+    if ((mod and (ke.code == .equal or ke.code == .kp_add or plusKey(ke))) or ke.matchBind("zoom_in")) return zoom + 0.1;
+    if ((mod and (ke.code == .minus or ke.code == .kp_subtract or minusOnSix(ke))) or ke.matchBind("zoom_out")) return zoom - 0.1;
     if (mod and !ke.mod.shift() and (ke.code == .zero or ke.code == .kp_0)) return 1.0;
     return null;
 }
@@ -9638,7 +9661,7 @@ fn keysDialog() void {
         shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
         shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
         shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
-        shortcutRow(@src(), "Ctrl+=, Ctrl+-", "Zoom in / out, from 70 to 200 %");
+        shortcutRow(@src(), "Ctrl+Plus, Ctrl+Minus", "Zoom in / out, from 70 to 200 %");
         shortcutRow(@src(), "Ctrl+0", "Back to 100 %");
     }
 
