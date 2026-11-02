@@ -65,6 +65,9 @@ pub const File = struct {
     default_branch: []const u8 = "main",
     /// Fetches drop the remote branches deleted on the remote.
     prune: bool = true,
+    /// What opens a file from a diff: a command, the file's path after it.
+    /// Empty: the system's own choice for the file.
+    editor: []const u8 = "",
     /// GitHub, through Zit's own sign-in: pull requests, issues, checks, the
     /// account. Off, Zit is a git client and nothing more.
     integrations: bool = true,

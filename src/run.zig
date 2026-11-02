@@ -83,7 +83,7 @@ pub fn open(io: std.Io, cwd: []const u8, path: []const u8) !void {
 
 /// Start `argv` with no pipe to Zit and return at once; a thread of its own
 /// waits for it, so it leaves no zombie behind.
-fn startDetached(io: std.Io, cwd: []const u8, argv: []const []const u8) !void {
+pub fn startDetached(io: std.Io, cwd: []const u8, argv: []const []const u8) !void {
     const child = try std.process.spawn(io, .{
         .argv = argv,
         .cwd = .{ .path = cwd },

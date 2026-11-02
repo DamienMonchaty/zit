@@ -300,6 +300,8 @@ fn loadWorkspace() void {
     avatars.use_github.store(integrations, .release);
     default_branch.clearRetainingCapacity();
     default_branch.appendSlice(gpa, loaded.file.default_branch) catch {};
+    editor_cmd.clearRetainingCapacity();
+    editor_cmd.appendSlice(gpa, loaded.file.editor) catch {};
 
     // Turned off, the tabs are still written — so turning it back on brings
     // them back — but not opened.
@@ -443,6 +445,7 @@ fn writeWorkspace() bool {
         .branch_width = branch_width,
         .remember_tabs = remember_tabs,
         .default_branch = default_branch.items,
+        .editor = editor_cmd.items,
         .prune = prune_on_fetch,
         .integrations = integrations,
         .zoom = zoom,
@@ -506,10 +509,14 @@ fn setIntegrations(on: bool) void {
     saveWorkspace();
 }
 var default_branch: std.ArrayList(u8) = .empty;
+/// The command a file opens with; empty for the system's own choice.
+var editor_cmd: std.ArrayList(u8) = .empty;
 
 /// The arguments of a fetch of every remote, pruning or not as set; `quiet`
-/// for the timer's own.
+/// for the timer's own. Where git's own config says whether to prune — for
+/// this repository or everywhere — git decides.
 fn fetchAllArgs(quiet: bool) []const []const u8 {
+    if (git_fetch_prune_set) return if (quiet) &.{ "fetch", "--all", "--quiet" } else &.{ "fetch", "--all" };
     return if (prune_on_fetch)
         (if (quiet) &.{ "fetch", "--all", "--prune", "--quiet" } else &.{ "fetch", "--all", "--prune" })
     else
@@ -2020,8 +2027,12 @@ fn appDeinit(win: *dvui.Window) void {
     author_only.deinit(gpa);
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
+    editor_cmd.deinit(gpa);
     signing_key.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
+    if (repo_prefs_job) |j| j.deinit(app_io);
+    repo_name_local.deinit(gpa);
+    repo_email_local.deinit(gpa);
     if (repo_config_job) |j| j.deinit(app_io);
     git_template_path.deinit(gpa);
     commit_sent.deinit(gpa);
@@ -4825,13 +4836,17 @@ fn addCoAuthor(name: []const u8, email: []const u8) void {
 var repo_config_job: ?*run.Capture = null;
 /// `commit.template` as `git config --path` gives it; empty for none.
 var git_template_path: std.ArrayList(u8) = .empty;
+/// git's config says whether a fetch prunes, here or everywhere: the
+/// setting of Zit's own then gives way to it.
+var git_fetch_prune_set = false;
 
 fn startRepoConfig() void {
     if (repo_config_job) |old| old.deinit(app_io);
     repo_config_job = null;
     avatars.setSelfEmail("");
     git_template_path.clearRetainingCapacity();
-    repo_config_job = run.Capture.start(gpa, app_io, repo_path.items, &.{ "git", "config", "--path", "--get-regexp", "^(user\\.email|commit\\.template)$" }) catch null;
+    git_fetch_prune_set = false;
+    repo_config_job = run.Capture.start(gpa, app_io, repo_path.items, &.{ "git", "config", "--path", "--get-regexp", "^(user\\.email|commit\\.template|fetch\\.prune)$" }) catch null;
 }
 
 /// Take in the repository's config once its `git` has answered.
@@ -4857,6 +4872,8 @@ fn collectRepoConfig() void {
         } else if (std.mem.eql(u8, line[0..space], "commit.template")) {
             git_template_path.clearRetainingCapacity();
             git_template_path.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, line[0..space], "fetch.prune")) {
+            git_fetch_prune_set = true;
         }
     }
     // Whose picture is the signed-in GitHub account's: the address this
@@ -9099,6 +9116,7 @@ fn openSettings(section: usize) void {
     settings_open = true;
     settings_rect = .{};
     signing_loaded = false;
+    repo_prefs_loaded = false;
     settings_page = section;
 }
 
@@ -9121,8 +9139,11 @@ const settings_pages = [_]?SettingsPage{
     .{ .id = 1, .icon = dvui.entypo.user, .title = "Git identity", .hint = "The name and email your commits carry" },
     .{ .id = 2, .icon = dvui.entypo.pencil, .title = "Commit messages", .hint = "Ticket, conventional commits, template" },
     .{ .id = 6, .icon = dvui.entypo.lock, .title = "Commit signing", .hint = "GPG or SSH, for commits and tags" },
+    // Only while a repository is open: the last group, left out otherwise.
+    null,
+    .{ .id = 7, .icon = dvui.entypo.folder, .title = "This repository", .hint = "Its own identity, pull and signing — in its .git/config" },
 };
-const settings_groups = [_][]const u8{ "Zit", "Commits" };
+const settings_groups = [_][]const u8{ "Zit", "Commits", "Repository" };
 
 fn settingsDialog() void {
     if (!settings_open) return;
@@ -9173,6 +9194,16 @@ fn settingsDialog() void {
             }));
             if (branch.text_changed) changed = true;
             branch.deinit();
+
+            settingsField(@src(), "External editor", "What a file opens with from a diff — code, subl, zed… Empty: the system's choice");
+            const editor = textField(@src(), .{
+                .text = .{ .array_list = .{ .backing = &editor_cmd, .allocator = gpa, .limit = 256 } },
+                .placeholder = "code",
+            }, settingsInput().override(.{
+                .tag = "editor_cmd",
+            }));
+            if (editor.text_changed) changed = true;
+            editor.deinit();
 
             settingsField(@src(), "Fetch in the background", "Every remote, quietly — the counts on Pull and Push stay true");
             {
@@ -9251,6 +9282,10 @@ fn settingsDialog() void {
                 graph_width = if (compact) GRAPH_COMPACT_W else 0;
                 saveWorkspace();
             }
+        }
+        if (SettingsCard.begin(7)) |card| {
+            defer card.end();
+            repoSettings();
         }
         if (SettingsCard.begin(1)) |card| {
             defer card.end();
@@ -9617,6 +9652,7 @@ fn settingsNav() void {
     var group: usize = 0;
     for (settings_pages, 0..) |entry, i| {
         const page = entry orelse {
+            if (repo == null and std.mem.eql(u8, settings_groups[group], "Repository")) break;
             settingsGroup(@src(), group, settings_groups[group]);
             group += 1;
             continue;
@@ -9649,6 +9685,7 @@ fn settingsNav() void {
         if (bw.clicked()) {
             settings_page = page.id;
             signing_loaded = false;
+            repo_prefs_loaded = false;
         }
         bw.deinit();
     }
@@ -9738,6 +9775,188 @@ fn loadSigning() void {
             signing_format = if (std.mem.eql(u8, value, "ssh")) "ssh" else "openpgp";
         }
     }
+}
+
+// === This repository's settings ===
+//
+// What git keeps in the repository's own .git/config: read when the page is
+// opened, written as it is changed, so git — and any other tool — goes by
+// them too. Unset, the global ones hold.
+
+var repo_prefs_loaded = false;
+var repo_prefs_job: ?*run.Capture = null;
+var repo_name_local: std.ArrayList(u8) = .empty;
+var repo_email_local: std.ArrayList(u8) = .empty;
+/// How `git pull` joins what it fetched: as set everywhere, or here.
+var repo_pull: enum { global, merge, rebase, ff_only } = .global;
+/// `fetch.prune` and `commit.gpgsign` here: unset, on, off.
+var repo_prune: Tri = .global;
+var repo_sign: Tri = .global;
+const Tri = enum { global, on, off };
+
+fn loadRepoPrefs() void {
+    if (repo_prefs_loaded or repo == null) return;
+    const job_now = repo_prefs_job orelse blk: {
+        const started = run.Capture.start(gpa, app_io, repo_path.items, &.{ "git", "config", "--local", "--get-regexp", "^(user\\.name|user\\.email|pull\\.rebase|pull\\.ff|fetch\\.prune|commit\\.gpgsign)$" }) catch {
+            repo_prefs_loaded = true;
+            return;
+        };
+        repo_prefs_job = started;
+        break :blk started;
+    };
+    if (!job_now.finished()) return;
+    repo_prefs_job = null;
+    defer job_now.deinit(app_io);
+
+    repo_prefs_loaded = true;
+    repo_name_local.clearRetainingCapacity();
+    repo_email_local.clearRetainingCapacity();
+    repo_pull = .global;
+    repo_prune = .global;
+    repo_sign = .global;
+    // Nothing set gives git's exit 1: every setting as everywhere.
+    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const key = line[0..space];
+        const value = std.mem.trim(u8, line[space + 1 ..], " ");
+        const yes = std.ascii.eqlIgnoreCase(value, "true");
+        if (std.mem.eql(u8, key, "user.name")) {
+            repo_name_local.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, key, "user.email")) {
+            repo_email_local.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, key, "pull.rebase")) {
+            if (repo_pull != .ff_only) repo_pull = if (yes) .rebase else .merge;
+        } else if (std.mem.eql(u8, key, "pull.ff")) {
+            if (std.mem.eql(u8, value, "only")) repo_pull = .ff_only;
+        } else if (std.mem.eql(u8, key, "fetch.prune")) {
+            repo_prune = if (yes) .on else .off;
+        } else if (std.mem.eql(u8, key, "commit.gpgsign")) {
+            repo_sign = if (yes) .on else .off;
+        }
+    }
+}
+
+/// `git config --local key value` here — the empty value unsets it.
+fn setLocalConfig(key: []const u8, value: []const u8) void {
+    if (repo == null) return;
+    var outcome = (if (value.len == 0)
+        run.git(gpa, app_io, repo_path.items, &.{ "config", "--local", "--unset-all", key })
+    else
+        run.git(gpa, app_io, repo_path.items, &.{ "config", "--local", key, value })) catch return setCommandError("Could not run git. Is it on your PATH?");
+    defer outcome.deinit(gpa);
+    // Unsetting what was never set is git's exit 5: nothing to say.
+    if (!outcome.ok and value.len > 0) setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
+    repo_prefs_loaded = false;
+}
+
+/// One choice out of a few, as a row of chips: the one picked ticked.
+fn choiceChips(id: usize, options: []const []const u8, current: usize) ?usize {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .background = false });
+    defer row.deinit();
+    var picked: ?usize = null;
+    for (options, 0..) |caption, i| {
+        var chip = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false });
+        defer chip.deinit();
+        if (chipButton(@src(), if (current == i) dvui.entypo.check else dvui.entypo.dot_single, caption, current == i)) picked = i;
+    }
+    return picked;
+}
+
+/// The page: who commits here, how pull joins, whether fetch prunes and
+/// commits are signed — each "as everywhere" until set.
+fn repoSettings() void {
+    loadRepoPrefs();
+    var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
+    defer section.deinit();
+    if (!repo_prefs_loaded) {
+        dvui.label(@src(), "Reading the repository's config…", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
+        return;
+    }
+    dvui.label(@src(), "{s}", .{repo_path.items}, .{ .font = style.mono(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.sm } });
+
+    settingsField(@src(), "Name and email here", "Commits in this repository only — work or personal. Empty: the global ones");
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false });
+        defer row.deinit();
+        for ([_]*std.ArrayList(u8){ &repo_name_local, &repo_email_local }, [_][]const u8{ me_name.items, me_email.items }, 0..) |list, global, i| {
+            var cell = dvui.box(@src(), .{}, .{ .id_extra = i, .expand = .horizontal, .background = false, .margin = .{ .w = if (i == 0) style.space.sm else 0 } });
+            defer cell.deinit();
+            const te = textField(@src(), .{
+                .text = .{ .array_list = .{ .backing = list, .allocator = gpa, .limit = 256 } },
+                .placeholder = if (global.len > 0) global else if (i == 0) "Name" else "Email",
+            }, settingsInput().override(.{ .tag = if (i == 0) "repo:name" else "repo:email" }));
+            te.deinit();
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.sm } });
+        defer row.deinit();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (dialogButtonTagged(@src(), "Save", true, "repo:save_identity")) {
+            setLocalConfig("user.name", std.mem.trim(u8, repo_name_local.items, " "));
+            setLocalConfig("user.email", std.mem.trim(u8, repo_email_local.items, " "));
+        }
+    }
+
+    settingsField(@src(), "Pull", "How Pull joins what it fetched — pull.rebase and pull.ff");
+    if (choiceChips(0, &.{ "As everywhere", "Merge", "Rebase", "Fast-forward only" }, @intFromEnum(repo_pull))) |i| {
+        switch (i) {
+            0 => {
+                setLocalConfig("pull.rebase", "");
+                setLocalConfig("pull.ff", "");
+            },
+            1 => {
+                setLocalConfig("pull.ff", "");
+                setLocalConfig("pull.rebase", "false");
+            },
+            2 => {
+                setLocalConfig("pull.ff", "");
+                setLocalConfig("pull.rebase", "true");
+            },
+            else => {
+                setLocalConfig("pull.rebase", "");
+                setLocalConfig("pull.ff", "only");
+            },
+        }
+    }
+
+    settingsField(@src(), "Prune when fetching", "Drop the remote branches deleted on the remote — fetch.prune");
+    if (choiceChips(1, &.{ "As everywhere", "On", "Off" }, @intFromEnum(repo_prune))) |i| {
+        setLocalConfig("fetch.prune", switch (i) {
+            0 => "",
+            1 => "true",
+            else => "false",
+        });
+        // What Fetch passes follows: read the repository's config again.
+        startRepoConfig();
+    }
+
+    settingsField(@src(), "Sign commits", "Every commit made here signed with your key — commit.gpgsign");
+    if (choiceChips(2, &.{ "As everywhere", "On", "Off" }, @intFromEnum(repo_sign))) |i| {
+        setLocalConfig("commit.gpgsign", switch (i) {
+            0 => "",
+            1 => "true",
+            else => "false",
+        });
+    }
+}
+
+/// `path` — the repository's file — in the editor the settings name, or the
+/// system's choice for it.
+fn openInEditor(path: []const u8) void {
+    if (repo == null) return;
+    const a = dvui.currentWindow().arena();
+    const full = std.fs.path.join(a, &.{ repo_path.items, path }) catch return;
+    const cmd = std.mem.trim(u8, editor_cmd.items, " ");
+    if (cmd.len == 0) return run.open(app_io, repo_path.items, full) catch setCommandError("Could not open the file.");
+    var argv: std.ArrayList([]const u8) = .empty;
+    var words = std.mem.tokenizeScalar(u8, cmd, ' ');
+    while (words.next()) |w| argv.append(a, w) catch return;
+    argv.append(a, full) catch return;
+    // Not waited on: an editor can stay open for hours.
+    run.startDetached(app_io, repo_path.items, argv.items) catch setCommandError("Could not start the editor. Is it on your PATH?");
 }
 
 /// `git config --global key value` — the empty value unsets it — then read
@@ -17533,6 +17752,7 @@ fn diffHeader() void {
                 return;
             }
 
+            if (linkButton(@src(), "Open in editor", style.textMuted())) openInEditor(selected_path.items);
             if (linkButton(@src(), "Blame", style.textMuted())) selectBlame(selected_path.items);
 
             // The whole-file counterpart of the per-hunk buttons below, and the
@@ -18387,6 +18607,7 @@ fn diffFileRow(
 
     switch (selection) {
         .commit => |commit_id| {
+            if (file.status != .deleted and chipButton(@src(), dvui.entypo.edit, "Open in editor", false)) openInEditor(file.path);
             if (chipButton(@src(), dvui.entypo.clock, "History", false)) showFileHistory(file.path);
             // Nothing to restore of a file this commit deleted.
             if (file.status != .deleted) {
@@ -21885,9 +22106,18 @@ fn resetUiGlobals() void {
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     default_branch = .empty;
+    editor_cmd.deinit(gpa);
+    editor_cmd = .empty;
     signing_key.deinit(gpa);
     signing_key = .empty;
     signing_loaded = false;
+    if (repo_prefs_job) |j| j.deinit(app_io);
+    repo_prefs_job = null;
+    repo_prefs_loaded = false;
+    repo_name_local.deinit(gpa);
+    repo_name_local = .empty;
+    repo_email_local.deinit(gpa);
+    repo_email_local = .empty;
     if (signing_job) |j| j.deinit(app_io);
     signing_job = null;
     if (repo_config_job) |j| j.deinit(app_io);
@@ -28344,4 +28574,36 @@ test "changes picked: asked by path, taken off again, one side at a time" {
 
 
 
+
+
+test "a repository's own settings are written to its config and read back" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    openRepo(dir);
+    defer closeRepo();
+
+    setLocalConfig("user.name", "Work Me");
+    setLocalConfig("pull.ff", "only");
+    setLocalConfig("commit.gpgsign", "false");
+    while (!repo_prefs_loaded) loadRepoPrefs();
+    try std.testing.expectEqualStrings("Work Me", repo_name_local.items);
+    try std.testing.expect(repo_pull == .ff_only);
+    try std.testing.expect(repo_sign == .off);
+    try std.testing.expect(repo_prune == .global);
+
+    // Back to as everywhere: unset, and nothing said about it.
+    setLocalConfig("pull.ff", "");
+    setLocalConfig("pull.ff", "");
+    while (!repo_prefs_loaded) loadRepoPrefs();
+    try std.testing.expect(repo_pull == .global);
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+}
 
