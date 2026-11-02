@@ -66,3 +66,10 @@
 	border-color: var(--sl-color-gray-5);
 	box-shadow: 0 1.5rem 4rem -1.5rem hsl(264 50% 30% / 0.3);
 }
+
+/* The app's window in a guide, framed as on the home page. */
+.sl-markdown-content p > img {
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.5rem;
+	box-shadow: 0 1rem 2.5rem -1rem hsl(264 60% 10% / 0.4);
+}

@@ -1,7 +1,12 @@
 ---
-title: Features
+title: Features at a glance
 description: What Zit does — history, staging, branches, remotes, GitHub, conflicts and the workspace.
 ---
+
+Everything Zit does, on one page. Each part has its own guide: [History](/guides/history/),
+[Stage and commit](/guides/changes/), [Branches and remotes](/guides/branches/),
+[Pull requests](/guides/pull-requests/), [Tabs and the command palette](/guides/workspace/)
+and [Settings](/guides/settings/).
 
 ## History
 
@@ -57,7 +62,7 @@ never freezes it.
 - Tabs and tab groups, restored at start. Right-click a tab to group it; a
   click on a group's label folds it.
 - The command palette, `Ctrl+P`: any action, branch or repository.
-- Dark and light themes.
+- Six themes: Zit Dark and Light, and the four Catppuccin flavours.
 - A terminal in the repository's folder, `Ctrl+Shift+T`.
 
 Every shortcut is on the [keyboard page](/guides/keyboard/), and in the app
