@@ -2054,6 +2054,7 @@ fn appDeinit(win: *dvui.Window) void {
     default_branch.deinit(gpa);
     editor_cmd.deinit(gpa);
     terminal_cmd.deinit(gpa);
+    clearImagePair();
     signing_key.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
     if (repo_prefs_job) |j| j.deinit(app_io);
@@ -17836,6 +17837,8 @@ fn diffPanel() void {
         emptyState(@src(), "This commit changed no files.");
         return;
     }
+    // A picture is shown, not said to be binary.
+    if (d.files.len == 1 and isImagePath(d.files[0].path)) return imagePreview(d.files[0]);
 
     // Hunk buttons only mean something against the working tree: a commit's
     // diff is history, not something to stage.
@@ -17908,6 +17911,99 @@ fn diffPanel() void {
             row += 1;
         }
     }
+}
+
+/// A file whose bytes dvui can draw.
+fn isImagePath(path: []const u8) bool {
+    const ext = std.fs.path.extension(path);
+    for ([_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga" }) |e| {
+        if (std.ascii.eqlIgnoreCase(ext, e)) return true;
+    }
+    return false;
+}
+
+/// The two versions of a picture the diff is about, read once per file
+/// shown: before — the parent's, or HEAD's for a change — and after — the
+/// commit's, or the working tree's. Owned.
+var image_pair: struct {
+    key: u64 = 0,
+    before: ?[]u8 = null,
+    after: ?[]u8 = null,
+} = .{};
+
+fn clearImagePair() void {
+    if (image_pair.before) |b| gpa.free(b);
+    if (image_pair.after) |b| gpa.free(b);
+    image_pair = .{};
+}
+
+fn loadImagePair(file: git.FileDiff) void {
+    const r = repo orelse return;
+    var key = std.hash.Wyhash.init(0);
+    key.update(std.mem.asBytes(&selection));
+    key.update(file.path);
+    if (key.final() == image_pair.key) return;
+    clearImagePair();
+    image_pair.key = key.final();
+    switch (selection) {
+        .commit => |id| {
+            if (file.status != .deleted) image_pair.after = r.blobAt(gpa, id, file.path);
+            if (file.status != .added) if (commitAt(id)) |c| if (c.parents.len > 0) {
+                image_pair.before = r.blobAt(gpa, c.parents[0], file.old_path);
+            };
+        },
+        .change => {
+            const full = std.fs.path.join(gpa, &.{ repo_path.items, file.path }) catch return;
+            defer gpa.free(full);
+            image_pair.after = std.Io.Dir.cwd().readFileAlloc(app_io, full, gpa, .limited(64 << 20)) catch null;
+            if (history) |h| if (h.head_oid) |head| {
+                image_pair.before = r.blobAt(gpa, head, file.path);
+            };
+        },
+        else => {},
+    }
+}
+
+/// The picture, before and after side by side — or the one there is — each
+/// at most its half of the pane, on a framed ground.
+fn imagePreview(file: git.FileDiff) void {
+    loadImagePair(file);
+    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false, .color_fill = .{ .color = style.background() } });
+    defer scroll.deinit();
+    var row = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
+    defer row.deinit();
+    const sides = [_]struct { []const u8, ?[]u8, dvui.Color }{
+        .{ "Before", image_pair.before, style.danger() },
+        .{ "After", image_pair.after, style.success() },
+    };
+    var shown: usize = 0;
+    for (sides, 0..) |side, i| {
+        const bytes = side[1] orelse continue;
+        shown += 1;
+        var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = i, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.sm, .w = style.space.sm } });
+        defer col.deinit();
+        // Only one side: no word needed over it.
+        if (image_pair.before != null and image_pair.after != null) dvui.label(@src(), "{s}", .{side[0]}, .{ .font = style.smallBold(), .color_text = .{ .color = side[2] }, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.sm } });
+        var frame = dvui.box(@src(), .{}, .{
+            .expand = .horizontal,
+            .background = true,
+            .color_fill = .{ .color = style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .padding = dvui.Rect.all(style.space.md),
+        });
+        defer frame.deinit();
+        _ = dvui.image(@src(), .{
+            .source = .{ .imageFile = .{ .bytes = bytes, .name = if (i == 0) "before" else "after" } },
+            .shrink = .ratio,
+        }, .{
+            .gravity_x = 0.5,
+            .max_size_content = .size(.{ .w = 900, .h = 600 }),
+            .label = .{ .text = file.path },
+        });
+    }
+    if (shown == 0) emptyState(@src(), "This picture could not be read.");
 }
 
 /// Where the diff changes, along the right edge of its scroll area: a red
@@ -20522,8 +20618,11 @@ fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8
         .tag = frameTag("file", path),
         .expand = .horizontal,
         .min_size_content = .{ .h = style.row_height },
+        // Selected as a row of the commit list is: its colour, and a bar.
+        // The others on the panel's ground — dvui fills a box with a border
+        // on one side in its colour whatever `background` says.
         .background = open,
-        .color_fill = .{ .color = style.surfaceRaised() },
+        .color_fill = .{ .color = if (open) style.rowSelected() else style.surfaceRaised() },
         .border = .{ .x = 2 },
         .color_border = .{ .color = if (open) style.accent() else dvui.Color.transparent },
         // Under its folder's line in the tree view, set in from it.
@@ -20801,7 +20900,7 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
         .expand = .horizontal,
         .min_size_content = .{ .h = style.row_height },
         .background = selected or picked,
-        .color_fill = .{ .color = if (picked) style.accentDim() else style.surfaceRaised() },
+        .color_fill = .{ .color = if (picked) style.accentDim() else if (selected) style.rowSelected() else style.surfaceRaised() },
         // The mockup marks the open file with a bar down its left edge
         // rather than a fill, so a selected row still reads as a row.
         .border = .{ .x = 2 },
@@ -22524,6 +22623,7 @@ fn resetUiGlobals() void {
     editor_cmd = .empty;
     terminal_cmd.deinit(gpa);
     terminal_cmd = .empty;
+    clearImagePair();
     signing_key.deinit(gpa);
     signing_key = .empty;
     signing_loaded = false;
@@ -29028,6 +29128,7 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
+
 
 
 

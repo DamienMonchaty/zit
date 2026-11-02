@@ -2112,6 +2112,20 @@ pub const Repo = struct {
     }
 
     /// The blob or tree id at `path` in a commit, null where it does not exist.
+    /// A file's bytes as commit `id` has it, owned by `gpa`; null where the
+    /// commit has no such file.
+    pub fn blobAt(self: Repo, gpa: std.mem.Allocator, id: Oid, path: []const u8) ?[]u8 {
+        const path_z = gpa.dupeZ(u8, path) catch return null;
+        defer gpa.free(path_z);
+        const blob_id = self.entryAt(id, path_z) orelse return null;
+        var blob: ?*c.git_blob = null;
+        if (c.git_blob_lookup(&blob, self.ptr, &blob_id) < 0) return null;
+        defer c.git_blob_free(blob);
+        const size: usize = @intCast(c.git_blob_rawsize(blob));
+        const raw: [*]const u8 = @ptrCast(c.git_blob_rawcontent(blob) orelse return null);
+        return gpa.dupe(u8, raw[0..size]) catch null;
+    }
+
     fn entryAt(self: Repo, id: Oid, path: [*:0]const u8) ?Oid {
         const tree = self.commitTree(id) orelse return null;
         defer c.git_tree_free(tree);
