@@ -9533,6 +9533,27 @@ fn dialogFooter(src: std.builtin.SourceLocation) *dvui.BoxWidget {
     });
 }
 
+/// The eye that shows or hides a ref in the graph: drawn here, an outline
+/// with its pupil, and struck through for hidden — entypo's are a filled
+/// blot at this size. Turned into TinyVG once, on first use.
+fn eyeIcon(hidden: bool) []const u8 {
+    const slot = if (hidden) &eye_tvg[1] else &eye_tvg[0];
+    if (slot.*) |bytes| return bytes;
+    // Kept for the whole run, so not from `gpa`: two small icons, never freed.
+    const bytes = dvui.svgToTvg(std.heap.page_allocator, if (hidden) EYE_OFF_SVG else EYE_SVG) catch
+        return if (hidden) dvui.entypo.eye_with_line else dvui.entypo.eye;
+    slot.* = bytes;
+    return bytes;
+}
+var eye_tvg: [2]?[]const u8 = .{ null, null };
+
+const EYE_PATHS =
+    \\<path fill-rule="evenodd" d="M12 5C6.5 5 2.7 8.6 1 12c1.7 3.4 5.5 7 11 7s9.3-3.6 11-7c-1.7-3.4-5.5-7-11-7zM12 7c-4.2 0-7.3 2.6-8.8 5 1.5 2.4 4.6 5 8.8 5s7.3-2.6 8.8-5c-1.5-2.4-4.6-5-8.8-5zM15 12C15 13.66 13.66 15 12 15C10.34 15 9 13.66 9 12C9 10.34 10.34 9 12 9C13.66 9 15 10.34 15 12z"/>
+;
+const EYE_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">" ++ EYE_PATHS ++ "</svg>";
+const EYE_OFF_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">" ++ EYE_PATHS ++
+    "<path d=\"M3.7 2.3L21.7 20.3L20.3 21.7L2.3 3.7Z\"/></svg>";
+
 /// An icon on a rounded tile of the accent's tint.
 fn iconTile(src: std.builtin.SourceLocation, icon: []const u8, side: f32, glyph: f32) void {
     var tile = dvui.box(src, .{}, .{
@@ -12836,7 +12857,7 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         defer row.deinit();
 
         sectionFace(collapsed.*, section.title(), all_hidden);
-        if (all_hidden) dvui.icon(@src(), "section_hidden", dvui.entypo.eye_with_line, .{ .fill_color = .{ .color = style.textFaint() } }, .{
+        if (all_hidden) dvui.icon(@src(), "section_hidden", eyeIcon(true), .{ .fill_color = .{ .color = style.textFaint() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
             .margin = .{ .x = style.space.sm },
@@ -13195,7 +13216,7 @@ fn sectionMenu(
         };
         var buf: [64]u8 = undefined;
         const caption = std.fmt.bufPrint(&buf, "{s} all the {s} {s} the graph", .{ if (hd.shown) "Hide" else "Show", what, if (hd.shown) "from" else "in" }) catch "";
-        if (menuIcon(@src(), if (hd.shown) dvui.entypo.eye_with_line else dvui.entypo.eye, caption, false)) {
+        if (menuIcon(@src(), eyeIcon(hd.shown), caption, false)) {
             fw.close();
             hideAll(hd.kind, hd.shown);
         }
@@ -14206,7 +14227,7 @@ fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
             .gravity_y = 0.5,
             .margin = .{ .x = (SIDE_GUTTER - 11) / 2, .w = (SIDE_GUTTER - 11) / 2 },
         });
-    } else if (iconButtonTagged(@src(), "ref_eye", if (hidden) "Show in the graph" else "Hide from the graph", if (hidden) dvui.entypo.eye_with_line else dvui.entypo.eye, if (hidden) style.textMuted() else if (hover) style.textFaint() else dvui.Color.transparent, frameTag("eye", ref.name))) {
+    } else if (iconButtonTagged(@src(), "ref_eye", if (hidden) "Show in the graph" else "Hide from the graph", eyeIcon(hidden), if (hidden) style.textMuted() else if (hover) style.textFaint() else dvui.Color.transparent, frameTag("eye", ref.name))) {
         toggleHidden(ref);
     }
 
@@ -14651,7 +14672,7 @@ fn refMenu(
             toggleGraphPref(&graph_pinned, "zit.pinned", ref.name);
         }
         const hidden = isHidden(ref.name);
-        if (menuIcon(@src(), if (hidden) dvui.entypo.eye else dvui.entypo.eye_with_line, if (hidden) "Show in the graph" else "Hide from the graph", false)) {
+        if (menuIcon(@src(), eyeIcon(!hidden), if (hidden) "Show in the graph" else "Hide from the graph", false)) {
             fw.close();
             toggleHidden(ref);
         }
@@ -15568,7 +15589,7 @@ fn graphNotes() void {
     // Hidden ones: say so, and bring them back in one click.
     if (hidden) {
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "{d} hidden — show all", .{graph_hidden.items.len}) catch "Show all";
-        if (chipButton(@src(), dvui.entypo.eye_with_line, caption, false)) unhideAll();
+        if (chipButton(@src(), eyeIcon(true), caption, false)) unhideAll();
     }
     // Narrowed to authors: who, how many of the commits shown are theirs,
     // and back to everyone in one click — or, with none of theirs here,
@@ -18995,7 +19016,7 @@ fn rowsSpacer(src: std.builtin.SourceLocation, id: usize, rows: usize, rh: f32) 
 /// folder with the folders folding away. Only the rows in sight are built.
 fn commitFiles(id: git.Oid) void {
     {
-        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.xs } });
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.sm } });
         defer bar.deinit();
         var track = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
@@ -19361,8 +19382,20 @@ fn fileFilters() void {
     // A kind this commit has none of shows nothing: back to all of them.
     if (n.get(file_filter) == 0) file_filter = .all;
 
+    // One bar the width of the panel, framed as Path / Tree above it, its
+    // kinds in segments of one width.
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.sm } });
     defer line.deinit();
+    var track = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surfaceInput() },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = style.border() },
+        .corners = style.radius.input,
+        .padding = dvui.Rect.all(2),
+    });
+    defer track.deinit();
     for (std.enums.values(FileFilter), 0..) |f, i| {
         const count = n.get(f);
         const on = file_filter == f;
@@ -19371,17 +19404,18 @@ fn fileFilters() void {
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = i,
             .tag = frameTag("files", @tagName(f)),
+            .expand = .horizontal,
             .background = true,
             .color_fill = .{ .color = if (on) style.accentDim() else dvui.Color.transparent },
             .color_fill_hover = .{ .color = if (on) style.accentDim() else if (usable) style.rowHover() else dvui.Color.transparent },
             .corners = style.radius.input,
-            .margin = .{ .w = style.space.xs },
-            .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
+            .margin = dvui.Rect.all(0),
+            .padding = .{ .x = style.space.xs, .y = 3, .w = style.space.xs, .h = 3 },
         });
         bw.processEvents();
         bw.drawBackground();
         {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .background = false });
             defer row.deinit();
             const faded = !usable;
             dvui.icon(@src(), "filter_icon", f.icon(), .{ .fill_color = .{ .color = if (faded) style.textFaint() else f.hue() } }, .{
@@ -28306,6 +28340,8 @@ test "changes picked: asked by path, taken off again, one side at a time" {
     try std.testing.expect(!isChangePicked(.staged, "c.txt"));
     try std.testing.expectEqual(@as(u32, 0), picked_set.count());
 }
+
+
 
 
 
