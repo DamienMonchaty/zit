@@ -54,10 +54,11 @@ pub const size = struct {
     pub const tab: f32 = 12;
     /// The commit list: a message to read, its author and date under it in
     /// weight, never in size so far that they cannot be read.
-    pub const graph: f32 = 12;
-    pub const graph_meta: f32 = 11;
+    /// Half a point under the rest: the list is scanned more than read.
+    pub const graph: f32 = 11.5;
+    pub const graph_meta: f32 = 10.5;
     /// Sha and date: a mono face reads larger than Inter at the same size.
-    pub const graph_mono: f32 = 10.5;
+    pub const graph_mono: f32 = 10;
 };
 
 pub fn tab() dvui.Font {

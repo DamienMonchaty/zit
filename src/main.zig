@@ -6496,21 +6496,14 @@ fn clearPrEdit() void {
 fn prEditDialog() void {
     if (!pr_edit_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &pr_edit_rect, &pr_edit_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &pr_edit_rect, &pr_edit_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
     var num: [12]u8 = undefined;
     var title_buf: [48]u8 = undefined;
     dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
 
-    const width = @min(PR_CREATE_W, win.w - 80);
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = width },
-        .max_size_content = .width(width),
-        .background = false,
-        .padding = dvui.Rect.all(style.space.xl),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
 
     // As the create dialog has it: where it goes — where it comes from is
     // fixed once it is made — its words, who and what, its type.
@@ -6539,8 +6532,9 @@ fn prEditDialog() void {
         peoplePicker(3, "Assignees", &pr_edit_assignees, "Assign someone", false, "pr_edit:assignees");
         labelPicker(4, &pr_edit_labels, "pr_edit:labels");
     }
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var line = dialogFooter(@src());
         defer line.deinit();
         typePicker(5, &pr_edit_draft, "pr_edit:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -8472,7 +8466,7 @@ fn branchSwitcher() void {
             .color_border = .{ .color = style.border() },
             .corners = style.radius.input,
             .min_size_content = .{ .h = BRANCH_BUTTON_H },
-            .padding = .{ .x = style.space.md, .w = style.space.sm },
+            .padding = .{ .x = style.space.lg, .y = style.space.xs, .w = style.space.md, .h = style.space.xs },
         });
         defer face.deinit();
         dvui.icon(@src(), "branch_mark", if (detached) dvui.entypo.flow_line else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = style.accent() } }, .{
@@ -8730,43 +8724,9 @@ fn repoDialog() void {
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
-    {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .border = .{ .h = 1 },
-            .color_border = .{ .color = style.border() },
-            .padding = .{ .x = style.space.lg, .y = style.space.md, .w = style.space.md, .h = style.space.md },
-        });
-        defer head.deinit();
+    dialogHeader(@src(), if (cloning) dvui.entypo.download else dvui.entypo.plus, if (cloning) "Clone a repository" else "Start a new repository", if (cloning) "Copy one from GitHub, GitLab or any git server onto this computer" else "An empty repository, in a folder of its own", &open);
 
-        dvui.icon(@src(), "dialog_icon", if (cloning) dvui.entypo.download else dvui.entypo.plus, .{ .fill_color = .{ .color = style.accent() } }, .{
-            .min_size_content = .{ .w = 16, .h = 16 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.md },
-        });
-        var titles = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .gravity_y = 0.5 });
-        dvui.label(@src(), "{s}", .{if (cloning) "Clone a repository" else "Start a new repository"}, .{
-            .font = style.title(),
-            .color_text = .{ .color = style.text() },
-            .padding = dvui.Rect.all(0),
-        });
-        dvui.label(@src(), "{s}", .{if (cloning) "Copy one from GitHub, GitLab or any git server onto this computer." else "An empty repository, in a folder of its own."}, .{
-            .font = style.tiny(),
-            .color_text = .{ .color = style.textFaint() },
-            .padding = .{ .y = style.space.xxs },
-        });
-        titles.deinit();
-        if (iconButton(@src(), "dialog_close", "Close — Esc", dvui.entypo.cross, style.textMuted())) open = false;
-    }
-
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .background = false,
-        .padding = dvui.Rect.all(style.space.lg),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
 
     var entered = false;
     if (cloning) {
@@ -8830,8 +8790,9 @@ fn repoDialog() void {
         });
     }
 
+    body.deinit();
     {
-        var foot = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var foot = dialogFooter(@src());
         defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -8903,20 +8864,23 @@ fn dialogButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, prim
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
         .background = true,
-        .color_fill = .{ .color = if (primary) style.accent() else style.surfaceRaised() },
+        // The one that answers filled in the accent; the others framed on
+        // the dialog's own ground.
+        .color_fill = .{ .color = if (primary) style.accent() else dvui.Color.transparent },
+        .color_fill_hover = .{ .color = if (primary) style.accent().lerp(style.text(), 0.15) else style.rowHover() },
         .border = dvui.Rect.all(if (primary) 0 else 1),
         .color_border = .{ .color = style.border() },
         .corners = style.radius.input,
         .gravity_y = 0.5,
         .margin = .{ .x = style.space.sm },
-        .padding = .{ .x = style.space.lg, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
+        .padding = .{ .x = style.space.lg, .y = style.space.md, .w = style.space.lg, .h = style.space.md },
     });
     defer bw.deinit();
     bw.processEvents();
     bw.drawBackground();
     dvui.label(@src(), "{s}", .{caption}, .{
         .font = style.smallBold(),
-        .color_text = .{ .color = if (primary) style.background() else if (bw.hovered()) style.text() else style.textMuted() },
+        .color_text = .{ .color = if (primary) style.background() else style.text() },
         .padding = dvui.Rect.all(0),
     });
     return bw.clicked();
@@ -9066,37 +9030,9 @@ fn identityDialog() void {
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
-    {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .border = .{ .h = 1 },
-            .color_border = .{ .color = style.border() },
-            .padding = .{ .x = style.space.lg, .y = style.space.md, .w = style.space.md, .h = style.space.md },
-        });
-        defer head.deinit();
-        var titles = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .gravity_y = 0.5 });
-        dvui.label(@src(), "Who are you, to git?", .{}, .{
-            .font = style.title(),
-            .color_text = .{ .color = style.text() },
-            .padding = dvui.Rect.all(0),
-        });
-        dvui.label(@src(), "Every commit carries a name and an email. Set once, for every repository.", .{}, .{
-            .font = style.tiny(),
-            .color_text = .{ .color = style.textFaint() },
-            .padding = .{ .y = style.space.xxs },
-        });
-        titles.deinit();
-        if (iconButton(@src(), "identity_close", "Later — Esc", dvui.entypo.cross, style.textMuted())) identity_open = false;
-    }
+    dialogHeader(@src(), dvui.entypo.user, "Who are you, to git?", "Every commit carries a name and an email. Set once, for every repository", &identity_open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .background = false,
-        .padding = dvui.Rect.all(style.space.lg),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
 
     {
         var gh_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
@@ -9125,8 +9061,9 @@ fn identityDialog() void {
         });
     }
 
+    body.deinit();
     {
-        var foot = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var foot = dialogFooter(@src());
         defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Later", false)) identity_open = false;
@@ -9534,15 +9471,13 @@ const settings_body_pad: dvui.Rect = .{ .x = 0, .y = style.space.xs, .w = 0, .h 
 fn dialogHeader(src: std.builtin.SourceLocation, icon: []const u8, title: []const u8, hint: []const u8, open: *bool) void {
     var head = dvui.box(src, .{ .dir = .horizontal }, .{
         .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
+        .background = false,
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
-        .corners = .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr },
         .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.lg, .h = style.space.lg },
     });
     defer head.deinit();
-    iconTile(@src(), icon, 34, 17);
+    iconTile(@src(), icon, 40, 18);
     {
         var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
         defer col.deinit();
@@ -9550,6 +9485,30 @@ fn dialogHeader(src: std.builtin.SourceLocation, icon: []const u8, title: []cons
         dvui.label(@src(), "{s}", .{hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2 } });
     }
     if (iconButton(@src(), "dialog_close", "Close — Esc", dvui.entypo.cross, style.textMuted())) open.* = false;
+}
+
+/// A dialog's body, under its header: every dialog's padding, `width` wide
+/// when it is not null.
+fn dialogBody(src: std.builtin.SourceLocation, width: ?f32) *dvui.BoxWidget {
+    return dvui.box(src, .{ .dir = .vertical }, .{
+        .expand = .horizontal,
+        .min_size_content = if (width) |w| .{ .w = w } else null,
+        .max_size_content = if (width) |w| .width(w) else null,
+        .background = false,
+        .padding = dvui.Rect.all(style.space.xl),
+    });
+}
+
+/// A dialog's foot: across the whole dialog under a rule. What goes on the
+/// left first, then a spacer, then Cancel and the button that answers it.
+fn dialogFooter(src: std.builtin.SourceLocation) *dvui.BoxWidget {
+    return dvui.box(src, .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .background = false,
+        .border = .{ .y = 1 },
+        .color_border = .{ .color = style.border() },
+        .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.lg },
+    });
 }
 
 /// An icon on a rounded tile of the accent's tint.
@@ -10822,8 +10781,7 @@ fn connectDialog() void {
     pumpConnect(fw.data().id);
     dialogHeader(@src(), dvui.entypo.login, "Connect GitHub", "Pull requests, issues and checks, as your account", &connect_open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
     const text = switch (connect_state) {
         .asking => "Asking GitHub for a code…",
         .waiting => "Type this code on the GitHub page that just opened — it is in your clipboard — and approve Zit.",
@@ -10859,12 +10817,13 @@ fn connectDialog() void {
         if (dialogButton(@src(), "Copy the code", false)) dvui.clipboardTextSet(connect_code.items);
         if (dialogButton(@src(), "Open the page again", false)) openUrl(connect_uri.items);
     }
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.lg } });
-        defer line.deinit();
+        var foot = dialogFooter(@src());
+        defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (connect_state == .failed and dialogButton(@src(), "Try again", true)) openConnect();
         if (dialogButton(@src(), "Cancel", false)) closeConnect();
+        if (connect_state == .failed and dialogButton(@src(), "Try again", true)) openConnect();
     }
     if (escapePressed()) closeConnect();
     if (!connect_open) closeConnect();
@@ -11166,8 +11125,7 @@ fn workspaceDialog() void {
     else
         dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of groups and tabs, switched to in this window", &open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
     var entered = false;
     // A group has no name, only its colour.
     if (kind != .group) _ = dialogField(@src(), 0, "Name", &ws_name, "e.g. Client work", true, &entered);
@@ -11175,8 +11133,9 @@ fn workspaceDialog() void {
     if (colorSwatches(@src(), ws_color, .{ .y = style.space.xs, .h = style.space.lg })) |c| ws_color = @intCast(c);
 
     const named = kind == .group or std.mem.trim(u8, ws_name.items, " \t").len > 0;
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
+        var line = dialogFooter(@src());
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -11878,23 +11837,18 @@ fn promptDialog() void {
     if (escapePressed()) return clearPrompt();
     var open = true;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &prompt_rect, &open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &prompt_rect, &open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
     var hint_buf: [160]u8 = undefined;
     dialogHeader(@src(), Prompt.icon(p.kind), Prompt.caption(p.kind), Prompt.hint(p.kind, p.arg, &hint_buf), &open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = PROMPT_W },
-        .max_size_content = .width(PROMPT_W),
-        .background = false,
-        .padding = dvui.Rect.all(style.space.xl),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), PROMPT_W);
     var entered = false;
     _ = dialogField(@src(), 0, Prompt.label(p.kind), &prompt_text, Prompt.placeholder(p.kind), true, &entered);
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var line = dialogFooter(@src());
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -13434,21 +13388,14 @@ fn prCreateDialog() void {
     if (!pr_new_open) return;
     const h = history orelse return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &pr_new_rect, &pr_new_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &pr_new_rect, &pr_new_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
     dialogHeader(@src(), dvui.entypo.merge, "New pull request", h.head orelse "", &pr_new_open);
 
     // A fixed width: the description comes filled in with the template and
     // the commits, and its longest line would otherwise set the dialog's.
-    const width = @min(PR_CREATE_W, win.w - 80);
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = width },
-        .max_size_content = .width(width),
-        .background = false,
-        .padding = dvui.Rect.all(style.space.xl),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
 
     // The two branches, as GitHub's compare bar has them: into, from.
     {
@@ -13505,9 +13452,16 @@ fn prCreateDialog() void {
         peoplePicker(3, "Assignees", &pr_new_assignees, "Assign someone", false, "pr_new:assignees");
         labelPicker(4, &pr_new_labels, "pr_new:labels");
     }
+    // What GitHub refused, where it was asked.
+    if (!pr_creating) if (command_error) |why| {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0) });
+        tl.addText(firstLine(why), .{ .font = style.small(), .color_text = .{ .color = style.danger() } });
+        tl.deinit();
+    };
+    body.deinit();
 
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var line = dialogFooter(@src());
         defer line.deinit();
         typePicker(5, &pr_new_draft, "pr_new:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -13520,12 +13474,6 @@ fn prCreateDialog() void {
             if (pushed and dialogButton(@src(), if (pr_new_draft) "Create draft" else "Create pull request", true)) createRequest();
         }
     }
-    // What GitHub refused, where it was asked.
-    if (!pr_creating) if (command_error) |why| {
-        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.md } });
-        tl.addText(firstLine(why), .{ .font = style.small(), .color_text = .{ .color = style.danger() } });
-        tl.deinit();
-    };
     if (escapePressed() and pick_open == null and !pr_creating) pr_new_open = false;
 }
 
@@ -19165,13 +19113,6 @@ fn sectionFace(folded: bool, title: []const u8, faded: bool) void {
     });
 }
 
-/// The line over a section header that parts it from the one above.
-fn sectionHairline(wd: *dvui.WidgetData) void {
-    const rs = wd.borderRectScale();
-    (dvui.Rect.Physical{ .x = rs.r.x, .y = rs.r.y, .w = rs.r.w, .h = @max(1, rs.s) })
-        .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
-}
-
 /// The same line, under a panel's title.
 fn sectionHairlineUnder(wd: *dvui.WidgetData) void {
     const rs = wd.borderRectScale();
@@ -19895,15 +19836,13 @@ fn changesSection(
     defer section.deinit();
 
     {
-        // As a sidebar section's header, line for line: the hover and the
-        // hairline drawn by hand — a box's border, with no ground of its own,
-        // painted all of it in the hairline's colour — a button as high, set
-        // in as far, and the same face. Then the count, and the links.
+        // As a sidebar section's header, line for line: the hover drawn by
+        // hand, a button as high, set in as far, and the same face — no rule
+        // between Unstaged and Staged. Then the count, and the links.
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer head.deinit();
         const head_rect = head.data().borderRectScale().r;
         if (head_rect.contains(dvui.currentWindow().mouse_pt)) head_rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
-        if (id > 0) sectionHairline(head.data());
 
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
@@ -21381,16 +21320,14 @@ fn forgetDialog() void {
 
     var open = true;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &forget_rect, &open, style.surface(), 420, dvui.Rect.all(style.space.lg));
+    var fw = modalWindow(@src(), &forget_rect, &open, style.surface(), 420, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
-    dvui.label(@src(), "Remove {s} from Zit?", .{git.repoName(path)}, .{
-        .font = style.title(),
-        .color_text = .{ .color = style.text() },
-        .padding = dvui.Rect.all(0),
-        .margin = .{ .h = style.space.sm },
-    });
+    var title_buf: [160]u8 = undefined;
+    dialogHeader(@src(), dvui.entypo.trash, std.fmt.bufPrint(&title_buf, "Remove {s} from Zit?", .{git.repoName(path)}) catch "Remove it from Zit?", path, &open);
+
+    var body = dialogBody(@src(), null);
     // Two lines: a label does not wrap.
     for ([_][]const u8{ "It leaves the recent list and any tab it is open in.", "The folder and everything in it stay where they are." }, 0..) |line, i| {
         dvui.label(@src(), "{s}", .{line}, .{
@@ -21398,18 +21335,11 @@ fn forgetDialog() void {
             .font = style.small(),
             .color_text = .{ .color = style.textMuted() },
             .padding = dvui.Rect.all(0),
-            .margin = .{ .h = if (i == 1) style.space.sm else 0 },
         });
     }
-    dvui.label(@src(), "{s}", .{path}, .{
-        .font = style.mono(),
-        .color_text = .{ .color = style.textFaint() },
-        .max_size_content = .width(420),
-        .padding = dvui.Rect.all(0),
-        .margin = .{ .h = style.space.lg },
-    });
+    body.deinit();
 
-    var foot = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+    var foot = dialogFooter(@src());
     defer foot.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -28168,3 +28098,4 @@ test "changes picked: asked by path, taken off again, one side at a time" {
     try std.testing.expect(!isChangePicked(.staged, "c.txt"));
     try std.testing.expectEqual(@as(u32, 0), picked_set.count());
 }
+
