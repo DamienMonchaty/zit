@@ -7,7 +7,7 @@
 
 <p align="center">
   <strong>A fast, native desktop Git client — written in Zig.</strong><br>
-  The graph, your changes and your pull requests in one window, about 12 MB and no runtime.
+  The graph, your changes and your pull requests in one window, about 7 MB and no runtime.
 </p>
 
 <p align="center">

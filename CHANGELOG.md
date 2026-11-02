@@ -3,7 +3,50 @@
 Every release of Zit, newest first. Downloads are on the
 [Releases](https://github.com/DamienMonchaty/zit/releases) page.
 
-## Unreleased
+## [0.1.3] — 2026-11-02
+
+### Added
+- Six themes: Zit Dark and Zit Light, and Catppuccin's four — Latte,
+  Frappé, Macchiato and Mocha — picked from cards in Settings › Appearance,
+  with the size of the app's text (Small to Larger) and of the code in a
+  diff or a blame (10 to 14).
+- Each repository has its own page in the settings: a name and email for
+  its commits alone, how Pull joins what it fetched, pruning and signing —
+  written in its `.git/config`, "As everywhere" leaving it to the global
+  one.
+- Open in editor, above a diff, opens the file in your editor; the editor
+  and the terminal are picked from those Zit finds on the computer, or left
+  to the system.
+- An image in a diff shows as an image, before and after.
+- Authors' pictures in the graph can be turned off: each commit is then a
+  dot.
+- A start page of Zit's own: open a folder, clone, a new repository, and
+  the recent ones to find by typing.
+- About Zit: the version and platform, the documentation, what's new, the
+  source and where to report a problem, then what Zit does by category. The
+  avatar's menu opens the documentation and About.
+- The website has a guide: a tour of the window, the history, staging and
+  committing, branches and remotes, pull requests, tabs and the settings,
+  each with screenshots of the app.
+
+### Changed
+- A commit's summary stops at 72 characters, as `git log` expects: what is
+  typed past it goes on in the description, and a line under the box says
+  so.
+- Tab groups are coloured dots before their tabs, as Chrome's, made in a
+  dialog with their colour; a click on the dot folds the group.
+- Every dialog has one design — a header, its body, a foot under a rule —
+  and every alert one shape, its button in its colour.
+- The settings list their sections down the left, grouped: Zit, Commits,
+  Repositories; GitHub is under Integrations.
+- A commit's files are filtered by kind — added, modified, deleted — after
+  All files; the diff and the commit panel are roomier, the code a little
+  smaller.
+- The toolbar has Undo and Redo on its left, and says what each button can
+  do. The menu of the graph's branches is at the end of the BRANCH / TAG
+  header. Tags come last in the sidebar.
+- The zoom keys work on AZERTY and QWERTZ keyboards: `Ctrl -` on the 6 key,
+  `Ctrl +` with its own key.
 
 ### Added
 - Redo beside Undo in the toolbar, as GitKraken has them: lit after an

@@ -31,11 +31,21 @@ export default defineConfig({
 			sidebar: [
 				{
 					label: 'Start here',
-					items: ['start/install', 'start/github'],
+					items: ['start/install', 'start/tour', 'start/github'],
 				},
 				{
 					label: 'Using Zit',
-					items: ['guides/features', 'guides/search', 'guides/keyboard'],
+					items: [
+						'guides/features',
+						'guides/history',
+						'guides/search',
+						'guides/changes',
+						'guides/branches',
+						'guides/pull-requests',
+						'guides/workspace',
+						'guides/settings',
+						'guides/keyboard',
+					],
 				},
 				{
 					label: 'Project',

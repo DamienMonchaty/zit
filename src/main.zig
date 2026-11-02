@@ -11266,10 +11266,13 @@ fn userMenu() void {
         dvui.label(@src(), "{s}", .{if (set) me.email else "Commits need a name and an email"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0) });
     }
     menuSeparator(0);
-    var pick: enum { none, settings, keys, signing, sign_in, sign_out } = .none;
+    var pick: enum { none, settings, keys, signing, docs, about, sign_in, sign_out } = .none;
     if (menuIcon(@src(), dvui.entypo.cog, "Settings — Ctrl+,", false)) pick = .settings;
     if (menuIcon(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", false)) pick = .keys;
     if (menuIcon(@src(), dvui.entypo.lock, "Commit signature", false)) pick = .signing;
+    menuSeparator(2);
+    if (menuIcon(@src(), dvui.entypo.book, "Documentation", false)) pick = .docs;
+    if (menuIcon(@src(), dvui.entypo.info_with_circle, "About Zit", false)) pick = .about;
     // GitHub's account, only while Zit talks to GitHub at all.
     if (integrations) {
         menuSeparator(1);
@@ -11291,6 +11294,11 @@ fn userMenu() void {
             keys_rect = .{};
         },
         .signing => openSettings(6),
+        .docs => openUrl(SITE_URL),
+        .about => {
+            features_open = true;
+            features_rect = .{};
+        },
         .sign_in => {
             openIdentity();
             signInWithGithub();
@@ -12093,7 +12101,7 @@ fn tabBadge(name: []const u8, active: bool) void {
     });
 }
 
-const BADGE_W: f32 = 28;
+const BADGE_W: f32 = 30;
 
 /// What says a pill opens a menu: a chevron after its text, and the hand
 /// cursor over it.
@@ -21893,23 +21901,24 @@ const Feature = struct { icon: []const u8, title: []const u8, items: []const []c
 /// the branches, the remotes, the forge, the workspace.
 const features = [_]Feature{
     .{ .icon = dvui.entypo.flow_tree, .title = "History", .items = &.{
-        "The graph, each node its author's picture",
-        "Search: author:, path:, code:, after:",
-        "One branch, several, or all",
+        "The graph, each commit its author's picture — or a dot",
+        "A BRANCH / TAG column, and which branches it draws",
+        "Search: author:, msg:, path:, code:, after:",
         "Hide branches from the graph: eye, or all",
         "A file's history, through its renames",
         "Blame, line by line",
         "Compare any two commits",
-        "Select and copy any text",
+        "Pictures in the diff, before and after",
     } },
     .{ .icon = dvui.entypo.pencil, .title = "Changes & commits", .items = &.{
         "Stage files, hunks or single lines",
         "Even in a file git does not track yet",
         "Discard a hunk, a file, or everything",
-        "Type, ticket and options beside the title",
-        "Recent messages, co-authors, sign-off",
+        "A summary that stops at 72, the rest in the description",
+        "Type, ticket, recent messages, co-authors, sign-off",
         "GPG or SSH signing, amend",
         "Undo and redo — Ctrl+Z, Ctrl+Shift+Z",
+        "A commit's files filtered by kind",
     } },
     .{ .icon = dvui.entypo.flow_branch, .title = "Branches", .items = &.{
         "Create, rename, delete, switch",
@@ -21927,31 +21936,38 @@ const features = [_]Feature{
         "Stashes, several at once",
         "Worktrees, Git LFS",
     } },
-    .{ .icon = dvui.entypo.merge, .title = "GitHub", .items = &.{
-        "Pull requests: checks, reviews, threads",
+    .{ .icon = dvui.entypo.merge, .title = "Pull requests", .items = &.{
+        "Checks, reviews, threads in a timeline",
         "Create, check out, review, comment",
+        "Suggestions applied here",
         "Merge, auto-merge, close",
-        "Re-run the failed checks",
-        "Issues",
+        "Re-run the failed checks; issues",
         "Sign in with a code on github.com",
         "Off: nothing is asked of GitHub",
     } },
     .{ .icon = dvui.entypo.archive, .title = "Conflicts", .items = &.{
-        "Both sides, side by side",
-        "Each region: ours, theirs, or both",
+        "Both sides, side by side, with their base",
+        "Each region: ours, theirs, or both — 1, 2, 3",
+        "The safe ones resolved in one click",
         "Continue, skip or abort from the toolbar",
     } },
     .{ .icon = dvui.entypo.browser, .title = "Workspace", .items = &.{
-        "Tabs and groups, dragged, kept on restart",
+        "Tabs, groups as colour dots, workspaces",
         "Open, clone or start a repository",
         "Command palette — Ctrl+P",
-        "Dark and light, its own window frame",
-        "Every shortcut, from the keyboard button",
+        "Open a file in your editor; a terminal in its folder",
+        "Each repository its own settings",
+    } },
+    .{ .icon = dvui.entypo.palette, .title = "Look", .items = &.{
+        "Zit Dark and Light, Catppuccin's four",
+        "The app's text and the editor's, sized apart",
+        "Zoom from 70 to 200 %, any keyboard",
     } },
     .{ .icon = dvui.entypo.gauge, .title = "Light", .items = &.{
         "Draws only when something changes",
         "Sees the repository change on disk",
         "Long lists drawn a screenful at a time",
+        "About 7 MB, nothing else to install",
     } },
 };
 
@@ -21961,74 +21977,118 @@ fn featuresDialog() void {
     var fw = modalWindow(@src(), &features_rect, &features_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
+    dialogHeader(@src(), dvui.entypo.info_with_circle, "About Zit", "Version " ++ APP_VERSION ++ " · " ++ PLATFORM, &features_open);
 
-    dialogHeader(@src(), dvui.entypo.info_with_circle, "Zit " ++ APP_VERSION, "Everything this version does", &features_open);
-    // As many columns as the window has room for, so all of it shows at
-    // once; the scroll is only for a window too small even for that.
-    const columns_n: usize = if (win.w >= 1180) 4 else if (win.w >= 880) 3 else 2;
-    const w: f32 = @min(@as(f32, @floatFromInt(columns_n)) * 290, win.w - 80);
-    var scroll = dvui.scrollArea(@src(), .{}, .{
-        .min_size_content = .{ .w = w },
-        .max_size_content = .size(.{ .w = w, .h = @max(240, win.h - 160) }),
-        .background = false,
-    });
-    defer scroll.deinit();
-    var columns = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
-        .expand = .horizontal,
-        .background = false,
-        .padding = dvui.Rect.all(style.space.lg),
-    });
-    defer columns.deinit();
-    // Each card into the shortest column so far: even bottoms.
-    var column_of: [features.len]usize = undefined;
-    var heights: [4]usize = @splat(0);
-    for (features, 0..) |feature, i| {
-        var shortest: usize = 0;
-        for (1..columns_n) |c| if (heights[c] < heights[shortest]) {
-            shortest = c;
-        };
-        column_of[i] = shortest;
-        heights[shortest] += feature.items.len + 3;
+    const w: f32 = @min(780, win.w - 80);
+    // The app itself: its mark, what it is, where to read more.
+    {
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .min_size_content = .{ .w = w },
+            .max_size_content = .width(w),
+            .background = true,
+            .color_fill = .{ .color = style.surface() },
+            .border = .{ .h = 1 },
+            .color_border = .{ .color = style.border() },
+            .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.lg },
+        });
+        defer head.deinit();
+        _ = dvui.image(@src(), .{
+            .source = .{ .imageFile = .{ .bytes = @embedFile("brand/zit-icon-256.png"), .name = "zit" } },
+            .shrink = .both,
+        }, .{ .min_size_content = .{ .w = 56, .h = 56 }, .max_size_content = .size(.{ .w = 56, .h = 56 }), .gravity_y = 0.5, .margin = .{ .w = style.space.lg } });
+        var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false });
+        defer col.deinit();
+        dvui.label(@src(), "Zit " ++ APP_VERSION, .{}, .{ .font = style.title().withSize(18 * style.ui_scale), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "A fast, native Git client for Linux and Windows, written in Zig.", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2, .h = style.space.md } });
+        var links = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+        defer links.deinit();
+        if (chipButtonTagged(@src(), dvui.entypo.book, "Documentation", true, "about:docs")) openUrl(SITE_URL);
+        if (chipButtonTagged(@src(), dvui.entypo.star, "What's new", false, "about:changelog")) openUrl(SITE_URL ++ "project/changelog/");
+        if (chipButtonTagged(@src(), dvui.entypo.code, "Source", false, "about:repo")) openUrl(REPO_URL);
+        if (chipButtonTagged(@src(), dvui.entypo.bug, "Report a problem", false, "about:issue")) openUrl(REPO_URL ++ "/issues/new");
     }
-    for (0..columns_n) |col| {
-        var column = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = col, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.xs, .w = style.space.xs } });
-        defer column.deinit();
-        for (features, 0..) |feature, i| if (column_of[i] == col) featureCard(i, feature);
+
+    // What it does: the kinds down the left, the one picked on the right.
+    var split = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .min_size_content = .{ .w = w, .h = 300 },
+        .max_size_content = .size(.{ .w = w, .h = 300 }),
+        .background = false,
+    });
+    defer split.deinit();
+    {
+        var nav = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .min_size_content = .{ .w = 200 },
+            .expand = .vertical,
+            .background = true,
+            .color_fill = .{ .color = style.surface() },
+            .border = .{ .w = 1 },
+            .color_border = .{ .color = style.border() },
+            .padding = dvui.Rect.all(style.space.sm),
+        });
+        defer nav.deinit();
+        for (features, 0..) |feature, i| {
+            const on = features_page == i;
+            var bw: dvui.ButtonWidget = undefined;
+            bw.init(@src(), .{ .draw_focus = false }, .{
+                .id_extra = i,
+                .tag = frameTag("about", feature.title),
+                .expand = .horizontal,
+                .background = true,
+                .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
+                .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
+                .corners = style.radius.input,
+                .margin = .{ .h = 2 },
+                .padding = .{ .x = style.space.sm, .y = 5, .w = style.space.sm, .h = 5 },
+            });
+            bw.processEvents();
+            bw.drawBackground();
+            {
+                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+                defer row.deinit();
+                dvui.icon(@src(), "about_icon", feature.icon, .{ .fill_color = .{ .color = if (on) style.accent() else style.textMuted() } }, .{ .min_size_content = .{ .w = 13, .h = 13 }, .gravity_y = 0.5, .margin = .{ .w = style.space.md } });
+                dvui.label(@src(), "{s}", .{feature.title}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = if (on) style.text() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+            }
+            if (bw.clicked()) features_page = i;
+            bw.deinit();
+        }
+    }
+    {
+        var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = true, .color_fill = .{ .color = style.surface() }, .padding = dvui.Rect.all(style.space.xl) });
+        defer body.deinit();
+        const feature = features[@min(features_page, features.len - 1)];
+        {
+            var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.md } });
+            defer head.deinit();
+            iconTile(@src(), feature.icon, 32, 16);
+            dvui.label(@src(), "{s}", .{feature.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md }, .padding = dvui.Rect.all(0) });
+        }
+        for (feature.items, 0..) |item, i| {
+            var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = i, .background = false, .padding = .{ .y = 3, .h = 3 } });
+            defer line.deinit();
+            dvui.icon(@src(), "feature_tick", dvui.entypo.check, .{ .fill_color = .{ .color = style.accent() } }, .{
+                .min_size_content = .{ .w = 10, .h = 10 },
+                .gravity_y = 0.5,
+                .margin = .{ .x = 2, .w = style.space.md },
+            });
+            dvui.label(@src(), "{s}", .{item}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        }
     }
 
     if (escapePressed()) features_open = false;
 }
 
-fn featureCard(id: usize, feature: Feature) void {
-    var card = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .id_extra = id,
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = style.border() },
-        .corners = style.radius.row,
-        .margin = .{ .h = style.space.md },
-        .padding = dvui.Rect.all(style.space.md),
-    });
-    defer card.deinit();
-    {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.sm } });
-        defer head.deinit();
-        iconTile(@src(), feature.icon, 26, 13);
-        dvui.label(@src(), "{s}", .{feature.title}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md }, .padding = dvui.Rect.all(0) });
-    }
-    for (feature.items, 0..) |item, i| {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = i, .background = false, .padding = .{ .y = 2, .h = 2 } });
-        defer line.deinit();
-        dvui.icon(@src(), "feature_tick", dvui.entypo.check, .{ .fill_color = .{ .color = style.accent() } }, .{
-            .min_size_content = .{ .w = 10, .h = 10 },
-            .gravity_y = 0.5,
-            .margin = .{ .x = 2, .w = style.space.sm },
-        });
-        dvui.label(@src(), "{s}", .{item}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-    }
-}
+/// The kind of feature the About dialog shows.
+var features_page: usize = 0;
+
+/// Where Zit is: its documentation, and its sources.
+const SITE_URL = "https://damienmonchaty.github.io/zit/";
+const REPO_URL = "https://github.com/DamienMonchaty/zit";
+const PLATFORM = switch (@import("builtin").os.tag) {
+    .windows => "Windows",
+    .macos => "macOS",
+    else => "Linux",
+} ++ " " ++ @tagName(@import("builtin").cpu.arch);
+
 
 /// A panel's fold button in the status bar: lit while the panel is shown.
 fn panelToggle(src: std.builtin.SourceLocation, shown: *bool, icon: []const u8, hint: []const u8, tag: []const u8) void {
@@ -29301,3 +29361,93 @@ test "a summary typed past 72 goes on in the description, and says so" {
     try std.testing.expectEqualStrings("Fix the parser", commit_summary.items);
 }
 
+
+
+// The documentation's screenshots, of a made-up repository: run by
+// scripts/screenshots.sh, which makes the repository first and sets
+// ZIT_SHOTS; skipped otherwise, so the suite never writes into the tree.
+test "docs screenshots" {
+    if (std.c.getenv("ZIT_SHOTS") == null) return error.SkipZigTest;
+    gpa = std.heap.c_allocator;
+    app_io = std.testing.io;
+    try git.init();
+    defer git.shutdown();
+    section_collapsed = @splat(false);
+    section_collapsed[@intFromEnum(Section.tags)] = true;
+    stillUi();
+    try me_name.appendSlice(gpa, "Alice Martin");
+    try me_email.appendSlice(gpa, "alice@acme.dev");
+    me_loaded = true;
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1440, .h = 900 }, .allocator = std.heap.c_allocator });
+    defer t.deinit();
+    const demo = "/tmp/acme-web";
+    try recent.append(gpa, try gpa.dupe(u8, "/home/alice/dev/acme-api/"));
+    try recent.append(gpa, try gpa.dupe(u8, "/home/alice/dev/design-system/"));
+
+    for ([_]bool{ true, false }) |dark| {
+        dark_theme = dark;
+        theme_index = if (dark) 0 else 1;
+        applyTheme();
+        const sfx: []const u8 = if (dark) "dark" else "light";
+        openRepo(demo);
+        clearSelection();
+        try docShot("zit", sfx);
+        if (!dark) {
+            closeRepo();
+            continue;
+        }
+        const h = history.?;
+        selectCommit(h.commits[3].id);
+        try docShot("commit", sfx);
+        // The commit that validates the login's email: a diff worth reading.
+        for (h.commits) |c| if (std.mem.eql(u8, c.summary, "WEB-12: validate the email field")) {
+            selectCommit(c.id);
+            try docShot("zz", sfx);
+            selectCommitFile(c.id, "src/components/Login.tsx");
+        };
+        try docShot("diff", sfx);
+        selectChange("src/components/Search.tsx", .unstaged);
+        try commit_summary.appendSlice(gpa, "WEB-18: keyboard navigation in the results");
+        try docShot("changes", sfx);
+        commit_summary.clearRetainingCapacity();
+        clearSelection();
+        search_open = true;
+        try commit_filter.appendSlice(gpa, "author:chloe");
+        try docShot("search", sfx);
+        commit_filter.clearRetainingCapacity();
+        search_open = false;
+        palette_open = true;
+        try docShot("palette", sfx);
+        palette_open = false;
+        openSettings(0);
+        try docShot("settings-appearance", sfx);
+        settings_open = false;
+        try docShot("zz", sfx);
+        openSettings(REPO_PAGE);
+        try docShot("settings-repository", sfx);
+        settings_open = false;
+        features_open = true;
+        features_page = 0;
+        try docShot("about", sfx);
+        features_open = false;
+        new_tab_open = true;
+        try docShot("start", sfx);
+        new_tab_open = false;
+        closeRepo();
+    }
+}
+
+/// One screenshot for the documentation, once the frame has settled:
+/// docs/screenshots/{name}-{theme}.png, or {name}.png for the dark one of
+/// the home page's pair.
+fn docShot(name: []const u8, sfx: []const u8) !void {
+    for (0..12) |_| try dvui.testing.settle(frameArrowCursor);
+    var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 1 << 20);
+    defer out.deinit();
+    try dvui.testing.capturePng(frameArrowCursor, null, &out.writer);
+    var path: [256]u8 = undefined;
+    // A shot only to let the frame before settle: not kept.
+    if (std.mem.eql(u8, name, "zz")) return;
+    const p = try std.fmt.bufPrint(&path, "docs/screenshots/{s}-{s}.png", .{ name, sfx });
+    try std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = p, .data = out.written() });
+}
