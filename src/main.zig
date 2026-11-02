@@ -15603,20 +15603,23 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
             // GitKraken's heads: the branch column's, then the graph's.
             {
                 const bw = branchColumn();
-                var cell = dvui.box(@src(), .{}, .{ .tag = "header:branches", .min_size_content = .{ .w = bw }, .max_size_content = .width(bw), .gravity_y = 0.5, .background = false });
+                // Which branches the graph draws, in the column of the
+                // branches, at the end of its name.
+                var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .tag = "header:branches", .min_size_content = .{ .w = bw }, .max_size_content = .width(bw), .gravity_y = 0.5, .background = false });
                 defer cell.deinit();
                 var buf: [MAX_SHOWN_LINE]u8 = undefined;
-                dvui.label(@src(), "{s}", .{fitText(&buf, "BRANCH / TAG", style.section(), bw - HEADER_INSET - style.space.sm)}, .{
+                dvui.label(@src(), "{s}", .{fitText(&buf, "BRANCH / TAG", style.section(), bw - HEADER_INSET - style.space.sm - BRANCH_MENU_W)}, .{
                     .font = style.section(),
                     .color_text = .{ .color = style.textFaint() },
                     .gravity_y = 0.5,
                     .padding = .{ .x = HEADER_INSET },
                 });
+                _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+                graphBranchMenu(@src());
             }
-            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = lane_w - branchColumn() }, .max_size_content = .width(lane_w - branchColumn()), .gravity_y = 0.5, .background = false, .padding = .{ .x = style.space.xs } });
-            defer cell.deinit();
-            // Which branches it draws, at the head of the graph they shape.
-            graphBranchMenu(@src());
+            // The graph's own head: its width, nothing in it.
+            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = lane_w - branchColumn() }, .max_size_content = .width(lane_w - branchColumn()), .gravity_y = 0.5, .background = false });
+            cell.deinit();
         }
         headerCell(@src(), "MESSAGE", 0, true, false);
         const cols = columnsShown();
@@ -17773,6 +17776,8 @@ fn branchColumn() f32 {
 var branch_width: f32 = 0;
 var branch_width_drag: f32 = 0;
 const BRANCH_DEFAULT_W: f32 = 160;
+/// The branch menu's room at the end of the column's name.
+const BRANCH_MENU_W: f32 = 34;
 const BRANCH_MIN_W: f32 = 60;
 const BRANCH_MAX_W: f32 = 400;
 
@@ -19802,11 +19807,11 @@ fn commitFiles(id: git.Oid) void {
         viewToggle(@src(), .path, "Path", dvui.entypo.list);
         viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree);
         track.deinit();
-        // The kinds between, on the same line.
-        if (diff_all.len > 0) fileFilters();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         dvui.label(@src(), "All files", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
         if (toggle(@src(), commit_all_files)) commit_all_files = !commit_all_files;
+        // The kinds after it, at the end of the line.
+        if (diff_all.len > 0) fileFilters();
     }
 
     if (!commit_all_files) {
@@ -20155,11 +20160,11 @@ fn fileFilters() void {
     // A kind this commit has none of shows nothing: back to all of them.
     if (n.get(file_filter) == 0) file_filter = .all;
 
-    // Between Path / Tree and All files, framed as they are: All, then only
-    // the kinds this commit has, each as wide as it needs.
+    // After All files, framed as Path / Tree are: All, then only the kinds
+    // this commit has, each as wide as it needs.
     var track = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .gravity_y = 0.5,
-        .margin = .{ .x = style.space.sm, .w = style.space.sm },
+        .margin = .{ .x = style.space.sm },
         .background = true,
         .color_fill = .{ .color = style.surfaceInput() },
         .border = dvui.Rect.all(1),
@@ -29272,3 +29277,4 @@ test "a summary typed past 72 goes on in the description, and says so" {
     try clickAt(try tagCenter("commit:drop_stop"));
     try std.testing.expectEqualStrings("Fix the parser", commit_summary.items);
 }
+
