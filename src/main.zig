@@ -216,16 +216,15 @@ const Tab = struct {
     path: []u8,
 };
 
-/// A workspace: a named, coloured set of repositories, the strip showing one
-/// at a time. Switching to another keeps the window and the view and opens
-/// the repository it was on. The unnamed one is "Default".
+/// A run of tabs in the strip. Named, it is a group — a coloured label
+/// before its tabs, foldable to that label. Unnamed, it is tabs in no group.
 const TabGroup = struct {
     name: []u8,
     tabs: std.ArrayList(Tab),
     color: u8 = 0,
     collapsed: bool = false,
-    /// The tab it was on.
-    last: usize = 0,
+    /// The workspace it is in, by index.
+    ws: usize = 0,
 
     fn deinit(self: *TabGroup) void {
         for (self.tabs.items) |tab| gpa.free(tab.path);
@@ -238,6 +237,41 @@ const TabGroup = struct {
 var groups: std.ArrayList(TabGroup) = .empty;
 var active_group: usize = 0;
 var active_tab: usize = 0;
+
+/// Workspaces, GitComet's: named, coloured sets of groups, the strip showing
+/// one at a time — switched in this window, keeping the view. The unnamed
+/// one is "Default".
+const Workspace = struct {
+    name: []u8,
+    color: u8 = 0,
+    /// The group and tab it was on.
+    group: usize = 0,
+    tab: usize = 0,
+};
+var workspaces: std.ArrayList(Workspace) = .empty;
+var active_ws: usize = 0;
+
+fn workspaceName(w: Workspace) []const u8 {
+    return if (w.name.len > 0) w.name else "Default";
+}
+
+/// Every workspace has a group, so a tab opened there has somewhere to go.
+fn ensureWorkspaceGroups() void {
+    for (workspaces.items, 0..) |_, w| {
+        const has = for (groups.items) |g| {
+            if (g.ws == w) break true;
+        } else false;
+        if (has) continue;
+        const name = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch continue;
+        groups.append(gpa, .{ .name = name, .tabs = .empty, .ws = w }) catch gpa.free(name);
+    }
+}
+
+fn freeWorkspaces() void {
+    for (workspaces.items) |w| gpa.free(w.name);
+    workspaces.clearRetainingCapacity();
+    active_ws = 0;
+}
 
 /// Where the workspace file goes. Empty when the environment names nowhere —
 /// and in tests, which is what keeps a test run from writing over the real one.
@@ -266,12 +300,17 @@ fn loadWorkspace() void {
     avatars.use_github.store(integrations, .release);
     default_branch.clearRetainingCapacity();
     default_branch.appendSlice(gpa, loaded.file.default_branch) catch {};
+    editor_cmd.clearRetainingCapacity();
+    editor_cmd.appendSlice(gpa, loaded.file.editor) catch {};
+    terminal_cmd.clearRetainingCapacity();
+    terminal_cmd.appendSlice(gpa, loaded.file.terminal) catch {};
+    show_avatars = loaded.file.avatars;
 
     // Turned off, the tabs are still written — so turning it back on brings
     // them back — but not opened.
     for (if (remember_tabs) loaded.file.groups else &.{}) |saved| {
         const name = gpa.dupe(u8, if (std.mem.eql(u8, saved.name, LEGACY_DEFAULT_GROUP)) DEFAULT_GROUP_NAME else saved.name) catch continue;
-        var group: TabGroup = .{ .name = name, .tabs = .empty, .color = saved.color, .last = saved.last };
+        var group: TabGroup = .{ .name = name, .tabs = .empty, .color = saved.color, .collapsed = saved.collapsed, .ws = saved.workspace };
 
         for (saved.repos) |path| {
             const owned = gpa.dupe(u8, path) catch continue;
@@ -291,8 +330,27 @@ fn loadWorkspace() void {
 
     active_group = @min(loaded.file.active_group, groups.items.len -| 1);
     active_tab = loaded.file.active_repo;
-    mergeDefaultWorkspaces();
+    // A file of before the workspaces: all its groups are in one.
+    for (loaded.file.workspaces) |saved| {
+        const name = gpa.dupe(u8, saved.name) catch continue;
+        workspaces.append(gpa, .{ .name = name, .color = saved.color, .group = saved.group, .tab = saved.tab }) catch gpa.free(name);
+    }
+    if (workspaces.items.len == 0) if (gpa.dupe(u8, "")) |name| {
+        workspaces.append(gpa, .{ .name = name }) catch gpa.free(name);
+    } else |_| {};
+    for (groups.items) |*g| if (g.ws >= workspaces.items.len) {
+        g.ws = 0;
+    };
+    ensureWorkspaceGroups();
+    active_ws = if (groups.items.len > 0) groups.items[active_group].ws else 0;
     dark_theme = loaded.file.dark;
+    theme_index = if (dark_theme) 0 else 1;
+    for (style.themes, 0..) |t, i| if (std.mem.eql(u8, t.name, loaded.file.theme)) {
+        theme_index = i;
+        dark_theme = t.dark;
+    };
+    style.ui_scale = std.math.clamp(loaded.file.ui_text, 0.8, 1.3);
+    style.code_scale = std.math.clamp(loaded.file.code_text, 0.8, 1.5);
     for (loaded.file.recent) |path| addRecent(path, false);
     commit_prefs = loaded.file.commit;
     auto_fetch_minutes = loaded.file.auto_fetch_minutes;
@@ -314,9 +372,13 @@ fn loadWorkspace() void {
 /// one a frame. A write that fails is tried again later and later, up to a
 /// minute apart (`flushWorkspace`). Tests write at once; they read it back.
 fn saveWorkspace() void {
-    // Every change of tab comes through here: the workspace remembers the
-    // one it is on, for when it is switched back to.
-    if (activeGroup()) |g| g.last = active_tab;
+    // Every change of tab comes through here: the workspace shown follows
+    // the tab, and remembers where it is for when it is switched back to.
+    if (activeGroup()) |g| active_ws = g.ws;
+    if (active_ws < workspaces.items.len) {
+        workspaces.items[active_ws].group = active_group;
+        workspaces.items[active_ws].tab = active_tab;
+    }
     if (config_dir.items.len == 0) return;
     // Outside a frame — at exit — there is no later: now.
     if (@import("builtin").is_test or !in_frame) {
@@ -368,17 +430,26 @@ fn writeWorkspace() bool {
         const repos = gpa.alloc([]const u8, group.tabs.items.len) catch return false;
         for (group.tabs.items, 0..) |tab, i| repos[i] = tab.path;
 
-        list.append(gpa, .{ .name = group.name, .repos = repos, .color = group.color, .last = group.last }) catch {
+        list.append(gpa, .{ .name = group.name, .repos = repos, .color = group.color, .collapsed = group.collapsed, .workspace = group.ws }) catch {
             gpa.free(repos);
             return false;
         };
     }
 
+    var ws_list: std.ArrayList(store.Workspace) = .empty;
+    defer ws_list.deinit(gpa);
+    for (workspaces.items) |w| ws_list.append(gpa, .{ .name = w.name, .color = w.color, .group = w.group, .tab = w.tab }) catch return false;
+
     return store.save(gpa, app_io, config_dir.items, .{
         .groups = list.items,
+        .workspaces = ws_list.items,
+        .active_workspace = active_ws,
         .active_group = active_group,
         .active_repo = active_tab,
         .dark = dark_theme,
+        .theme = style.themes[theme_index].name,
+        .ui_text = style.ui_scale,
+        .code_text = style.code_scale,
         .recent = recent.items,
         .auto_fetch_minutes = auto_fetch_minutes,
         .show_remote_branches = graph_show_remote,
@@ -387,6 +458,9 @@ fn writeWorkspace() bool {
         .branch_width = branch_width,
         .remember_tabs = remember_tabs,
         .default_branch = default_branch.items,
+        .editor = editor_cmd.items,
+        .terminal = terminal_cmd.items,
+        .avatars = show_avatars,
         .prune = prune_on_fetch,
         .integrations = integrations,
         .zoom = zoom,
@@ -450,10 +524,19 @@ fn setIntegrations(on: bool) void {
     saveWorkspace();
 }
 var default_branch: std.ArrayList(u8) = .empty;
+/// The command a file opens with; empty for the system's own choice.
+var editor_cmd: std.ArrayList(u8) = .empty;
+/// The terminal Terminal opens, one of `known_terminals`; empty for the
+/// first found.
+var terminal_cmd: std.ArrayList(u8) = .empty;
+/// Authors' pictures shown, fetched; off, their initials only.
+var show_avatars: bool = true;
 
 /// The arguments of a fetch of every remote, pruning or not as set; `quiet`
-/// for the timer's own.
+/// for the timer's own. Where git's own config says whether to prune — for
+/// this repository or everywhere — git decides.
 fn fetchAllArgs(quiet: bool) []const []const u8 {
+    if (git_fetch_prune_set) return if (quiet) &.{ "fetch", "--all", "--quiet" } else &.{ "fetch", "--all" };
     return if (prune_on_fetch)
         (if (quiet) &.{ "fetch", "--all", "--prune", "--quiet" } else &.{ "fetch", "--all", "--prune" })
     else
@@ -497,8 +580,9 @@ fn clearRecent() void {
 /// Nothing on disk is touched.
 fn forgetRepo(path: []const u8) void {
     removeRecent(path);
-    // The other workspaces first, then the active one, whose closes go
-    // through `closeTab` to move the open repository along.
+    // The other groups first, and only then the active one: closing its last
+    // tab drops the group from under this loop and opens the first tab left
+    // anywhere — which must not be this repository again.
     for (groups.items, 0..) |*group, gi| {
         if (gi == active_group) continue;
         var i: usize = group.tabs.items.len;
@@ -507,7 +591,9 @@ fn forgetRepo(path: []const u8) void {
             if (std.mem.eql(u8, group.tabs.items[i].path, path)) gpa.free(group.tabs.orderedRemove(i).path);
         }
     }
-    for (groups.items) |*group| group.last = @min(group.last, group.tabs.items.len -| 1);
+    // A group it was the only tab of goes too, as when its last tab closes.
+    dropEmptyGroups();
+    // Looked up afresh each time: a close can move the active group.
     while (activeGroup()) |group| {
         const i = for (group.tabs.items, 0..) |tab, i| {
             if (std.mem.eql(u8, tab.path, path)) break i;
@@ -598,46 +684,45 @@ fn closeTabIn(g: usize, index: usize) void {
     const removed = groups.items[g].tabs.orderedRemove(index);
     addRecent(removed.path, true);
     gpa.free(removed.path);
+    dropEmptyGroups();
     saveWorkspace();
 }
 
-/// Each workspace without a name is the same "Default": files of before the
-/// workspaces had a run of ungrouped tabs between every two groups. Their
-/// tabs go into the first, the one shown staying the one shown.
-fn mergeDefaultWorkspaces() void {
-    const shown: ?[]const u8 = if (activeGroup()) |g| (if (active_tab < g.tabs.items.len) g.tabs.items[active_tab].path else null) else null;
-    var first: ?usize = null;
-    var g: usize = 0;
-    while (g < groups.items.len) {
-        if (groups.items[g].name.len > 0) {
-            g += 1;
-            continue;
+/// A group with no tabs left goes, as in a browser — unless it is all
+/// there is, since everything downstream assumes a group exists.
+fn dropEmptyGroups() void {
+    var g: usize = groups.items.len;
+    while (g > 0 and groups.items.len > 1) {
+        g -= 1;
+        if (groups.items[g].tabs.items.len > 0) continue;
+        // A workspace keeps at least one group.
+        const others = for (groups.items, 0..) |other, o| {
+            if (o != g and other.ws == groups.items[g].ws) break true;
+        } else false;
+        if (!others) continue;
+        var removed = groups.orderedRemove(g);
+        removed.deinit();
+        if (active_group > g) active_group -= 1 else if (active_group == g) {
+            active_group = @min(g, groups.items.len - 1);
+            active_tab = 0;
         }
-        const into = first orelse {
-            first = g;
-            g += 1;
-            continue;
-        };
-        var merged = groups.orderedRemove(g);
-        groups.items[into].tabs.appendSlice(gpa, merged.tabs.items) catch {
-            merged.deinit();
-            continue;
-        };
-        // The paths now belong to the first; only the list and name go.
-        merged.tabs.deinit(gpa);
-        gpa.free(merged.name);
-        if (active_group > g) active_group -= 1;
     }
-    if (shown) |path| for (groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
-        if (tab.path.ptr != path.ptr) continue;
-        active_group = gi;
-        active_tab = ti;
-    };
 }
 
-/// What a workspace is called: its name, or "Default" for the unnamed one.
-fn workspaceName(group: TabGroup) []const u8 {
-    return if (group.name.len > 0) group.name else "Default";
+/// After the active group lost its last tab: the first tab anywhere, or
+/// nothing open.
+fn selectAnyTab() void {
+    for (groups.items, 0..) |group, g| {
+        if (group.ws == active_ws and group.tabs.items.len > 0) return selectTabIn(g, 0);
+    }
+    // The workspace stays, empty, on its start page.
+    for (groups.items, 0..) |group, g| if (group.ws == active_ws) {
+        active_group = g;
+        active_tab = 0;
+        break;
+    };
+    closeRepo();
+    new_tab_open = true;
 }
 
 fn closeTab(index: usize) void {
@@ -656,9 +741,9 @@ fn closeTab(index: usize) void {
     if (active_tab >= group.tabs.items.len) active_tab = group.tabs.items.len -| 1;
 
     if (group.tabs.items.len == 0) {
-        // The workspace stays, empty, on its start page.
         closeRepo();
-        new_tab_open = true;
+        dropEmptyGroups();
+        selectAnyTab();
     } else if (was_active) {
         openRepo(group.tabs.items[active_tab].path);
     }
@@ -666,39 +751,15 @@ fn closeTab(index: usize) void {
     saveWorkspace();
 }
 
-/// Switch to workspace `index`, in the same window and the same view: the
-/// repository it was on, or its start page when it has none.
 fn selectGroup(index: usize) void {
     if (index >= groups.items.len) return;
-    const group = &groups.items[index];
-    if (group.tabs.items.len == 0) {
+    if (groups.items[index].tabs.items.len == 0) {
         active_group = index;
         active_tab = 0;
         closeRepo();
-        new_tab_open = true;
         return saveWorkspace();
     }
-    new_tab_open = false;
-    selectTabIn(index, @min(group.last, group.tabs.items.len - 1));
-}
-
-/// A new, empty workspace named `name`, in a colour no other has yet where
-/// there is one, switched to.
-fn newWorkspace(name: []const u8) void {
-    const owned = gpa.dupe(u8, name) catch return;
-    groups.append(gpa, .{ .name = owned, .tabs = .empty, .color = unusedColor() }) catch return gpa.free(owned);
-    selectGroup(groups.items.len - 1);
-}
-
-fn unusedColor() u8 {
-    var color: u8 = 0;
-    while (color < GROUP_COLORS - 1) : (color += 1) {
-        const used = for (groups.items) |other| {
-            if (other.color == color) break true;
-        } else false;
-        if (!used) break;
-    }
-    return color;
+    selectTabIn(index, 0);
 }
 
 /// The palette's colours, a group each; the index is what is saved.
@@ -717,12 +778,37 @@ fn groupColor(i: u8) dvui.Color {
     };
 }
 
-/// A new workspace named `name`, holding tab `t` of workspace `g`, right
-/// after it.
+/// What each of the palette's colours is called, as a group is referred to
+/// in a menu: groups have no name shown, only their colour.
+fn groupColorName(i: u8) []const u8 {
+    return switch (i % GROUP_COLORS) {
+        0 => "blue",
+        1 => "purple",
+        2 => "green",
+        3 => "orange",
+        4 => "red",
+        5 => "yellow",
+        else => "grey",
+    };
+}
+
+/// What a group made from the dialog is called inside: never shown, it only
+/// marks the tabs as grouped — tabs in no group have no name.
+const GROUP_MARK = "group";
+
+/// A new group named `name`, holding tab `t` of group `g`, right after it.
 fn groupTab(name: []const u8, g: usize, t: usize) void {
     if (g >= groups.items.len or t >= groups.items[g].tabs.items.len) return;
     const owned = gpa.dupe(u8, name) catch return;
-    groups.insert(gpa, g + 1, .{ .name = owned, .tabs = .empty, .color = unusedColor() }) catch return gpa.free(owned);
+    // A colour the strip does not show yet, where there is one.
+    var color: u8 = 0;
+    while (color < GROUP_COLORS - 1) : (color += 1) {
+        const used = for (groups.items) |other| {
+            if (other.name.len > 0 and other.color == color) break true;
+        } else false;
+        if (!used) break;
+    }
+    groups.insert(gpa, g + 1, .{ .name = owned, .tabs = .empty, .color = color, .ws = groups.items[g].ws }) catch return gpa.free(owned);
     if (active_group > g) active_group += 1;
     moveTab(g, t, g + 1);
 }
@@ -755,8 +841,30 @@ fn moveTabTo(from: usize, t: usize, to: usize, at: usize) void {
         active_group = g;
         active_tab = i;
     };
-    // Whatever the moved tab left behind as `last` is a tab still there.
-    for (groups.items) |*group| group.last = @min(group.last, group.tabs.items.len -| 1);
+    groups.items[to].collapsed = false;
+    dropEmptyGroups();
+    saveWorkspace();
+}
+
+/// Tab `t` of group `g` out of it, into the tabs in no group just after.
+fn ungroupTab(g: usize, t: usize) void {
+    if (g >= groups.items.len or groups.items[g].name.len == 0) return;
+    const next = g + 1;
+    if (next >= groups.items.len or groups.items[next].name.len > 0) {
+        const owned = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
+        groups.insert(gpa, next, .{ .name = owned, .tabs = .empty, .ws = groups.items[g].ws }) catch return gpa.free(owned);
+        if (active_group > g) active_group += 1;
+    }
+    moveTab(g, t, next);
+}
+
+/// The label goes, the tabs stay where they are.
+fn ungroup(g: usize) void {
+    if (g >= groups.items.len) return;
+    const name = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
+    gpa.free(groups.items[g].name);
+    groups.items[g].name = name;
+    groups.items[g].collapsed = false;
     saveWorkspace();
 }
 
@@ -775,13 +883,20 @@ fn closeGroup(index: usize) void {
     var removed = groups.orderedRemove(index);
     for (removed.tabs.items) |tab| addRecent(tab.path, true);
     removed.deinit();
+    // Its workspace keeps a group, empty if need be.
+    ensureWorkspaceGroups();
     if (groups.items.len == 0) {
         if (gpa.dupe(u8, DEFAULT_GROUP_NAME)) |name| {
             groups.append(gpa, .{ .name = name, .tabs = .empty }) catch gpa.free(name);
         } else |_| {}
     }
     if (active_group > index) active_group -= 1;
-    if (was_active) selectGroup(0) else saveWorkspace();
+    if (was_active) {
+        active_group = 0;
+        active_tab = 0;
+        selectAnyTab();
+    }
+    saveWorkspace();
 }
 
 /// The networked command running on another thread, if any.
@@ -884,6 +999,8 @@ var changes_view: ChangesView = .path;
 
 /// Which compiled-in theme is on.
 var dark_theme: bool = true;
+/// The theme on, by its place in `style.themes`.
+var theme_index: usize = 0;
 
 /// A destructive action waiting for a yes.
 ///
@@ -944,6 +1061,8 @@ const Prompt = struct {
         new_branch,
         new_tag,
         add_remote,
+        new_group,
+        rename_group,
         /// `arg` is the branch's current name.
         rename_branch,
         stash,
@@ -960,6 +1079,8 @@ const Prompt = struct {
             .new_branch => "New branch",
             .new_tag => "New tag",
             .add_remote => "Add remote",
+            .new_group => "New tab group",
+            .rename_group => "Rename this group",
             .rename_branch => "Rename branch",
             .stash => "Stash, as",
             .rename_remote => "Rename remote",
@@ -973,6 +1094,7 @@ const Prompt = struct {
             .new_branch, .rename_branch => "branch name",
             .new_tag => "tag name",
             .add_remote => "name url",
+            .new_group, .rename_group => "group name",
             .stash => "what this stash is",
             .rename_remote => "remote name",
             .remote_url => "url",
@@ -983,7 +1105,7 @@ const Prompt = struct {
     /// Over the field, what goes in it.
     fn label(kind: Kind) []const u8 {
         return switch (kind) {
-            .new_branch, .rename_branch, .new_tag, .rename_remote => "Name",
+            .new_branch, .rename_branch, .new_tag, .rename_remote, .new_group, .rename_group => "Name",
             .add_remote => "Name and URL",
             .stash => "Message",
             .remote_url => "URL",
@@ -996,7 +1118,8 @@ const Prompt = struct {
             .new_branch => dvui.entypo.flow_branch,
             .new_tag => dvui.entypo.tag,
             .add_remote => dvui.entypo.cloud,
-            .rename_branch, .rename_remote => dvui.entypo.pencil,
+            .new_group => dvui.entypo.plus,
+            .rename_branch, .rename_remote, .rename_group => dvui.entypo.pencil,
             .stash => dvui.entypo.archive,
             .remote_url => dvui.entypo.link,
             .add_worktree => dvui.entypo.folder,
@@ -1014,13 +1137,14 @@ const Prompt = struct {
             .rename_branch, .rename_remote, .remote_url => arg,
             .stash => "Every change, set aside under this name",
             .add_worktree => "A folder, a space, then the branch to check out there",
+            .new_group, .rename_group => "",
         };
     }
 
     /// The button that answers the dialog.
     fn verb(kind: Kind) []const u8 {
         return switch (kind) {
-            .rename_branch, .rename_remote => "Rename",
+            .rename_branch, .rename_remote, .rename_group => "Rename",
             .stash => "Stash",
             .remote_url => "Save",
             .add_remote, .add_worktree => "Add",
@@ -1459,7 +1583,7 @@ fn ensureDiff() void {
     if (diff == null or !sameDiff(diff.?, next)) picked_lines.clearRetainingCapacity();
 
     var rows: usize = 0;
-    for (next.files) |f| rows += 1 + f.lines.len;
+    for (next.files) |f| rows += FILE_ROWS + f.lines.len;
 
     if (diff) |*d| d.deinit();
     diff = next;
@@ -1497,8 +1621,13 @@ var diff_split: bool = false;
 
 const NO_LINE = std.math.maxInt(u32);
 
+/// A file's header in the diff: two lines high, room for its name and its
+/// buttons.
+const FILE_ROWS = 2;
+
 const SplitRow = struct {
-    kind: enum { file, hunk, pair },
+    /// `pad`: the header's second line, drawn by the first.
+    kind: enum { file, pad, hunk, pair },
     file: u32,
     /// Indices into that file's lines; NO_LINE where the side has nothing.
     left: u32 = NO_LINE,
@@ -1520,6 +1649,7 @@ fn buildSplitRows() void {
     for (d.files, 0..) |file, fi_usize| {
         const fi: u32 = @intCast(fi_usize);
         split_rows.append(gpa, .{ .kind = .file, .file = fi }) catch return;
+        split_rows.append(gpa, .{ .kind = .pad, .file = fi }) catch return;
         var dels: std.ArrayList(u32) = .empty;
         defer dels.deinit(gpa);
         var adds: std.ArrayList(u32) = .empty;
@@ -1659,11 +1789,11 @@ fn diffModeToggle(src: std.builtin.SourceLocation) void {
                 .background = selected or bw.hovered(),
                 .color_fill = .{ .color = if (selected) style.accentDim() else style.rowHover() },
                 .corners = style.radius.input,
-                .padding = .{ .x = style.space.sm, .w = style.space.sm, .y = 1, .h = 1 },
+                .padding = .{ .x = style.space.md, .w = style.space.md, .y = style.space.xs, .h = style.space.xs },
             });
             defer cell.deinit();
             dvui.label(@src(), "{s}", .{if (split) "Split" else "Unified"}, .{
-                .font = if (selected) style.tinyBold() else style.tiny(),
+                .font = if (selected) style.smallBold() else style.small(),
                 .color_text = .{ .color = if (selected) style.accent() else style.textFaint() },
                 .padding = dvui.Rect.all(0),
             });
@@ -1723,18 +1853,6 @@ const Section = enum(u8) {
             .worktrees => "No worktrees",
             // Their own notes: loading, failed, none open.
             .pulls, .issues => null,
-        };
-    }
-
-    fn icon(self: Section) []const u8 {
-        return switch (self) {
-            .local => dvui.entypo.browser,
-            .remotes => dvui.entypo.cloud,
-            .stashes => dvui.entypo.archive,
-            .tags => dvui.entypo.tag,
-            .worktrees => dvui.entypo.folder,
-            .pulls => dvui.entypo.merge,
-            .issues => dvui.entypo.flag,
         };
     }
 
@@ -1838,7 +1956,8 @@ fn migrateFromZync(dir: []const u8, tail: []const u8) void {
 /// Put the chosen theme on. Split out of `appInit` because the settings menu
 /// calls it too, and a failure means the same thing in both places.
 fn applyTheme() void {
-    style.applyEmbedded(gpa, dark_theme) catch |err| {
+    dark_theme = style.themes[theme_index].dark;
+    style.applyTheme(gpa, theme_index) catch |err| {
         // Only reachable if the compiled-in JSON is malformed, which is a build
         // problem, not a user one — but an unstyled window beats no window.
         std.log.warn("theme not applied ({s}), falling back to the dvui default", .{@errorName(err)});
@@ -1931,9 +2050,15 @@ fn appDeinit(win: *dvui.Window) void {
     author_only.deinit(gpa);
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
+    editor_cmd.deinit(gpa);
+    terminal_cmd.deinit(gpa);
     signing_key.deinit(gpa);
-    ws_name.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
+    if (repo_prefs_job) |j| j.deinit(app_io);
+    repo_name_local.deinit(gpa);
+    repo_email_local.deinit(gpa);
+    repo_settings_path.deinit(gpa);
+    if (editors_job) |j| j.deinit(app_io);
     if (repo_config_job) |j| j.deinit(app_io);
     git_template_path.deinit(gpa);
     commit_sent.deinit(gpa);
@@ -1962,6 +2087,9 @@ fn appDeinit(win: *dvui.Window) void {
 
     for (groups.items) |*group| group.deinit();
     groups.deinit(gpa);
+    freeWorkspaces();
+    workspaces.deinit(gpa);
+    ws_name.deinit(gpa);
     config_dir.deinit(gpa);
 }
 
@@ -3017,12 +3145,25 @@ fn openTerminal() void {
     if (repo == null) return;
     // Windows Terminal where there is one, the console otherwise; `start`
     // gives either its own window and returns.
+    // The one picked in the settings first — only ever one of
+    // `known_terminals`, so a name safe in a command line.
+    const chosen = std.mem.trim(u8, terminal_cmd.items, " ");
+    const windows_line: []const u8 = if (std.mem.eql(u8, chosen, "wt"))
+        "start wt -d ."
+    else if (std.mem.eql(u8, chosen, "pwsh"))
+        "start pwsh"
+    else if (std.mem.eql(u8, chosen, "powershell"))
+        "start powershell"
+    else if (std.mem.eql(u8, chosen, "cmd"))
+        "start cmd"
+    else
+        "where wt >nul 2>nul && start wt -d . || start cmd";
     const argv: []const []const u8 = if (@import("builtin").os.tag == .windows)
-        &.{ "cmd.exe", "/s", "/c", "where wt >nul 2>nul && start wt -d . || start cmd" }
+        &.{ "cmd.exe", "/s", "/c", windows_line }
     else
         &.{
             "sh", "-c",
-            \\for t in "$TERMINAL" x-terminal-emulator konsole gnome-terminal kitty alacritty wezterm foot ghostty xfce4-terminal tilix xterm; do
+            \\for t in "$1" "$TERMINAL" x-terminal-emulator konsole gnome-terminal kitty alacritty wezterm foot ghostty xfce4-terminal tilix xterm; do
             \\  [ -n "$t" ] && command -v "$t" >/dev/null 2>&1 || continue
             \\  case "${t##*/}" in
             \\    konsole) set -- --workdir "$PWD" ;;
@@ -3037,6 +3178,9 @@ fn openTerminal() void {
             \\  exit 0
             \\done
             \\exit 1
+            ,
+            "sh",
+            chosen,
         };
     const ok = run.launch(app_io, repo_path.items, argv) catch return setCommandError("Could not start a terminal.");
     if (!ok) setCommandError("No terminal found. Set $TERMINAL to the one you use.");
@@ -3122,15 +3266,20 @@ const TabAction = union(enum) {
     /// Group, tab.
     select_in: [2]usize,
     close_in: [2]usize,
+    group_toggle: usize,
     /// Group, colour.
     group_color: [2]usize,
+    ungroup: usize,
     /// Group, tab, the group it goes to.
     tab_to: [3]usize,
+    tab_out: [2]usize,
     /// Group, tab, then the group and slot it was dragged to.
     tab_at: [4]usize,
     /// A repository picked out of the menu of known ones, owned — the list it
     /// came from is about to be rebuilt underneath it.
     open: []u8,
+    select_ws: usize,
+    close_ws: usize,
     /// The workspace dialog answered: what it holds is applied.
     workspace_named,
 };
@@ -3951,13 +4100,21 @@ fn runTabAction() void {
         .close_group => |i| closeGroup(i),
         .select_in => |gt| selectTabIn(gt[0], gt[1]),
         .close_in => |gt| closeTabIn(gt[0], gt[1]),
+        .group_toggle => |g| if (g < groups.items.len) {
+            groups.items[g].collapsed = !groups.items[g].collapsed;
+            saveWorkspace();
+        },
         .group_color => |gc| if (gc[0] < groups.items.len) {
             groups.items[gc[0]].color = @intCast(gc[1]);
             saveWorkspace();
         },
+        .ungroup => |g| ungroup(g),
         .tab_to => |m| moveTab(m[0], m[1], m[2]),
         .tab_at => |m| moveTabTo(m[0], m[1], m[2], m[3]),
+        .select_ws => |w| selectWorkspace(w),
+        .close_ws => |w| deleteWorkspace(w),
         .workspace_named => applyWorkspaceDialog(),
+        .tab_out => |gt| ungroupTab(gt[0], gt[1]),
         .open => |path| {
             defer gpa.free(path);
             openAndRemember(path);
@@ -4438,6 +4595,15 @@ fn runPrompt() void {
                 gitDo(&.{ "worktree", "add", "-b", pair[1], dest });
             }
         },
+        // Nothing to run and nothing to fail: these only rearrange the strip.
+        .new_group => {
+            groupTab(name, group_target[0], group_target[1]);
+            return clearPrompt();
+        },
+        .rename_group => {
+            renameGroup(group_target[0], name);
+            return clearPrompt();
+        },
     }
 
     if (command_error == null) clearPrompt();
@@ -4712,13 +4878,17 @@ fn addCoAuthor(name: []const u8, email: []const u8) void {
 var repo_config_job: ?*run.Capture = null;
 /// `commit.template` as `git config --path` gives it; empty for none.
 var git_template_path: std.ArrayList(u8) = .empty;
+/// git's config says whether a fetch prunes, here or everywhere: the
+/// setting of Zit's own then gives way to it.
+var git_fetch_prune_set = false;
 
 fn startRepoConfig() void {
     if (repo_config_job) |old| old.deinit(app_io);
     repo_config_job = null;
     avatars.setSelfEmail("");
     git_template_path.clearRetainingCapacity();
-    repo_config_job = run.Capture.start(gpa, app_io, repo_path.items, &.{ "git", "config", "--path", "--get-regexp", "^(user\\.email|commit\\.template)$" }) catch null;
+    git_fetch_prune_set = false;
+    repo_config_job = run.Capture.start(gpa, app_io, repo_path.items, &.{ "git", "config", "--path", "--get-regexp", "^(user\\.email|commit\\.template|fetch\\.prune)$" }) catch null;
 }
 
 /// Take in the repository's config once its `git` has answered.
@@ -4744,6 +4914,8 @@ fn collectRepoConfig() void {
         } else if (std.mem.eql(u8, line[0..space], "commit.template")) {
             git_template_path.clearRetainingCapacity();
             git_template_path.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, line[0..space], "fetch.prune")) {
+            git_fetch_prune_set = true;
         }
     }
     // Whose picture is the signed-in GitHub account's: the address this
@@ -4803,6 +4975,21 @@ fn appFrame() !dvui.App.Result {
     // A zoom key that reached dvui rather than `shortcuts` — under a modal,
     // say: bounded and remembered all the same.
     if (dvui.currentWindow().content_scale != zoom) setZoom(dvui.currentWindow().content_scale);
+    // The zoom's keys before any widget: a focused text field would claim
+    // them, and they mean nothing there. Held down, they repeat, as a
+    // browser's do.
+    for (dvui.events()) |*e| {
+        if (e.handled) continue;
+        const ke = switch (e.evt) {
+            .key => |k| k,
+            else => continue,
+        };
+        if (ke.action == .up) continue;
+        if (zoomKey(ke)) |to| {
+            e.handled = true;
+            setZoom(to);
+        }
+    }
     no_split = 0;
     all_split = 1;
 
@@ -6003,10 +6190,19 @@ fn foldedRun(id: usize, author: []const u8, hidden: usize) bool {
     return chipButton(@src(), dvui.entypo.chevron_small_down, std.fmt.bufPrint(&buf, "Show {d} more from {s}", .{ hidden, author }) catch "Show more", false);
 }
 
+/// A heading in a comment: this much over its text, not the same size.
+const MD_HEADING_STEP: f32 = 2.5;
+
 /// A comment's text, read the way the host would show it — enough of
 /// Markdown to read: headings, lists, quotes, code blocks; `**` and `` ` ``
 /// marks dropped rather than shown.
 fn markdownBody(body: []const u8) void {
+    markdownText(body, style.body());
+}
+
+/// As `markdownBody`, its text at `base`: a commit's message reads at the
+/// panel's size, a comment at the page's.
+fn markdownText(body: []const u8, base: dvui.Font) void {
     const a = dvui.currentWindow().arena();
     var code: ?*dvui.BoxWidget = null;
     defer if (code) |c| c.deinit();
@@ -6044,10 +6240,10 @@ fn markdownBody(body: []const u8) void {
         if (trimmed[0] == '#') {
             const words = std.mem.trimStart(u8, clean, "# ");
             var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = n, .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.xs } });
-            tl.addText(words, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() } });
+            tl.addText(words, .{ .font = style.bodyBold().withSize(base.size + MD_HEADING_STEP), .color_text = .{ .color = style.text() } });
             tl.deinit();
         } else if (std.mem.startsWith(u8, trimmed, "- ") or std.mem.startsWith(u8, trimmed, "* ") or std.mem.startsWith(u8, trimmed, "+ ")) {
-            var item = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = n, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.sm } });
+            var item = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = n, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.sm, .y = style.space.xs, .h = style.space.xs } });
             defer item.deinit();
             const checked = std.mem.startsWith(u8, trimmed[2..], "[x]") or std.mem.startsWith(u8, trimmed[2..], "[X]");
             const box_item = checked or std.mem.startsWith(u8, trimmed[2..], "[ ]");
@@ -6066,9 +6262,10 @@ fn markdownBody(body: []const u8) void {
                 });
                 if (checked) dvui.icon(@src(), "md_tick", dvui.entypo.check, .{ .fill_color = .{ .color = style.textOnAccent() } }, .{ .min_size_content = .{ .w = 9, .h = 9 }, .gravity_x = 0.5, .gravity_y = 0.5 });
                 tick.deinit();
-            } else dvui.label(@src(), "•", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+            } else dvui.label(@src(), "•", .{}, .{ .font = base, .color_text = .{ .color = style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(if (box_item) std.mem.trimStart(u8, clean[2..], "[xX ] ") else clean[2..], .{ .font = style.small(), .color_text = .{ .color = style.text() } });
+            const words = std.mem.trimStart(u8, trimmed[2..], " ");
+            addInline(tl, if (box_item) std.mem.trimStart(u8, words, "[xX ] ") else words, base, style.text());
             tl.deinit();
         } else if (trimmed[0] == '>') {
             // Filled as the card under it: dvui fills a box with a border on
@@ -6076,13 +6273,28 @@ fn markdownBody(body: []const u8) void {
             var quote = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = n, .expand = .horizontal, .background = true, .color_fill = .{ .color = style.surface() }, .border = .{ .x = 3 }, .color_border = .{ .color = style.border() }, .padding = .{ .x = style.space.sm }, .margin = .{ .y = 2, .h = 2 } });
             defer quote.deinit();
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(std.mem.trimStart(u8, clean, "> "), .{ .font = style.small(), .color_text = .{ .color = style.textMuted() } });
+            addInline(tl, std.mem.trimStart(u8, trimmed, "> "), base, style.textMuted());
             tl.deinit();
         } else {
             var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = n, .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(clean, .{ .font = style.small(), .color_text = .{ .color = style.text() } });
+            addInline(tl, trimmed, base, style.text());
             tl.deinit();
         }
+    }
+}
+
+/// A line's words into `tl`: `` `code` `` in the mono face and the accent,
+/// the rest without its `**` marks.
+fn addInline(tl: *dvui.TextLayoutWidget, text: []const u8, base: dvui.Font, ink: dvui.Color) void {
+    const a = dvui.currentWindow().arena();
+    var parts = std.mem.splitScalar(u8, text, '`');
+    var code = false;
+    while (parts.next()) |part| : (code = !code) {
+        if (part.len == 0) continue;
+        if (code)
+            tl.addText(part, .{ .font = style.mono().withSize(base.size - 0.5), .color_text = .{ .color = style.accent() } })
+        else
+            tl.addText(plainInline(a, part), .{ .font = base, .color_text = .{ .color = ink } });
     }
 }
 
@@ -6195,13 +6407,11 @@ var pr_tab: PrTab = .conversation;
 /// who wants what merged where, who reviews it, its labels, and a line on
 /// what still stands between it and a merge.
 fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) void {
+    // On the page's own ground: the title is what stands out, not its box.
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
-        .border = .{ .h = 1 },
-        .color_border = .{ .color = style.border() },
-        .padding = .{ .x = inset, .y = style.space.lg, .w = inset, .h = style.space.md },
+        .background = false,
+        .padding = .{ .x = inset, .y = style.space.xl, .w = inset, .h = style.space.sm },
     });
     defer head.deinit();
 
@@ -6218,9 +6428,9 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
         else
             .{ "Open", style.success() };
         statePill(word, hue);
-        dvui.label(@src(), "#{d}", .{d.number}, .{ .font = style.title(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "#{d}", .{d.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE * style.ui_scale), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
-        tl.addText(d.title, .{ .font = style.title(), .color_text = .{ .color = style.text() } });
+        tl.addText(d.title, .{ .font = style.title().withSize(PR_TITLE_SIZE * style.ui_scale), .color_text = .{ .color = style.text() } });
         tl.deinit();
 
         // What to do with it, short of answering it: icons at the end of
@@ -6271,6 +6481,9 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
     mergeReadiness(d);
 }
 
+/// A request's title: the largest words on its page.
+const PR_TITLE_SIZE: f32 = 18;
+
 /// The request `number` as the list it was picked in has it.
 fn listedRequest(number: u32) ?pr.Request {
     for (pr.list) |r| if (r.number == number) return r;
@@ -6284,8 +6497,7 @@ fn loadingHeader(r: pr.Request) void {
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .tag = "pr:loading",
         .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
+        .background = false,
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
         .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.md },
@@ -6295,9 +6507,9 @@ fn loadingHeader(r: pr.Request) void {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
         if (r.draft) statePill("Draft", style.textMuted()) else statePill("Open", style.success());
-        dvui.label(@src(), "#{d}", .{r.number}, .{ .font = style.title(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "#{d}", .{r.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
-        tl.addText(r.title, .{ .font = style.title(), .color_text = .{ .color = style.text() } });
+        tl.addText(r.title, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.text() } });
         tl.deinit();
     }
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
@@ -6374,21 +6586,14 @@ fn clearPrEdit() void {
 fn prEditDialog() void {
     if (!pr_edit_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &pr_edit_rect, &pr_edit_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &pr_edit_rect, &pr_edit_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
     var num: [12]u8 = undefined;
     var title_buf: [48]u8 = undefined;
     dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
 
-    const width = @min(PR_CREATE_W, win.w - 80);
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = width },
-        .max_size_content = .width(width),
-        .background = false,
-        .padding = dvui.Rect.all(style.space.xl),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
 
     // As the create dialog has it: where it goes — where it comes from is
     // fixed once it is made — its words, who and what, its type.
@@ -6417,8 +6622,9 @@ fn prEditDialog() void {
         peoplePicker(3, "Assignees", &pr_edit_assignees, "Assign someone", false, "pr_edit:assignees");
         labelPicker(4, &pr_edit_labels, "pr_edit:labels");
     }
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var line = dialogFooter(@src());
         defer line.deinit();
         typePicker(5, &pr_edit_draft, "pr_edit:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -6614,20 +6820,11 @@ fn mergeReadiness(d: pr.Detail) void {
         if (mergeUnknown(d)) break :blk .{ dvui.entypo.clock, style.textMuted(), "GitHub is still working out whether it can merge…" };
         break :blk .{ dvui.entypo.check, style.success(), if (t.passed > 0) std.fmt.bufPrint(&buf, "Ready to merge: {d} check{s} passed", .{ t.passed, plural(t.passed) }) catch "" else "Ready to merge" };
     };
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.tint(hue) },
-        .corners = style.radius.input,
-        .margin = .{ .y = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.xs, .h = style.space.xs },
-        .min_size_content = .{ .h = 26 },
-    });
+    var bar = alertBox(@src(), 0, hue, icon, .{ .y = style.space.md, .h = style.space.xs });
     defer bar.deinit();
-    dvui.icon(@src(), "ready_icon", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 13, .h = 13 }, .gravity_y = 0.5, .margin = .{ .w = style.space.md } });
-    dvui.label(@src(), "{s}", .{text}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
+    alertText(@src(), text, hue);
     if (d.auto_merge) tinyBadge(@src(), 0, "auto-merge on", style.accent());
-    readinessAction(d, t);
+    readinessAction(d, t, hue);
 
     // Asked again every few seconds while GitHub has no answer yet — about
     // one still open: a merged one's stays unknown for good.
@@ -6672,42 +6869,42 @@ fn rerequestReview(d: pr.Detail) void {
 /// The one thing to do next about a request, at the end of its readiness
 /// line: resolve its conflicts here, bring it up to date on GitHub, look at
 /// the failing checks, put a draft up for review, or merge it.
-fn readinessAction(d: pr.Detail, t: anytype) void {
+fn readinessAction(d: pr.Detail, t: anytype, hue: dvui.Color) void {
     if (!requestOpen(d)) return;
     if (std.mem.eql(u8, d.mergeable, "CONFLICTING")) {
         // Rebased onto its base, here: the conflicts come up one by one.
-        if (!d.fork and opButton(@src(), "Rebase onto it here", "pr:resolve")) resolveRequestLocally(d, true);
-        if (!d.fork and linkButtonTagged(@src(), "or merge it in", style.textMuted(), "pr:resolve_merge")) resolveRequestLocally(d, false);
+        if (!d.fork and alertButton(@src(), "Rebase onto it here", hue, "pr:resolve")) resolveRequestLocally(d, true);
+        if (!d.fork and linkButtonTagged(@src(), "or merge it in", hue, "pr:resolve_merge")) resolveRequestLocally(d, false);
         return;
     }
     // In the order the line above says what is in the way.
     if (t.failed > 0) {
-        if (opButton(@src(), "See the checks", "pr:see_checks")) pr_tab = .checks;
+        if (alertButton(@src(), "See the checks", hue, "pr:see_checks")) pr_tab = .checks;
         return;
     }
     // Changes asked for: to the conversations left, then onto its branch to
     // make them, then the reviewers asked again.
     if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) {
-        if (openThreads(d) > 0 and linkButtonTagged(@src(), "Show them", style.textMuted(), "pr:to_threads")) {
+        if (openThreads(d) > 0 and linkButtonTagged(@src(), "Show them", hue, "pr:to_threads")) {
             pr_tab = .conversation;
             pr_scroll_thread = true;
         }
         if (!onRequestBranch(d)) {
-            if (opButton(@src(), "Check out to fix", "pr:fix")) checkoutRequest(d.number, d.head, d.fork);
-        } else if (opButton(@src(), "Re-request review", "pr:rerequest")) rerequestReview(d);
+            if (alertButton(@src(), "Check out to fix", hue, "pr:fix")) checkoutRequest(d.number, d.head, d.fork);
+        } else if (alertButton(@src(), "Re-request review", hue, "pr:rerequest")) rerequestReview(d);
         return;
     }
     if (std.mem.eql(u8, d.merge_state, "BEHIND")) {
-        if (opButton(@src(), "Update branch", "pr:update")) updateRequestBranch(d);
+        if (alertButton(@src(), "Update branch", hue, "pr:update")) updateRequestBranch(d);
         return;
     }
     if (d.draft) {
-        if (opButton(@src(), "Ready for review", "pr:ready")) requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
+        if (alertButton(@src(), "Ready for review", hue, "pr:ready")) requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
         return;
     }
     if (mergeUnknown(d) or t.running > 0) return;
     var num: [12]u8 = undefined;
-    if (opButton(@src(), "Merge…", "pr:merge")) ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
+    if (alertButton(@src(), "Merge…", hue, "pr:merge")) ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
 }
 
 /// The base merged into the request's branch, on GitHub — refused there if
@@ -6744,8 +6941,7 @@ fn requestTabs(d: pr.Detail, inset: f32) void {
     // Sideways when the pane is narrower than the four of them.
     var scroll = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto, .horizontal_bar = .auto_overlay }, .{
         .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
+        .background = false,
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
     });
@@ -6768,32 +6964,33 @@ fn requestTabs(d: pr.Detail, inset: f32) void {
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = i,
             .tag = frameTag("prtab", tab[2]),
-            // No underline: the one shown sits on the accent's tint.
-            .background = true,
-            .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
-            .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
-            .corners = style.radius.input,
-            .margin = .{ .y = style.space.sm, .h = style.space.sm, .w = style.space.xs },
-            .padding = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.md, .h = style.space.xs },
+            // Words on the page's ground; the one shown underlined in the
+            // accent, on the bar's rule.
+            .background = false,
+            .margin = .{ .w = style.space.md },
+            .padding = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.md },
         });
         bw.processEvents();
-        bw.drawBackground();
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
             defer row.deinit();
             const ink = if (on) style.accent() else if (bw.hovered()) style.text() else style.textMuted();
-            dvui.icon(@src(), "prtab_icon", tab[1], .{ .fill_color = .{ .color = ink } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .w = style.space.sm } });
-            dvui.label(@src(), "{s}", .{tab[2]}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+            dvui.label(@src(), "{s}", .{tab[2]}, .{ .font = style.body(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
             if (tab[3] > 0) dvui.label(@src(), "{d}", .{tab[3]}, .{
                 .font = style.tinyBold(),
-                .color_text = .{ .color = style.accent() },
+                .color_text = .{ .color = style.textMuted() },
                 .background = true,
-                .color_fill = .{ .color = style.accentDim() },
+                .color_fill = .{ .color = style.surfaceRaised() },
                 .corners = style.radius.tag,
                 .gravity_y = 0.5,
                 .margin = .{ .x = style.space.sm },
                 .padding = .{ .x = 5, .w = 5 },
             });
+        }
+        if (on) {
+            const rs = bw.data().borderRectScale();
+            (dvui.Rect.Physical{ .x = rs.r.x, .y = rs.r.y + rs.r.h - 2 * rs.s, .w = rs.r.w, .h = 2 * rs.s })
+                .fill(.{}, .{ .color = .{ .color = style.accent() }, .fade = 0 });
         }
         if (bw.clicked()) pr_tab = tab[0];
         bw.deinit();
@@ -7657,14 +7854,6 @@ fn shortcuts() void {
             stepCommit(if (ke.code == .up) -1 else 1);
             continue;
         }
-        // Taken before dvui's own zoom keys, which are not bounded and not
-        // remembered; held down, they repeat, as a browser's do. In a text
-        // field too: they mean nothing there.
-        if (zoomKey(ke)) |to| {
-            e.handled = true;
-            setZoom(to);
-            continue;
-        }
         // Everything else once per press: a held Ctrl+Z must not undo the
         // history away one repeat at a time.
         if (ke.action != .down) continue;
@@ -7884,6 +8073,7 @@ fn cycleTab(delta: i2) void {
     var total: usize = 0;
     var at: usize = 0;
     for (groups.items, 0..) |group, g| {
+        if (group.ws != active_ws) continue;
         if (g == active_group) at = total + active_tab;
         total += group.tabs.items.len;
     }
@@ -7891,6 +8081,7 @@ fn cycleTab(delta: i2) void {
     const next = (at + total + @as(usize, if (delta > 0) 1 else total - 1)) % total;
     var base: usize = 0;
     for (groups.items, 0..) |group, g| {
+        if (group.ws != active_ws) continue;
         if (next < base + group.tabs.items.len) return requestTab(.{ .select_in = .{ g, next - base } });
         base += group.tabs.items.len;
     }
@@ -8033,13 +8224,21 @@ fn titlebar() void {
 
     const zones = toolbarZones();
     {
+        // Over the sidebar, and wider where a narrow one would cut the
+        // branch's name short: the name before the centring.
         var left = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
             .min_size_content = .{ .w = zones.left },
-            .max_size_content = .width(zones.left),
+            .max_size_content = .width(@max(zones.left, branchRoom(zones.left) + BRANCH_CHROME_W)),
             .background = false,
         });
         defer left.deinit();
+        // Undo and Redo at the very start, as GitKraken has them: icons alone,
+        // so the branch beside them keeps its name, each saying on hover what
+        // it would take back; Redo lit only when there is one.
+        if (toolButton(@src(), "Undo", dvui.entypo.reply, .{ .icon_only = true, .hint = undoHint() })) requestUndo();
+        if (toolButton(@src(), "Redo", dvui.entypo.forward, .{ .icon_only = true, .usable = canRedo(), .hint = redoHint() })) requestRedo();
+        toolbarDivider(@src(), 0);
         // The branch every button acts on; the repository is the tab's.
         if (repo != null) branchSwitcher();
     }
@@ -8066,31 +8265,61 @@ fn titlebar() void {
         };
         toolbar_compact = toolbar_full_w + 2 * style.space.sm > middle.data().contentRect().w;
 
-        // The search first: finding a commit comes before doing anything to it.
-        if (toolbarButton(@src(), "Search", dvui.entypo.magnifying_glass, 0)) {
-            if (search_open) closeSearch() else {
-                search_open = true;
-                active_view = .graph;
-            }
-        }
-        toolbarDivider(@src(), 3);
-        // Undo and Redo side by side, as GitKraken has them, each saying on
-        // hover what it would take back; Redo lit only when there is one.
-        if (toolbarButtonFull(@src(), "Undo", dvui.entypo.reply, 0, frameTag("toolbar", "Undo"), false, true, undoHint())) requestUndo();
-        if (toolbarButtonFull(@src(), "Redo", dvui.entypo.forward, 0, frameTag("toolbar", "Redo"), false, canRedo(), redoHint())) requestRedo();
-        toolbarDivider(@src(), 0);
-        if (toolbarButton(@src(), "Fetch", dvui.entypo.cw, 0)) {
+        // A command the bar started, running: its button spins, and the
+        // others that write wait for it.
+        const running: []const u8 = if (job != null and !job_quiet) job_label else "";
+        const idle = job == null or job_quiet;
+        const arena = dvui.currentWindow().arena();
+        const on_branch = if (history) |h| h.head != null else false;
+
+        if (toolButton(@src(), "Fetch", dvui.entypo.cw, .{ .busy = std.mem.eql(u8, running, "Fetching"), .usable = idle, .hint = "Fetch every remote, nothing merged" })) {
             requestNetwork("Fetching", fetchAllArgs(false));
         }
         // After a rebase the branch and its upstream have parted: a plain
         // push is refused, and Pull would merge the old commits back in.
         // Push says what it has to be, and Pull keeps its count quiet.
         const rebased = rebasedSinceUpstream();
-        if (toolbarButton(@src(), "Pull", dvui.entypo.download, if (rebased) 0 else tracking.behind)) {
-            requestNetwork("Pulling", &.{"pull"});
+        const pull_hint: []const u8 = if (!on_branch)
+            "No branch checked out to pull into"
+        else if (tracking.upstream) |u|
+            (if (tracking.behind > 0 and !rebased)
+                std.fmt.allocPrint(arena, "Pull {d} commit{s} from {s}", .{ tracking.behind, plural(tracking.behind), u }) catch "Pull"
+            else
+                std.fmt.allocPrint(arena, "Pull from {s}", .{u}) catch "Pull")
+        else
+            "No upstream to pull from: push this branch first";
+        const pullable = idle and on_branch and tracking.upstream != null;
+        {
+            // Pull and its ways, one split button: the frame around both
+            // while the pointer is on either, a rule between.
+            var split = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
+            defer split.deinit();
+            const frame = split.data().borderRectScale();
+            if (pullable and frame.r.contains(dvui.currentWindow().mouse_pt)) {
+                // Inset by the buttons' margins, so it hugs what lights up.
+                var r = frame.r;
+                r.x += 2 * frame.s;
+                r.w -= 4 * frame.s;
+                r.stroke(dvui.CornerRect.Physical.all(6 * frame.s), .{ .thickness = frame.s, .color = .{ .color = style.border() } });
+            }
+            if (toolButton(@src(), "Pull", dvui.entypo.download, .{ .badge = if (rebased) 0 else tracking.behind, .busy = std.mem.eql(u8, running, "Pulling"), .usable = pullable, .hint = pull_hint })) {
+                requestNetwork("Pulling", &.{"pull"});
+            }
+            pullMenu(pullable);
         }
-        pullMenu();
-        if (toolbarButtonTagged(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, tracking.ahead, "toolbar:Push")) {
+        const push_hint: []const u8 = if (!on_branch)
+            "No branch checked out to push"
+        else if (tracking.upstream) |u|
+            (if (rebased)
+                std.fmt.allocPrint(arena, "Replace {s} with this branch", .{u}) catch "Force push"
+            else if (tracking.ahead > 0)
+                std.fmt.allocPrint(arena, "Push {d} commit{s} to {s}", .{ tracking.ahead, plural(tracking.ahead), u }) catch "Push"
+            else
+                std.fmt.allocPrint(arena, "Nothing to push: {s} has every commit", .{u}) catch "Push")
+        else
+            "Push this branch, and track it on the remote";
+        const pushable = idle and on_branch and (tracking.upstream == null or tracking.ahead > 0);
+        if (toolButton(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, .{ .badge = tracking.ahead, .tag = "toolbar:Push", .busy = std.mem.eql(u8, running, "Pushing") or std.mem.eql(u8, running, "Force pushing"), .usable = pushable, .hint = push_hint })) {
             if (rebased) {
                 ask(.force_push, "");
             } else {
@@ -8100,18 +8329,26 @@ fn titlebar() void {
             }
         }
         toolbarDivider(@src(), 1);
-        if (toolbarButton(@src(), "Branch", dvui.entypo.flow_branch, 0)) askName(.new_branch, "");
-        if (toolbarButton(@src(), "Stash", dvui.entypo.save, 0)) requestLocal("Stashing", &.{ "stash", "push", "-u" });
-        if (toolbarButton(@src(), "Pop", dvui.entypo.archive, 0)) requestLocal("Popping the stash", &.{ "stash", "pop" });
-        toolbarDivider(@src(), 2);
-        // The rest of git — and everything else — is a terminal away.
-        if (toolbarButton(@src(), "Terminal", dvui.entypo.code, 0)) openTerminal();
+        if (toolButton(@src(), "Branch", dvui.entypo.flow_branch, .{ .hint = "A new branch at what is checked out" })) askName(.new_branch, "");
+        const changes = changeCount();
+        if (toolButton(@src(), "Stash", dvui.entypo.save, .{
+            .busy = std.mem.eql(u8, running, "Stashing"),
+            .usable = idle and changes > 0,
+            .hint = if (changes == 0) "No changes to stash" else std.fmt.allocPrint(arena, "Set {d} change{s} aside, new files too", .{ changes, plural(changes) }) catch "Stash",
+        })) requestLocal("Stashing", &.{ "stash", "push", "-u" });
+        const stashes = if (history) |h| h.stashes.len else 0;
+        if (toolButton(@src(), "Pop", dvui.entypo.archive, .{
+            .busy = std.mem.eql(u8, running, "Popping the stash"),
+            .usable = idle and stashes > 0,
+            .hint = if (stashes == 0) "No stash to pop" else "Bring the last stash back, and drop it",
+        })) requestLocal("Popping the stash", &.{ "stash", "pop" });
 
         // Only where there is LFS to pull. `git lfs pull` fetches the real contents
         // for the pointers a checkout left behind, which is the one LFS operation
         // that comes up in ordinary work.
         if (uses_lfs) {
-            if (toolbarButton(@src(), "LFS", dvui.entypo.cloud, 0)) {
+            toolbarDivider(@src(), 2);
+            if (toolButton(@src(), "LFS", dvui.entypo.cloud, .{ .busy = std.mem.eql(u8, running, "Fetching LFS files"), .usable = idle, .hint = "Fetch the LFS files this checkout points to" })) {
                 requestNetwork("Fetching LFS files", &.{ "lfs", "pull" });
             }
         }
@@ -8131,6 +8368,17 @@ fn titlebar() void {
         // way says so, as GitComet's action bar does.
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         operationControls();
+        // Finding a commit: not an action on the repository, so apart from
+        // them, an icon on this side.
+        if (toolButton(@src(), "Search", dvui.entypo.magnifying_glass, .{ .icon_only = true, .on = search_open, .hint = "Search the commits — Ctrl+F" })) {
+            if (search_open) closeSearch() else {
+                search_open = true;
+                active_view = .graph;
+            }
+        }
+        // At the very end: the rest of git — and everything else — is a
+        // terminal away.
+        if (toolButton(@src(), "Terminal", dvui.entypo.code, .{ .hint = "A terminal in this repository's folder — Ctrl+Shift+T" })) openTerminal();
     }
 }
 
@@ -8220,18 +8468,28 @@ const DropButton = struct {
 
 /// The chevron beside Pull: the ways of pulling a plain click does not pick,
 /// which is otherwise a right-click on the current branch away.
-fn pullMenu() void {
+fn pullMenu(usable: bool) void {
+    const enabled = repo != null and usable;
+    // As tall as Pull beside it, the other half of one split button.
     const button = DropButton.begin(@src(), .{
         .tag = "toolbar:pull_menu",
-        .gravity_y = 0.35,
+        .gravity_y = 0.5,
         .background = false,
-        .margin = .{ .x = -4, .w = 2 },
-        .padding = dvui.Rect.all(2),
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .min_size_content = .{ .w = 16, .h = TOOL_H },
+        .margin = .{ .w = 2 },
+        .padding = .{ .x = 2, .w = 2 },
         .corners = style.radius.input,
     });
-    const enabled = repo != null;
+    {
+        // The rule that parts it from Pull.
+        const rs = button.item.data().borderRectScale();
+        (dvui.Rect.Physical{ .x = rs.r.x - rs.s, .y = rs.r.y + (rs.r.h - 20 * rs.s) / 2, .w = rs.s, .h = 20 * rs.s })
+            .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
+    }
     dvui.icon(@src(), "pull_menu", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = if (enabled) style.textMuted() else style.textFaint() } }, .{
         .min_size_content = .{ .w = 12, .h = 12 },
+        .gravity_y = 0.5,
     });
     const menu = button.open();
     defer button.end(menu);
@@ -8245,6 +8503,16 @@ fn pullMenu() void {
         m.close();
         requestNetwork("Pulling", a);
     }
+}
+
+/// Undo, Redo and the rule after them, then the switcher's mark, chevron
+/// and padding: what the left zone holds besides the branch's name.
+const BRANCH_CHROME_W: f32 = 2 * (TOOL_H + 4) + (1 + 2 * style.space.md) + 72;
+
+/// How wide the branch's name may be: what the zone over the sidebar
+/// leaves, but never so little that a usual name is cut.
+fn branchRoom(zone: f32) f32 {
+    return @max(zone - BRANCH_CHROME_W, 220);
 }
 
 /// What the branch switcher's list is narrowed to.
@@ -8279,7 +8547,7 @@ fn branchSwitcher() void {
             .color_border = .{ .color = style.border() },
             .corners = style.radius.input,
             .min_size_content = .{ .h = BRANCH_BUTTON_H },
-            .padding = .{ .x = style.space.md, .w = style.space.sm },
+            .padding = .{ .x = style.space.lg, .y = style.space.xs, .w = style.space.md, .h = style.space.xs },
         });
         defer face.deinit();
         dvui.icon(@src(), "branch_mark", if (detached) dvui.entypo.flow_line else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = style.accent() } }, .{
@@ -8288,15 +8556,25 @@ fn branchSwitcher() void {
             .margin = .{ .w = style.space.sm },
         });
         var buf: [MAX_SHOWN_LINE]u8 = undefined;
-        // As long as the zone over the sidebar lets it be, less the mark,
-        // the chevron and the frame's padding.
-        const room = toolbarZones().left - 72;
+        const room = branchRoom(toolbarZones().left);
+        // Its name, and under it where Pull and Push go — or that they have
+        // nowhere yet.
+        var names = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false });
         dvui.label(@src(), "{s}", .{fitText(&buf, head, style.bodyBold(), room)}, .{
             .font = style.bodyBold(),
             .color_text = .{ .color = style.text() },
-            .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
+        if (history) |h| if (h.head != null) {
+            var up_buf: [MAX_SHOWN_LINE]u8 = undefined;
+            const upstream = h.tracking.upstream orelse "no upstream";
+            dvui.label(@src(), "{s}", .{fitText(&up_buf, upstream, style.tiny(), room)}, .{
+                .font = style.tiny(),
+                .color_text = .{ .color = if (h.tracking.upstream != null) style.textMuted() else style.textFaint() },
+                .padding = dvui.Rect.all(0),
+            });
+        };
+        names.deinit();
         dvui.icon(@src(), "switch_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
@@ -8527,43 +8805,9 @@ fn repoDialog() void {
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
-    {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .border = .{ .h = 1 },
-            .color_border = .{ .color = style.border() },
-            .padding = .{ .x = style.space.lg, .y = style.space.md, .w = style.space.md, .h = style.space.md },
-        });
-        defer head.deinit();
+    dialogHeader(@src(), if (cloning) dvui.entypo.download else dvui.entypo.plus, if (cloning) "Clone a repository" else "Start a new repository", if (cloning) "Copy one from GitHub, GitLab or any git server onto this computer" else "An empty repository, in a folder of its own", &open);
 
-        dvui.icon(@src(), "dialog_icon", if (cloning) dvui.entypo.download else dvui.entypo.plus, .{ .fill_color = .{ .color = style.accent() } }, .{
-            .min_size_content = .{ .w = 16, .h = 16 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.md },
-        });
-        var titles = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .gravity_y = 0.5 });
-        dvui.label(@src(), "{s}", .{if (cloning) "Clone a repository" else "Start a new repository"}, .{
-            .font = style.title(),
-            .color_text = .{ .color = style.text() },
-            .padding = dvui.Rect.all(0),
-        });
-        dvui.label(@src(), "{s}", .{if (cloning) "Copy one from GitHub, GitLab or any git server onto this computer." else "An empty repository, in a folder of its own."}, .{
-            .font = style.tiny(),
-            .color_text = .{ .color = style.textFaint() },
-            .padding = .{ .y = style.space.xxs },
-        });
-        titles.deinit();
-        if (iconButton(@src(), "dialog_close", "Close — Esc", dvui.entypo.cross, style.textMuted())) open = false;
-    }
-
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .background = false,
-        .padding = dvui.Rect.all(style.space.lg),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
 
     var entered = false;
     if (cloning) {
@@ -8627,8 +8871,9 @@ fn repoDialog() void {
         });
     }
 
+    body.deinit();
     {
-        var foot = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var foot = dialogFooter(@src());
         defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -8700,20 +8945,23 @@ fn dialogButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, prim
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
         .background = true,
-        .color_fill = .{ .color = if (primary) style.accent() else style.surfaceRaised() },
+        // The one that answers filled in the accent; the others framed on
+        // the dialog's own ground.
+        .color_fill = .{ .color = if (primary) style.accent() else dvui.Color.transparent },
+        .color_fill_hover = .{ .color = if (primary) style.accent().lerp(style.text(), 0.15) else style.rowHover() },
         .border = dvui.Rect.all(if (primary) 0 else 1),
         .color_border = .{ .color = style.border() },
         .corners = style.radius.input,
         .gravity_y = 0.5,
         .margin = .{ .x = style.space.sm },
-        .padding = .{ .x = style.space.lg, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
+        .padding = .{ .x = style.space.lg, .y = style.space.md, .w = style.space.lg, .h = style.space.md },
     });
     defer bw.deinit();
     bw.processEvents();
     bw.drawBackground();
     dvui.label(@src(), "{s}", .{caption}, .{
         .font = style.smallBold(),
-        .color_text = .{ .color = if (primary) style.background() else if (bw.hovered()) style.text() else style.textMuted() },
+        .color_text = .{ .color = if (primary) style.background() else style.text() },
         .padding = dvui.Rect.all(0),
     });
     return bw.clicked();
@@ -8863,37 +9111,9 @@ fn identityDialog() void {
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
-    {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .border = .{ .h = 1 },
-            .color_border = .{ .color = style.border() },
-            .padding = .{ .x = style.space.lg, .y = style.space.md, .w = style.space.md, .h = style.space.md },
-        });
-        defer head.deinit();
-        var titles = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .gravity_y = 0.5 });
-        dvui.label(@src(), "Who are you, to git?", .{}, .{
-            .font = style.title(),
-            .color_text = .{ .color = style.text() },
-            .padding = dvui.Rect.all(0),
-        });
-        dvui.label(@src(), "Every commit carries a name and an email. Set once, for every repository.", .{}, .{
-            .font = style.tiny(),
-            .color_text = .{ .color = style.textFaint() },
-            .padding = .{ .y = style.space.xxs },
-        });
-        titles.deinit();
-        if (iconButton(@src(), "identity_close", "Later — Esc", dvui.entypo.cross, style.textMuted())) identity_open = false;
-    }
+    dialogHeader(@src(), dvui.entypo.user, "Who are you, to git?", "Every commit carries a name and an email. Set once, for every repository", &identity_open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .background = false,
-        .padding = dvui.Rect.all(style.space.lg),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
 
     {
         var gh_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
@@ -8922,8 +9142,9 @@ fn identityDialog() void {
         });
     }
 
+    body.deinit();
     {
-        var foot = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var foot = dialogFooter(@src());
         defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Later", false)) identity_open = false;
@@ -8937,6 +9158,13 @@ fn openSettings(section: usize) void {
     settings_open = true;
     settings_rect = .{};
     signing_loaded = false;
+    repo_prefs_loaded = false;
+    editors_loaded = false;
+    // The repository whose settings show: the one open, to start with.
+    if (repo != null) {
+        repo_settings_path.clearRetainingCapacity();
+        repo_settings_path.appendSlice(gpa, repo_path.items) catch {};
+    }
     settings_page = section;
 }
 
@@ -8953,19 +9181,23 @@ const SettingsPage = struct { id: usize, icon: []const u8, title: []const u8, hi
 const settings_pages = [_]?SettingsPage{
     null,
     .{ .id = 5, .icon = dvui.entypo.cog, .title = "General", .hint = "Tabs, new repositories, fetching" },
-    .{ .id = 3, .icon = dvui.entypo.merge, .title = "GitHub", .hint = "Pull requests, issues, checks and the account" },
-    .{ .id = 0, .icon = dvui.entypo.palette, .title = "Appearance", .hint = "Dark or light, and how the graph is drawn" },
+    .{ .id = 3, .icon = dvui.entypo.merge, .title = "Integrations", .hint = "GitHub: pull requests, issues, checks and the account" },
+    .{ .id = 0, .icon = dvui.entypo.palette, .title = "Appearance", .hint = "The theme, the size of the text, the pictures" },
     null,
     .{ .id = 1, .icon = dvui.entypo.user, .title = "Git identity", .hint = "The name and email your commits carry" },
     .{ .id = 2, .icon = dvui.entypo.pencil, .title = "Commit messages", .hint = "Ticket, conventional commits, template" },
     .{ .id = 6, .icon = dvui.entypo.lock, .title = "Commit signing", .hint = "GPG or SSH, for commits and tags" },
+    null,
+    .{ .id = REPO_PAGE, .icon = dvui.entypo.folder, .title = "Repositories", .hint = "Its own identity, pull and signing — in its .git/config" },
 };
-const settings_groups = [_][]const u8{ "Zit", "Commits" };
+const settings_groups = [_][]const u8{ "Zit", "Commits", "Repositories" };
+/// The page of one repository's settings, which it the nav lists by name.
+const REPO_PAGE = 7;
 
 fn settingsDialog() void {
     if (!settings_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &settings_rect, &settings_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &settings_rect, &settings_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
@@ -8982,11 +9214,15 @@ fn settingsDialog() void {
         });
         defer split.deinit();
         settingsNav();
-        var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
+        // Its ground the dialog's: dvui's scroll container paints its own,
+        // the window's darker one, under whatever it holds.
+        var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false, .color_fill = .{ .color = style.surface() } });
         defer scroll.deinit();
+        // On the dialog's ground, over the scroll container's darker one.
         var body = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .background = false,
+            .background = true,
+            .color_fill = .{ .color = style.surface() },
             .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.xl },
         });
         defer body.deinit();
@@ -9011,6 +9247,12 @@ fn settingsDialog() void {
             }));
             if (branch.text_changed) changed = true;
             branch.deinit();
+
+            settingsField(@src(), "External editor", "What a file from a diff opens with");
+            if (editorChoice()) changed = true;
+
+            settingsField(@src(), "Terminal", "What Terminal opens, in the repository's folder");
+            if (terminalChoice()) changed = true;
 
             settingsField(@src(), "Fetch in the background", "Every remote, quietly — the counts on Pull and Push stay true");
             {
@@ -9071,24 +9313,44 @@ fn settingsDialog() void {
         }
         if (SettingsCard.begin(0)) |card| {
             defer card.end();
-            {
+            // Three a row: Zit's own, then Catppuccin's.
+            for (0..(style.themes.len + 2) / 3) |r| {
                 var cards = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
+                    .id_extra = r,
                     .expand = .horizontal,
                     .background = false,
                     .padding = settings_body_pad,
                 });
                 defer cards.deinit();
-
-                if (themeCard(@src(), 0, "Dark", true) and !dark_theme) setTheme(true);
-                if (themeCard(@src(), 1, "Light", false) and dark_theme) setTheme(false);
+                for (r * 3..@min(r * 3 + 3, style.themes.len)) |i| {
+                    if (themeCard(@src(), i) and i != theme_index) pickTheme(i);
+                }
             }
-            // GitKraken's narrow graph — each commit its author's picture — or
-            // the lanes as wide as they need.
-            var compact = graphCompact();
-            if (dvui.checkbox(@src(), &compact, "Compact graph: authors' pictures only, no lanes", .{ .font = style.small(), .margin = settings_body_pad })) {
-                graph_width = if (compact) GRAPH_COMPACT_W else 0;
-                saveWorkspace();
+            {
+                var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
+                defer section.deinit();
+                settingsField(@src(), "Text size", "The app's words, apart from the zoom");
+                const ui_steps = [_]f32{ 0.9, 1, 1.08, 1.16 };
+                if (choiceChips(10, &.{ "Small", "Default", "Large", "Larger" }, nearestStep(&ui_steps, style.ui_scale))) |i| {
+                    style.ui_scale = ui_steps[i];
+                    saveWorkspace();
+                }
+                settingsField(@src(), "Editor text size", "The code of a diff or a blame");
+                const code_steps = [_]f32{ 10.0 / 11.0, 1, 12.0 / 11.0, 13.0 / 11.0, 14.0 / 11.0 };
+                if (choiceChips(11, &.{ "10", "11", "12", "13", "14" }, nearestStep(&code_steps, style.code_scale))) |i| {
+                    style.code_scale = code_steps[i];
+                    saveWorkspace();
+                }
             }
+            {
+                var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
+                defer section.deinit();
+                if (settingsSwitch(0, &show_avatars, "Show profile pictures", "From Gravatar and GitHub. Off: initials, nothing asked")) saveWorkspace();
+            }
+        }
+        if (SettingsCard.begin(REPO_PAGE)) |card| {
+            defer card.end();
+            repoSettings();
         }
         if (SettingsCard.begin(1)) |card| {
             defer card.end();
@@ -9230,14 +9492,24 @@ var keys_rect: dvui.Rect = .{};
 fn keysDialog() void {
     if (!keys_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &keys_rect, &keys_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &keys_rect, &keys_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
     dialogHeader(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", "Everything here is a key away", &keys_open);
+    // No taller than most of the window: the list scrolls under its head.
+    var scroll = dvui.scrollArea(@src(), .{}, .{
+        .min_size_content = .{ .w = 520 + 2 * style.space.xl, .h = @min(560, win.h * 0.7) },
+        .max_size_content = .height(@min(560, win.h * 0.7)),
+        .background = false,
+        .color_fill = .{ .color = style.surface() },
+    });
+    defer scroll.deinit();
     var body = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = 520 },
-        .background = false,
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
         .padding = .{ .x = style.space.xl, .y = style.space.xs, .w = style.space.xl, .h = style.space.xl },
     });
     defer body.deinit();
@@ -9318,8 +9590,13 @@ fn shortcutCard(src: std.builtin.SourceLocation, id: usize) *dvui.BoxWidget {
     });
 }
 
+/// Light or dark, from a key or a menu: Zit's own of either.
 fn setTheme(dark: bool) void {
-    dark_theme = dark;
+    pickTheme(if (dark) 0 else 1);
+}
+
+fn pickTheme(index: usize) void {
+    theme_index = index;
     applyTheme();
     saveWorkspace();
 }
@@ -9329,17 +9606,18 @@ const settings_body_pad: dvui.Rect = .{ .x = 0, .y = style.space.xs, .w = 0, .h 
 /// A dialog's head: its icon on a tile, its title and a line under it, and
 /// the × that closes it.
 fn dialogHeader(src: std.builtin.SourceLocation, icon: []const u8, title: []const u8, hint: []const u8, open: *bool) void {
+    // The dialog's own ground, said outright: dvui fills a box with a border
+    // on one side in the theme's darker colour unless told.
     var head = dvui.box(src, .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .background = true,
         .color_fill = .{ .color = style.surface() },
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
-        .corners = .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr },
         .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.lg, .h = style.space.lg },
     });
     defer head.deinit();
-    iconTile(@src(), icon, 34, 17);
+    iconTile(@src(), icon, 40, 18);
     {
         var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
         defer col.deinit();
@@ -9348,6 +9626,52 @@ fn dialogHeader(src: std.builtin.SourceLocation, icon: []const u8, title: []cons
     }
     if (iconButton(@src(), "dialog_close", "Close — Esc", dvui.entypo.cross, style.textMuted())) open.* = false;
 }
+
+/// A dialog's body, under its header: every dialog's padding, `width` wide
+/// when it is not null.
+fn dialogBody(src: std.builtin.SourceLocation, width: ?f32) *dvui.BoxWidget {
+    return dvui.box(src, .{ .dir = .vertical }, .{
+        .expand = .horizontal,
+        .min_size_content = if (width) |w| .{ .w = w } else null,
+        .max_size_content = if (width) |w| .width(w) else null,
+        .background = false,
+        .padding = dvui.Rect.all(style.space.xl),
+    });
+}
+
+/// A dialog's foot: across the whole dialog under a rule. What goes on the
+/// left first, then a spacer, then Cancel and the button that answers it.
+fn dialogFooter(src: std.builtin.SourceLocation) *dvui.BoxWidget {
+    return dvui.box(src, .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
+        .border = .{ .y = 1 },
+        .color_border = .{ .color = style.border() },
+        .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.lg },
+    });
+}
+
+/// The eye that shows or hides a ref in the graph: drawn here, an outline
+/// with its pupil, and struck through for hidden — entypo's are a filled
+/// blot at this size. Turned into TinyVG once, on first use.
+fn eyeIcon(hidden: bool) []const u8 {
+    const slot = if (hidden) &eye_tvg[1] else &eye_tvg[0];
+    if (slot.*) |bytes| return bytes;
+    // Kept for the whole run, so not from `gpa`: two small icons, never freed.
+    const bytes = dvui.svgToTvg(std.heap.page_allocator, if (hidden) EYE_OFF_SVG else EYE_SVG) catch
+        return if (hidden) dvui.entypo.eye_with_line else dvui.entypo.eye;
+    slot.* = bytes;
+    return bytes;
+}
+var eye_tvg: [2]?[]const u8 = .{ null, null };
+
+const EYE_PATHS =
+    \\<path fill-rule="evenodd" d="M12 5C6.5 5 2.7 8.6 1 12c1.7 3.4 5.5 7 11 7s9.3-3.6 11-7c-1.7-3.4-5.5-7-11-7zM12 7c-4.2 0-7.3 2.6-8.8 5 1.5 2.4 4.6 5 8.8 5s7.3-2.6 8.8-5c-1.5-2.4-4.6-5-8.8-5zM15 12C15 13.66 13.66 15 12 15C10.34 15 9 13.66 9 12C9 10.34 10.34 9 12 9C13.66 9 15 10.34 15 12z"/>
+;
+const EYE_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">" ++ EYE_PATHS ++ "</svg>";
+const EYE_OFF_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">" ++ EYE_PATHS ++
+    "<path d=\"M3.7 2.3L21.7 20.3L20.3 21.7L2.3 3.7Z\"/></svg>";
 
 /// An icon on a rounded tile of the accent's tint.
 fn iconTile(src: std.builtin.SourceLocation, icon: []const u8, side: f32, glyph: f32) void {
@@ -9416,6 +9740,44 @@ fn settingsNav() void {
             group += 1;
             continue;
         };
+        // The repositories' group: an entry for each, its badge for an icon.
+        if (page.id == REPO_PAGE) {
+            const known = knownRepos();
+            if (known.len == 0) dvui.label(@src(), "None yet", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.sm, .y = style.space.sm } });
+            for (known, 0..) |path, r| {
+                const on = settings_page == REPO_PAGE and std.mem.eql(u8, path, repo_settings_path.items);
+                var rb: dvui.ButtonWidget = undefined;
+                rb.init(@src(), .{ .draw_focus = false }, .{
+                    .id_extra = 1000 + r,
+                    .tag = frameTag("settings_repo", git.repoName(path)),
+                    .expand = .horizontal,
+                    .background = true,
+                    .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
+                    .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
+                    .corners = style.radius.input,
+                    .margin = .{ .h = 2 },
+                    .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
+                });
+                rb.processEvents();
+                rb.drawBackground();
+                {
+                    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+                    defer row.deinit();
+                    tabBadge(git.repoName(path), on);
+                    var fit: [MAX_SHOWN_LINE]u8 = undefined;
+                    dvui.label(@src(), "{s}", .{fitText(&fit, git.repoName(path), style.small(), 130)}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = if (on) style.text() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+                }
+                if (rb.hovered()) dvui.tooltip(@src(), .{ .active_rect = rb.data().borderRectScale().r, .position = .horizontal, .delay = 400_000 }, "{s}", .{path}, .{ .font = style.small() });
+                if (rb.clicked()) {
+                    settings_page = REPO_PAGE;
+                    repo_settings_path.clearRetainingCapacity();
+                    repo_settings_path.appendSlice(gpa, path) catch {};
+                    repo_prefs_loaded = false;
+                }
+                rb.deinit();
+            }
+            continue;
+        }
         const shown = settings_page == page.id;
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
@@ -9444,6 +9806,7 @@ fn settingsNav() void {
         if (bw.clicked()) {
             settings_page = page.id;
             signing_loaded = false;
+            repo_prefs_loaded = false;
         }
         bw.deinit();
     }
@@ -9466,12 +9829,15 @@ const SettingsCard = struct {
             iconTile(@src(), page.icon, 32, 16);
             var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
             defer col.deinit();
-            dvui.label(@src(), "{s}", .{page.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-            dvui.label(@src(), "{s}", .{page.hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 1 } });
+            // A repository's page goes by its name, its folder under it.
+            const one = id == REPO_PAGE and repo_settings_path.items.len > 0;
+            dvui.label(@src(), "{s}", .{if (one) git.repoName(repo_settings_path.items) else page.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
+            dvui.label(@src(), "{s}", .{if (one) repo_settings_path.items else page.hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 1 } });
         }
         return .{ .inner = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .background = false,
+            .background = true,
+            .color_fill = .{ .color = style.surface() },
             .border = .{ .y = 1 },
             .color_border = .{ .color = style.border() },
             .padding = .{ .y = style.space.sm },
@@ -9535,6 +9901,370 @@ fn loadSigning() void {
     }
 }
 
+// === This repository's settings ===
+//
+// What git keeps in the repository's own .git/config: read when the page is
+// opened, written as it is changed, so git — and any other tool — goes by
+// them too. Unset, the global ones hold.
+
+var repo_prefs_loaded = false;
+var repo_prefs_job: ?*run.Capture = null;
+/// Which repository's settings the page shows, picked from every one Zit
+/// knows; owned.
+var repo_settings_path: std.ArrayList(u8) = .empty;
+var repo_name_local: std.ArrayList(u8) = .empty;
+var repo_email_local: std.ArrayList(u8) = .empty;
+/// How `git pull` joins what it fetched: as set everywhere, or here.
+var repo_pull: enum { global, merge, rebase, ff_only } = .global;
+/// `fetch.prune` and `commit.gpgsign` here: unset, on, off.
+var repo_prune: Tri = .global;
+var repo_sign: Tri = .global;
+const Tri = enum { global, on, off };
+
+fn loadRepoPrefs() void {
+    if (repo_prefs_loaded or repo_settings_path.items.len == 0) return;
+    const job_now = repo_prefs_job orelse blk: {
+        const started = run.Capture.start(gpa, app_io, repo_settings_path.items, &.{ "git", "config", "--local", "--get-regexp", "^(user\\.name|user\\.email|pull\\.rebase|pull\\.ff|fetch\\.prune|commit\\.gpgsign)$" }) catch {
+            repo_prefs_loaded = true;
+            return;
+        };
+        repo_prefs_job = started;
+        break :blk started;
+    };
+    if (!job_now.finished()) return;
+    repo_prefs_job = null;
+    defer job_now.deinit(app_io);
+    // Asked about another repository than the one picked since: again.
+    if (!std.mem.eql(u8, job_now.cwd, repo_settings_path.items)) return;
+
+    repo_prefs_loaded = true;
+    repo_name_local.clearRetainingCapacity();
+    repo_email_local.clearRetainingCapacity();
+    repo_pull = .global;
+    repo_prune = .global;
+    repo_sign = .global;
+    // Nothing set gives git's exit 1: every setting as everywhere.
+    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const key = line[0..space];
+        const value = std.mem.trim(u8, line[space + 1 ..], " ");
+        const yes = std.ascii.eqlIgnoreCase(value, "true");
+        if (std.mem.eql(u8, key, "user.name")) {
+            repo_name_local.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, key, "user.email")) {
+            repo_email_local.appendSlice(gpa, value) catch {};
+        } else if (std.mem.eql(u8, key, "pull.rebase")) {
+            if (repo_pull != .ff_only) repo_pull = if (yes) .rebase else .merge;
+        } else if (std.mem.eql(u8, key, "pull.ff")) {
+            if (std.mem.eql(u8, value, "only")) repo_pull = .ff_only;
+        } else if (std.mem.eql(u8, key, "fetch.prune")) {
+            repo_prune = if (yes) .on else .off;
+        } else if (std.mem.eql(u8, key, "commit.gpgsign")) {
+            repo_sign = if (yes) .on else .off;
+        }
+    }
+}
+
+/// `git config --local key value` in the repository picked — the empty
+/// value unsets it.
+fn setLocalConfig(key: []const u8, value: []const u8) void {
+    const where = repo_settings_path.items;
+    if (where.len == 0) return;
+    var outcome = (if (value.len == 0)
+        run.git(gpa, app_io, where, &.{ "config", "--local", "--unset-all", key })
+    else
+        run.git(gpa, app_io, where, &.{ "config", "--local", key, value })) catch return setCommandError("Could not run git. Is it on your PATH?");
+    defer outcome.deinit(gpa);
+    // Unsetting what was never set is git's exit 5: nothing to say.
+    if (!outcome.ok and value.len > 0) setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
+    repo_prefs_loaded = false;
+}
+
+/// Which of `steps` `value` is closest to: a saved factor read back as the
+/// chip it was picked from.
+fn nearestStep(steps: []const f32, value: f32) usize {
+    var best: usize = 0;
+    for (steps, 0..) |v, i| if (@abs(v - value) < @abs(steps[best] - value)) {
+        best = i;
+    };
+    return best;
+}
+
+/// One choice out of a few, as a row of chips: the one picked ticked.
+fn choiceChips(id: usize, options: []const []const u8, current: usize) ?usize {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .background = false });
+    defer row.deinit();
+    var picked: ?usize = null;
+    for (options, 0..) |caption, i| {
+        var chip = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false });
+        defer chip.deinit();
+        if (chipButton(@src(), if (current == i) dvui.entypo.check else dvui.entypo.dot_single, caption, current == i)) picked = i;
+    }
+    return picked;
+}
+
+/// The page: who commits here, how pull joins, whether fetch prunes and
+/// commits are signed — each "as everywhere" until set.
+/// Every repository Zit knows: the one open, its tabs, then the ones it
+/// remembers — each once.
+fn knownRepos() []const []const u8 {
+    const a = dvui.currentWindow().arena();
+    var known: std.ArrayList([]const u8) = .empty;
+    if (repo != null and !isOpenTab(repo_path.items)) known.append(a, repo_path.items) catch {};
+    for (groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
+        if (!listedEarlier(gi, ti, tab.path)) known.append(a, tab.path) catch {};
+    };
+    for (recent.items) |path| if (!isOpenTab(path)) known.append(a, path) catch {};
+    return known.items;
+}
+
+fn repoSettings() void {
+    var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
+    defer section.deinit();
+
+    const known = knownRepos();
+    if (known.len == 0) {
+        dvui.label(@src(), "No repository yet. Open one and its settings are here.", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
+        return;
+    }
+    if (repo_settings_path.items.len == 0) repo_settings_path.appendSlice(gpa, known[0]) catch {};
+
+    loadRepoPrefs();
+    if (!repo_prefs_loaded) {
+        dvui.label(@src(), "Reading its config…", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0) });
+        return;
+    }
+
+    settingsField(@src(), "Name and email here", "Commits in this repository only — work or personal. Empty: the global ones");
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false });
+        defer row.deinit();
+        for ([_]*std.ArrayList(u8){ &repo_name_local, &repo_email_local }, [_][]const u8{ me_name.items, me_email.items }, 0..) |list, global, i| {
+            var cell = dvui.box(@src(), .{}, .{ .id_extra = i, .expand = .horizontal, .background = false, .margin = .{ .w = if (i == 0) style.space.sm else 0 } });
+            defer cell.deinit();
+            const te = textField(@src(), .{
+                .text = .{ .array_list = .{ .backing = list, .allocator = gpa, .limit = 256 } },
+                .placeholder = if (global.len > 0) global else if (i == 0) "Name" else "Email",
+            }, settingsInput().override(.{ .tag = if (i == 0) "repo:name" else "repo:email" }));
+            te.deinit();
+        }
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.sm } });
+        defer row.deinit();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (dialogButtonTagged(@src(), "Save", true, "repo:save_identity")) {
+            setLocalConfig("user.name", std.mem.trim(u8, repo_name_local.items, " "));
+            setLocalConfig("user.email", std.mem.trim(u8, repo_email_local.items, " "));
+        }
+    }
+
+    settingsField(@src(), "Pull", "How Pull joins what it fetched — pull.rebase and pull.ff");
+    if (choiceChips(0, &.{ "As everywhere", "Merge", "Rebase", "Fast-forward only" }, @intFromEnum(repo_pull))) |i| {
+        switch (i) {
+            0 => {
+                setLocalConfig("pull.rebase", "");
+                setLocalConfig("pull.ff", "");
+            },
+            1 => {
+                setLocalConfig("pull.ff", "");
+                setLocalConfig("pull.rebase", "false");
+            },
+            2 => {
+                setLocalConfig("pull.ff", "");
+                setLocalConfig("pull.rebase", "true");
+            },
+            else => {
+                setLocalConfig("pull.rebase", "");
+                setLocalConfig("pull.ff", "only");
+            },
+        }
+    }
+
+    settingsField(@src(), "Prune when fetching", "Drop the remote branches deleted on the remote — fetch.prune");
+    if (choiceChips(1, &.{ "As everywhere", "On", "Off" }, @intFromEnum(repo_prune))) |i| {
+        setLocalConfig("fetch.prune", switch (i) {
+            0 => "",
+            1 => "true",
+            else => "false",
+        });
+        // What Fetch passes follows: the open repository's config read again.
+        if (repo != null and std.mem.eql(u8, repo_settings_path.items, repo_path.items)) startRepoConfig();
+    }
+
+    settingsField(@src(), "Sign commits", "Every commit made here signed with your key — commit.gpgsign");
+    if (choiceChips(2, &.{ "As everywhere", "On", "Off" }, @intFromEnum(repo_sign))) |i| {
+        setLocalConfig("commit.gpgsign", switch (i) {
+            0 => "",
+            1 => "true",
+            else => "false",
+        });
+    }
+}
+
+/// The editors a file can open with, by the command that starts each, and
+/// the name it goes by.
+const known_editors = [_]struct { []const u8, []const u8 }{
+    .{ "code", "VS Code" },
+    .{ "codium", "VSCodium" },
+    .{ "cursor", "Cursor" },
+    .{ "zed", "Zed" },
+    .{ "subl", "Sublime Text" },
+    .{ "idea", "IntelliJ IDEA" },
+    .{ "webstorm", "WebStorm" },
+    .{ "notepad++", "Notepad++" },
+    .{ "kate", "Kate" },
+    .{ "gnome-text-editor", "Text Editor" },
+    .{ "gedit", "gedit" },
+    .{ "mousepad", "Mousepad" },
+};
+/// The terminals Terminal can open, by command and name.
+const known_terminals = if (@import("builtin").os.tag == .windows) [_]struct { []const u8, []const u8 }{
+    .{ "wt", "Windows Terminal" },
+    .{ "pwsh", "PowerShell 7" },
+    .{ "powershell", "Windows PowerShell" },
+    .{ "cmd", "Command Prompt" },
+} else [_]struct { []const u8, []const u8 }{
+    .{ "konsole", "Konsole" },
+    .{ "gnome-terminal", "GNOME Terminal" },
+    .{ "kitty", "kitty" },
+    .{ "alacritty", "Alacritty" },
+    .{ "wezterm", "WezTerm" },
+    .{ "ghostty", "Ghostty" },
+    .{ "foot", "foot" },
+    .{ "xfce4-terminal", "Xfce Terminal" },
+    .{ "tilix", "Tilix" },
+    .{ "xterm", "xterm" },
+};
+/// Which of them this machine has, found once the settings open.
+var editors_found = [_]bool{false} ** known_editors.len;
+var terminals_found = [_]bool{false} ** known_terminals.len;
+var editors_loaded = false;
+var editors_job: ?*run.Capture = null;
+
+/// Each known editor whose command is on the PATH, one name a line: one
+/// shell for all of them, off the window's thread.
+fn loadEditors() void {
+    if (editors_loaded) return;
+    const job_now = editors_job orelse blk: {
+        const a = dvui.currentWindow().arena();
+        var names: std.ArrayList(u8) = .empty;
+        for (known_editors) |e| {
+            names.appendSlice(a, e[0]) catch {};
+            names.append(a, ' ') catch {};
+        }
+        for (known_terminals) |e| {
+            names.appendSlice(a, e[0]) catch {};
+            names.append(a, ' ') catch {};
+        }
+        const script = if (@import("builtin").os.tag == .windows)
+            std.fmt.allocPrint(a, "for %e in ({s}) do @where %e >nul 2>nul && @echo %e", .{names.items}) catch return
+        else
+            std.fmt.allocPrint(a, "for e in {s}; do command -v \"$e\" >/dev/null 2>&1 && echo \"$e\"; done; true", .{names.items}) catch return;
+        const argv: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{ "cmd.exe", "/c", script } else &.{ "sh", "-c", script };
+        const started = run.Capture.start(gpa, app_io, ".", argv) catch {
+            editors_loaded = true;
+            return;
+        };
+        editors_job = started;
+        break :blk started;
+    };
+    if (!job_now.finished()) return;
+    editors_job = null;
+    defer job_now.deinit(app_io);
+    editors_loaded = true;
+    editors_found = @splat(false);
+    terminals_found = @splat(false);
+    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
+    while (lines.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " \t\r");
+        for (known_editors, 0..) |e, i| if (std.mem.eql(u8, e[0], name)) {
+            editors_found[i] = true;
+        };
+        for (known_terminals, 0..) |e, i| if (std.mem.eql(u8, e[0], name)) {
+            terminals_found[i] = true;
+        };
+    }
+}
+
+/// The editor setting, as a select: the system's choice, or each editor
+/// found here. True when it changed.
+fn editorChoice() bool {
+    loadEditors();
+    const current = std.mem.trim(u8, editor_cmd.items, " ");
+    var face: []const u8 = if (current.len == 0) "System default" else current;
+    for (known_editors) |e| if (std.mem.eql(u8, e[0], current)) {
+        face = e[1];
+    };
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
+    defer cell.deinit();
+    const p = picker(EDITOR_PICKER, face, "", "settings:editor");
+    defer p.end();
+    const m = p.menu orelse return false;
+    if (!editors_loaded) dvui.label(@src(), "Looking for the editors on this computer…", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
+    var picked: ?[]const u8 = null;
+    if (pickRow(0, "System default", "what the system opens the file with", current.len == 0, null)) picked = "";
+    for (known_editors, 0..) |e, i| {
+        if (!editors_found[i]) continue;
+        if (pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
+    }
+    const cmd = picked orelse return false;
+    m.close();
+    editor_cmd.clearRetainingCapacity();
+    editor_cmd.appendSlice(gpa, cmd) catch {};
+    return true;
+}
+
+/// The terminal setting, as a select: the first found, or one of those
+/// installed here. True when it changed.
+fn terminalChoice() bool {
+    loadEditors();
+    const current = std.mem.trim(u8, terminal_cmd.items, " ");
+    var face: []const u8 = "Automatic";
+    for (known_terminals) |e| if (std.mem.eql(u8, e[0], current)) {
+        face = e[1];
+    };
+    var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
+    defer cell.deinit();
+    const p = picker(TERMINAL_PICKER, face, "", "settings:terminal");
+    defer p.end();
+    const m = p.menu orelse return false;
+    if (!editors_loaded) dvui.label(@src(), "Looking for the terminals on this computer…", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
+    var picked: ?[]const u8 = null;
+    if (pickRow(0, "Automatic", if (@import("builtin").os.tag == .windows) "Windows Terminal where there is one" else "$TERMINAL, then the first found", current.len == 0, null)) picked = "";
+    for (known_terminals, 0..) |e, i| {
+        if (!terminals_found[i]) continue;
+        if (pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
+    }
+    const cmd = picked orelse return false;
+    m.close();
+    terminal_cmd.clearRetainingCapacity();
+    terminal_cmd.appendSlice(gpa, cmd) catch {};
+    return true;
+}
+
+/// Picker ids of the settings' selects, apart from those of the dialogs.
+const EDITOR_PICKER = 50;
+const TERMINAL_PICKER = 51;
+
+/// `path` — the repository's file — in the editor the settings name, or the
+/// system's choice for it.
+fn openInEditor(path: []const u8) void {
+    if (repo == null) return;
+    const a = dvui.currentWindow().arena();
+    const full = std.fs.path.join(a, &.{ repo_path.items, path }) catch return;
+    const cmd = std.mem.trim(u8, editor_cmd.items, " ");
+    if (cmd.len == 0) return run.open(app_io, repo_path.items, full) catch setCommandError("Could not open the file.");
+    var argv: std.ArrayList([]const u8) = .empty;
+    var words = std.mem.tokenizeScalar(u8, cmd, ' ');
+    while (words.next()) |w| argv.append(a, w) catch return;
+    argv.append(a, full) catch return;
+    // Not waited on: an editor can stay open for hours.
+    run.startDetached(app_io, repo_path.items, argv.items) catch setCommandError("Could not start the editor. Is it on your PATH?");
+}
+
 /// `git config --global key value` — the empty value unsets it — then read
 /// back, so what is shown is what git has.
 fn setGlobalConfig(key: []const u8, value: []const u8) void {
@@ -9579,8 +10309,10 @@ fn settingsHeading(src: std.builtin.SourceLocation, caption: []const u8) void {
 
 /// A theme to pick, drawn in its own colours: a strip of background, a
 /// surface and an accent, so it is chosen by looking rather than by name.
-fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, dark: bool) bool {
-    const selected = dark == dark_theme;
+fn themeCard(src: std.builtin.SourceLocation, id: usize) bool {
+    const t = style.themes[id];
+    const caption = t.name;
+    const selected = id == theme_index;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = frameTag("theme", caption),
@@ -9604,10 +10336,10 @@ fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, da
     });
     defer card.deinit();
 
-    const preview_colors = style.themePreview(dark);
-    const bg = preview_colors.background;
-    const panel = preview_colors.panel;
-    const line = preview_colors.line;
+    const bg = style.hex(t.preview[0]);
+    const panel = style.hex(t.preview[1]);
+    const line = style.hex(t.preview[2]);
+    const accent = style.hex(t.preview[3]);
     {
         var preview = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
@@ -9638,7 +10370,7 @@ fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, da
                 .expand = .horizontal,
                 .min_size_content = .{ .h = 8 },
                 .background = true,
-                .color_fill = .{ .color = if (i == 0) style.accent() else line },
+                .color_fill = .{ .color = if (i == 0) accent else line },
                 .corners = style.radius.tag,
                 .margin = .{ .h = 6, .w = if (i == 2) 30 else 0 },
             });
@@ -9650,7 +10382,7 @@ fn themeCard(src: std.builtin.SourceLocation, id: usize, caption: []const u8, da
         var caption_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer caption_row.deinit();
         dvui.label(@src(), "{s}", .{caption}, .{
-            .font = style.bodyBold(),
+            .font = style.smallBold(),
             .color_text = .{ .color = style.text() },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
@@ -9889,9 +10621,7 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Switch theme, light or dark", .icon = dvui.entypo.light_up, .needs_repo = false, .run = struct {
         fn f() void {
-            dark_theme = !dark_theme;
-            applyTheme();
-            saveWorkspace();
+            setTheme(!dark_theme);
         }
     }.f },
 };
@@ -10261,16 +10991,36 @@ fn tabList() void {
     tab_prev_active = true;
 
     // Only recorded here, run after the frame: selecting or closing one
-    // rebuilds the snapshots the rest of this frame is drawn from. The
-    // workspace's tabs only: the others are a click away in its switcher.
+    // rebuilds the snapshots the rest of this frame is drawn from.
     var flat: usize = 0;
-    if (activeGroup()) |group| {
-        const g = active_group;
+    for (groups.items, 0..) |group, g| {
+        if (group.ws != active_ws) continue;
+        const named = group.name.len > 0;
+        const hue = groupColor(group.color);
+        // A group is one run, as Chrome has it: a line in its colour from the
+        // label to its last tab, which goes up and over the active one —
+        // outlined in that colour — rather than under it.
+        var span = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = g,
+            .expand = .vertical,
+            .background = false,
+            .margin = .{ .w = if (named) style.space.sm else 0 },
+        });
+        defer span.deinit();
+        if (named) {
+            const chip = groupChip(g, group, hue);
+            if (group.collapsed) {
+                flat += group.tabs.items.len;
+                continue;
+            }
+            group_line = .{ .from = chip.x, .to = chip.x + chip.w };
+        }
+        defer if (named) groupUnderline(span.data().contentRectScale(), hue);
         for (group.tabs.items, 0..) |tab, t| {
-            const current = repo != null and t == active_tab;
+            const current = repo != null and g == active_group and t == active_tab;
             const active = !new_tab_open and current;
             var rect: dvui.Rect.Physical = .{};
-            switch (tabButton(@src(), flat, git.repoName(tab.path), tab.path, active, width, &rect, .{ .slot = .{ g, t } })) {
+            switch (tabButton(@src(), flat, git.repoName(tab.path), tab.path, active, width, &rect, .{ .slot = .{ g, t }, .hue = if (named) hue else null })) {
                 .none => {},
                 // Back from its pull requests' tab: the repository is open
                 // already, only the view changes.
@@ -10281,6 +11031,10 @@ fn tabList() void {
                 .close => requestTab(.{ .close_in = .{ g, t } }),
             }
             if (active) revealTab(flat, rect);
+            if (named) {
+                group_line.to = rect.x + rect.w;
+                if (active) group_line.gap = rect;
+            }
             tabMenu(g, t, flat, rect);
             flat += 1;
         }
@@ -10304,6 +11058,25 @@ fn tabList() void {
     if (!std.meta.eql(tab_drop_over, tab_drop_seen)) dvui.refresh(null, @src(), null);
     tab_drop_over = tab_drop_seen;
     tab_drop_seen = null;
+}
+
+/// The run a group's underline covers, in physical pixels, and the active
+/// tab it leaves a gap for.
+var group_line: struct { from: f32 = 0, to: f32 = 0, gap: ?dvui.Rect.Physical = null } = .{};
+
+fn groupUnderline(rs: dvui.RectScale, hue: dvui.Color) void {
+    defer group_line = .{};
+    const s = rs.s;
+    const y = rs.r.y + rs.r.h - 2 * s;
+    const ends: [2][2]f32 = if (group_line.gap) |a|
+        .{ .{ group_line.from, a.x }, .{ a.x + a.w, group_line.to } }
+    else
+        .{ .{ group_line.from, group_line.to }, .{ 0, 0 } };
+    for (ends) |e| {
+        if (e[1] - e[0] < 2 * s) continue;
+        (dvui.Rect.Physical{ .x = e[0], .y = y, .w = e[1] - e[0], .h = 2 * s })
+            .fill(dvui.CornerRect.Physical.all(s), .{ .color = .{ .color = hue }, .fade = 0 });
+    }
 }
 
 /// Where in the strip the active tab was last scrolled into sight.
@@ -10576,8 +11349,7 @@ fn connectDialog() void {
     pumpConnect(fw.data().id);
     dialogHeader(@src(), dvui.entypo.login, "Connect GitHub", "Pull requests, issues and checks, as your account", &connect_open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
     const text = switch (connect_state) {
         .asking => "Asking GitHub for a code…",
         .waiting => "Type this code on the GitHub page that just opened — it is in your clipboard — and approve Zit.",
@@ -10613,37 +11385,183 @@ fn connectDialog() void {
         if (dialogButton(@src(), "Copy the code", false)) dvui.clipboardTextSet(connect_code.items);
         if (dialogButton(@src(), "Open the page again", false)) openUrl(connect_uri.items);
     }
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.lg } });
-        defer line.deinit();
+        var foot = dialogFooter(@src());
+        defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (connect_state == .failed and dialogButton(@src(), "Try again", true)) openConnect();
         if (dialogButton(@src(), "Cancel", false)) closeConnect();
+        if (connect_state == .failed and dialogButton(@src(), "Try again", true)) openConnect();
     }
     if (escapePressed()) closeConnect();
     if (!connect_open) closeConnect();
 }
 
+/// A group's label: a dot in its colour, as Chrome marks a group with no
+/// name — and how many tabs, folded. A click folds or unfolds it; a
+/// right-click offers the rest.
+fn groupChip(g: usize, group: TabGroup, hue: dvui.Color) dvui.Rect.Physical {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(@src(), .{ .draw_focus = false }, .{
+        .id_extra = g,
+        .tag = frameTag("group", group.name),
+        .gravity_y = 0.5,
+        .background = true,
+        .color_fill = .{ .color = dvui.Color.transparent },
+        .color_fill_hover = .{ .color = style.rowHover() },
+        .corners = style.radius.input,
+        .margin = .{ .x = style.space.xs, .y = TAB_TOP },
+        .padding = dvui.Rect.all(style.space.sm),
+    });
+    bw.processEvents();
+    bw.drawBackground();
+    {
+        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .gravity_y = 0.5 });
+        defer line.deinit();
+        var dot = dvui.box(@src(), .{}, .{
+            .background = true,
+            .color_fill = .{ .color = hue },
+            .corners = dvui.CornerRect.all(6),
+            .min_size_content = .{ .w = 12, .h = 12 },
+            .gravity_y = 0.5,
+        });
+        dot.deinit();
+        if (group.collapsed) {
+            dvui.label(@src(), "{d}", .{group.tabs.items.len}, .{ .font = style.tinyBold(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
+        }
+    }
+    if (bw.clicked()) requestTab(.{ .group_toggle = g });
+    const rect = bw.data().borderRectScale().r;
+    bw.deinit();
+    groupMenu(g, rect);
+    return rect;
+}
+
+/// A group's right-click: recolour, ungroup, close.
+fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
+    const ctx = dvui.context(@src(), .{ .rect = rect }, .{ .id_extra = g });
+    defer ctx.deinit();
+    const cp = ctx.activePoint() orelse return;
+    var fw = contextMenu(cp);
+    defer fw.deinit();
+
+    {
+        var swatches = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
+        defer swatches.deinit();
+        for (0..GROUP_COLORS) |c| {
+            const current = groups.items[g].color == c;
+            var bw: dvui.ButtonWidget = undefined;
+            bw.init(@src(), .{ .draw_focus = false }, .{
+                .id_extra = c,
+                .min_size_content = .{ .w = 16, .h = 16 },
+                .background = true,
+                .color_fill = .{ .color = groupColor(@intCast(c)) },
+                .corners = .all(8),
+                .border = dvui.Rect.all(if (current) 2 else 0),
+                .color_border = .{ .color = style.text() },
+                .margin = .{ .w = style.space.sm },
+            });
+            bw.processEvents();
+            bw.drawBackground();
+            if (bw.clicked()) {
+                fw.close();
+                requestTab(.{ .group_color = .{ g, c } });
+            }
+            bw.deinit();
+        }
+    }
+    if (menuIcon(@src(), dvui.entypo.squared_minus, "Ungroup", false)) {
+        fw.close();
+        requestTab(.{ .ungroup = g });
+    }
+    if (menuIcon(@src(), dvui.entypo.cross, "Close the group", false)) {
+        fw.close();
+        requestTab(.{ .close_group = g });
+    }
+}
+
+/// Switch to workspace `w`, in this window and this view: the group and tab
+/// it was on, its first tab, or its start page when it has none.
+fn selectWorkspace(w: usize) void {
+    if (w >= workspaces.items.len) return;
+    active_ws = w;
+    const at = workspaces.items[w];
+    if (at.group < groups.items.len and groups.items[at.group].ws == w and at.tab < groups.items[at.group].tabs.items.len) {
+        new_tab_open = false;
+        return selectTabIn(at.group, at.tab);
+    }
+    selectAnyTab();
+    saveWorkspace();
+}
+
+/// A new workspace, with an empty group to open repositories into, switched
+/// to. Its index.
+fn newWorkspace(name: []const u8, color: u8) ?usize {
+    const owned = gpa.dupe(u8, name) catch return null;
+    workspaces.append(gpa, .{ .name = owned, .color = color }) catch {
+        gpa.free(owned);
+        return null;
+    };
+    const w = workspaces.items.len - 1;
+    ensureWorkspaceGroups();
+    return w;
+}
+
+/// Workspace `w` and its tabs gone — the tabs to the recent list — unless
+/// it is the last one.
+fn deleteWorkspace(w: usize) void {
+    if (w >= workspaces.items.len or workspaces.items.len <= 1) return;
+    var g: usize = groups.items.len;
+    while (g > 0) {
+        g -= 1;
+        if (groups.items[g].ws == w) {
+            var removed = groups.orderedRemove(g);
+            for (removed.tabs.items) |tab| addRecent(tab.path, true);
+            removed.deinit();
+        } else if (groups.items[g].ws > w) groups.items[g].ws -= 1;
+    }
+    gpa.free(workspaces.orderedRemove(w).name);
+    active_group = 0;
+    active_tab = 0;
+    closeRepo();
+    selectWorkspace(if (w > 0) w - 1 else 0);
+}
+
+fn firstGroupOf(w: usize) usize {
+    for (groups.items, 0..) |group, g| if (group.ws == w) return g;
+    return 0;
+}
+
+/// Tab `t` of group `g` into workspace `w`: its first group.
+fn moveTabToWorkspace(g: usize, t: usize, w: usize) void {
+    for (groups.items, 0..) |group, to| if (group.ws == w) return moveTab(g, t, to);
+}
+
 /// The workspace shown, at the strip's start: its colour, its name, and a
-/// menu of every workspace — each switched to in this window and this view —
-/// with new, rename, colour and delete.
+/// menu of every workspace, with new, rename, colour and delete.
 fn workspaceSwitcher() void {
-    const group = activeGroup() orelse return;
+    if (active_ws >= workspaces.items.len) return;
+    const current = workspaces.items[active_ws];
+    // On its own colour, the name dark on it, as a tab group's label was:
+    // which workspace this is reads before its name does.
+    const hue = groupColor(current.color);
     const button = DropButton.begin(@src(), .{
         .tag = "workspace:switcher",
         .gravity_y = 0.5,
-        .background = false,
-        .color_fill_hover = .{ .color = style.rowHover() },
+        .background = true,
+        .color_fill = .{ .color = hue },
+        .color_fill_hover = .{ .color = hue.lerp(style.text(), 0.2) },
         .corners = style.radius.input,
-        .margin = .{ .x = style.space.sm, .w = style.space.xs },
-        .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.xs, .h = 3 },
+        .min_size_content = .{ .w = 110 },
+        .margin = .{ .x = style.space.sm, .w = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = 3, .w = style.space.sm, .h = 3 },
     });
     {
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .expand = .horizontal });
         defer face.deinit();
-        workspaceDot(@src(), 0, group.color);
-        dvui.label(@src(), "{s}", .{workspaceName(group.*)}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
-        dvui.icon(@src(), "workspace_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+        const ink = style.background();
+        dvui.label(@src(), "{s}", .{workspaceName(current)}, .{ .font = style.smallBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
+        dvui.icon(@src(), "workspace_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = ink } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
             .margin = .{ .x = style.space.xs },
@@ -10654,24 +11572,26 @@ fn workspaceSwitcher() void {
     const m = menu orelse return;
 
     dropHeading(@src(), 0, "WORKSPACES");
-    for (groups.items, 0..) |other, g| {
+    for (workspaces.items, 0..) |w, i| {
         var mi = dvui.menuItem(@src(), .{}, .{
-            .id_extra = g,
-            .tag = frameTag("workspace", workspaceName(other)),
+            .id_extra = i,
+            .tag = frameTag("workspace", workspaceName(w)),
             .expand = .horizontal,
             .min_size_content = .{ .w = 260 },
             .corners = style.radius.input,
-            .color_fill_hover = .{ .color = style.accentDim() },
-            .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
+            .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
         });
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
             defer row.deinit();
-            workspaceDot(@src(), g + 1, other.color);
-            dvui.label(@src(), "{s}", .{workspaceName(other)}, .{ .font = if (g == active_group) style.smallBold() else style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
-            const n = other.tabs.items.len;
+            workspaceDot(@src(), i + 1, w.color);
+            dvui.label(@src(), "{s}", .{workspaceName(w)}, .{ .font = if (i == active_ws) style.smallBold() else style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
+            var n: usize = 0;
+            for (groups.items) |g| {
+                if (g.ws == i) n += g.tabs.items.len;
+            }
             dvui.label(@src(), "{d} {s}", .{ n, if (n == 1) "repository" else "repositories" }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-            if (g == active_group) dvui.icon(@src(), "workspace_on", dvui.entypo.check, .{ .fill_color = .{ .color = style.accent() } }, .{
+            if (i == active_ws) dvui.icon(@src(), "workspace_on", dvui.entypo.check, .{ .fill_color = .{ .color = style.accent() } }, .{
                 .min_size_content = .{ .w = 11, .h = 11 },
                 .gravity_y = 0.5,
                 .margin = .{ .x = style.space.sm },
@@ -10681,7 +11601,7 @@ fn workspaceSwitcher() void {
         mi.deinit();
         if (picked) {
             m.close();
-            if (g != active_group) requestTab(.{ .select_group = g });
+            if (i != active_ws) requestTab(.{ .select_ws = i });
         }
     }
 
@@ -10694,13 +11614,14 @@ fn workspaceSwitcher() void {
         m.close();
         openWorkspaceDialog(.rename);
     }
-    if (colorSwatches(@src(), group.color, .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm })) |c| {
+    if (colorSwatches(@src(), current.color, .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm })) |c| {
         m.close();
-        requestTab(.{ .group_color = .{ active_group, c } });
+        workspaces.items[active_ws].color = @intCast(c);
+        saveWorkspace();
     }
-    if (groups.items.len > 1 and menuIcon(@src(), dvui.entypo.trash, "Delete this workspace", true)) {
+    if (workspaces.items.len > 1 and menuIcon(@src(), dvui.entypo.trash, "Delete this workspace", true)) {
         m.close();
-        requestTab(.{ .close_group = active_group });
+        requestTab(.{ .close_ws = active_ws });
     }
 }
 
@@ -10732,7 +11653,13 @@ fn colorSwatches(src: std.builtin.SourceLocation, current: u8, pad: dvui.Rect) ?
 
 /// Naming a workspace, in a dialog: a new one, a new one for the tab
 /// `group_target` names, or the one shown renamed — with its colour.
-const WorkspaceDialog = enum { new, with_tab, rename };
+const WorkspaceDialog = enum {
+    new,
+    with_tab,
+    rename,
+    /// A new tab group, for the tab `group_target` names.
+    group,
+};
 var ws_dialog: ?WorkspaceDialog = null;
 var ws_rect: dvui.Rect = .{};
 var ws_name: std.ArrayList(u8) = .empty;
@@ -10742,11 +11669,21 @@ fn openWorkspaceDialog(kind: WorkspaceDialog) void {
     ws_dialog = kind;
     ws_rect = .{};
     ws_name.clearRetainingCapacity();
-    ws_color = unusedColor();
-    if (kind == .rename) if (activeGroup()) |g| {
-        ws_name.appendSlice(gpa, g.name) catch {};
-        ws_color = g.color;
-    };
+    ws_color = @intCast(workspaces.items.len % GROUP_COLORS);
+    // A group: a colour no other shows yet, where there is one.
+    if (kind == .group) {
+        ws_color = 0;
+        while (ws_color < GROUP_COLORS - 1) : (ws_color += 1) {
+            const used = for (groups.items) |other| {
+                if (other.name.len > 0 and other.color == ws_color) break true;
+            } else false;
+            if (!used) break;
+        }
+    }
+    if (kind == .rename and active_ws < workspaces.items.len) {
+        ws_name.appendSlice(gpa, workspaces.items[active_ws].name) catch {};
+        ws_color = workspaces.items[active_ws].color;
+    }
 }
 
 fn workspaceDialog() void {
@@ -10756,18 +11693,22 @@ fn workspaceDialog() void {
     var fw = modalWindow(@src(), &ws_rect, &open, style.surface(), 400, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
-    dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of repositories, switched to in this window", &open);
+    if (kind == .group)
+        dialogHeader(@src(), dvui.entypo.plus, "New group", "The tab under a coloured dot, with the ones you add to it", &open)
+    else
+        dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of groups and tabs, switched to in this window", &open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
-    defer body.deinit();
+    var body = dialogBody(@src(), null);
     var entered = false;
-    _ = dialogField(@src(), 0, "Name", &ws_name, "e.g. Client work", true, &entered);
+    // A group has no name, only its colour.
+    if (kind != .group) _ = dialogField(@src(), 0, "Name", &ws_name, "e.g. Client work", true, &entered);
     dialogLabel(@src(), "Colour");
     if (colorSwatches(@src(), ws_color, .{ .y = style.space.xs, .h = style.space.lg })) |c| ws_color = @intCast(c);
 
-    const named = std.mem.trim(u8, ws_name.items, " \t").len > 0;
+    const named = kind == .group or std.mem.trim(u8, ws_name.items, " \t").len > 0;
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
+        var line = dialogFooter(@src());
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -10780,25 +11721,34 @@ fn workspaceDialog() void {
 fn applyWorkspaceDialog() void {
     const kind = ws_dialog orelse return;
     ws_dialog = null;
-    const name = std.mem.trim(u8, ws_name.items, " \t");
+    const name = if (kind == .group) GROUP_MARK else std.mem.trim(u8, ws_name.items, " \t");
     if (name.len == 0) return;
-    const target = switch (kind) {
-        .new => blk: {
-            newWorkspace(name);
-            break :blk groups.items.len - 1;
+    switch (kind) {
+        .new => if (newWorkspace(name, ws_color)) |w| selectWorkspace(w),
+        .with_tab => if (newWorkspace(name, ws_color)) |w| {
+            moveTabToWorkspace(group_target[0], group_target[1], w);
+            selectWorkspace(w);
         },
-        // Made right after the tab's own.
-        .with_tab => blk: {
-            groupTab(name, group_target[0], group_target[1]);
-            break :blk group_target[0] + 1;
+        .group => {
+            const g0 = group_target[0];
+            const t0 = group_target[1];
+            if (g0 >= groups.items.len or t0 >= groups.items[g0].tabs.items.len) return;
+            // Found again by its tab: the group it left may go, empty.
+            const tab = groups.items[g0].tabs.items[t0].path.ptr;
+            groupTab(name, g0, t0);
+            for (groups.items) |*group| for (group.tabs.items) |other| {
+                if (other.path.ptr == tab) group.color = ws_color;
+            };
+            saveWorkspace();
         },
-        .rename => blk: {
-            renameGroup(active_group, name);
-            break :blk active_group;
+        .rename => if (active_ws < workspaces.items.len) {
+            const owned = gpa.dupe(u8, name) catch return;
+            gpa.free(workspaces.items[active_ws].name);
+            workspaces.items[active_ws].name = owned;
+            workspaces.items[active_ws].color = ws_color;
+            saveWorkspace();
         },
-    };
-    if (target < groups.items.len) groups.items[target].color = ws_color;
-    saveWorkspace();
+    }
 }
 
 /// A workspace's colour, as a dot.
@@ -10815,7 +11765,8 @@ fn workspaceDot(src: std.builtin.SourceLocation, id: usize, color: u8) void {
     dot.deinit();
 }
 
-/// A tab's right-click: to another workspace, to a new one, closed.
+/// A tab's right-click: into a group, out of one, to another workspace,
+/// closed.
 fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     const ctx = dvui.context(@src(), .{ .rect = rect }, .{ .id_extra = id });
     defer ctx.deinit();
@@ -10823,12 +11774,29 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     var fw = contextMenu(cp);
     defer fw.deinit();
 
+    if (menuIcon(@src(), dvui.entypo.plus, "Add to a new group…", false)) {
+        fw.close();
+        group_target = .{ g, t };
+        openWorkspaceDialog(.group);
+    }
     for (groups.items, 0..) |other, gi| {
-        if (gi == g) continue;
-        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to {s}", .{workspaceName(other)}) catch continue;
+        if (gi == g or other.name.len == 0 or other.ws != groups.items[g].ws) continue;
+        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to the {s} group", .{groupColorName(other.color)}) catch continue;
         if (menuIconAt(@src(), gi, dvui.entypo.layers, caption)) {
             fw.close();
             requestTab(.{ .tab_to = .{ g, t, gi } });
+        }
+    }
+    if (groups.items[g].name.len > 0 and menuIcon(@src(), dvui.entypo.squared_minus, "Remove from the group", false)) {
+        fw.close();
+        requestTab(.{ .tab_out = .{ g, t } });
+    }
+    for (workspaces.items, 0..) |w, wi| {
+        if (wi == groups.items[g].ws) continue;
+        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to workspace {s}", .{workspaceName(w)}) catch continue;
+        if (menuIconAt(@src(), wi + 1000, dvui.entypo.layers, caption)) {
+            fw.close();
+            requestTab(.{ .tab_to = .{ g, t, firstGroupOf(wi) } });
         }
     }
     if (menuIcon(@src(), dvui.entypo.plus, "Move to a new workspace…", false)) {
@@ -10852,6 +11820,8 @@ const TabLook = struct {
     icon: []const u8 = dvui.entypo.flow_branch,
     /// Group and index of a repository's tab: what makes it draggable.
     slot: ?[2]usize = null,
+    /// Its group's colour: the active one is outlined in it.
+    hue: ?dvui.Color = null,
 };
 
 const TAB_DRAG_NAME = "zit-tab";
@@ -10916,8 +11886,8 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
         .expand = .vertical,
         .background = true,
         .color_fill = .{ .color = if (lit) style.accentDim() else if (active) style.surface() else style.background() },
-        .border = if (active) .{ .x = 1, .y = 1, .w = 1 } else dvui.Rect.all(0),
-        .color_border = .{ .color = style.border() },
+        .border = if (!active) dvui.Rect.all(0) else if (look.hue != null) .{ .x = 2, .y = 2, .w = 2 } else .{ .x = 1, .y = 1, .w = 1 },
+        .color_border = .{ .color = look.hue orelse style.border() },
         .corners = if (active) .{ .tl = style.radius.row.tl, .tr = style.radius.row.tr } else dvui.CornerRect.all(0),
         .margin = .{ .x = TAB_GAP / 2, .y = TAB_TOP, .w = TAB_GAP / 2 },
         .padding = .{ .w = style.space.xs },
@@ -10927,7 +11897,8 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     const s = face_rs.s;
     rect_out.* = face_rs.r;
     // The strip's hairline is rubbed out under it, between its side edges.
-    if (active) active_tab_foot = .{ .x = face_rs.r.x + s, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - 2 * s, .h = s };
+    const side: f32 = if (look.hue != null) 2 * s else s;
+    if (active) active_tab_foot = .{ .x = face_rs.r.x + side, .y = face_rs.r.y + face_rs.r.h, .w = face_rs.r.w - 2 * side, .h = s };
     if (!active and !lit) {
         // Under the pointer, a plate a little in from the tab's edges.
         if (face_rs.r.contains(dvui.currentWindow().mouse_pt)) {
@@ -10962,7 +11933,14 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
     // A repository's initials on a badge, as GitComet marks its tabs —
     // the accent's on the active one; the new-tab page's plus.
-    if (look.slot != null) tabBadge(name, active) else dvui.icon(@src(), "tab_icon", look.icon, .{ .fill_color = .{ .color = if (active) style.accent() else style.textMuted() } }, .{
+    // A command running in it — commands run in the repository on show —
+    // spins where its initials were.
+    if (look.slot != null and active and job != null and !job_quiet) dvui.spinner(@src(), .{
+        .min_size_content = .{ .w = 18, .h = 18 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+        .color_text = .{ .color = style.accent() },
+    }) else if (look.slot != null) tabBadge(name, active) else dvui.icon(@src(), "tab_icon", look.icon, .{ .fill_color = .{ .color = if (active) style.accent() else style.textMuted() } }, .{
         .min_size_content = .{ .w = 14, .h = 14 },
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.sm },
@@ -11274,10 +12252,11 @@ fn toastWindow(src: std.builtin.SourceLocation, rect: *dvui.Rect, hue: dvui.Colo
         .resize = .none,
         .window_avoid = .none,
     }, .{
+        // An alert's shape, floating: its colour's ground and frame.
         .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
-        .border = .{ .x = 3, .y = 1, .w = 1, .h = 1 },
-        .color_border = .{ .color = hue },
+        .color_fill = .{ .color = style.tint(hue) },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = alertEdge(hue) },
         .corners = style.radius.popover,
         .min_size_content = .{ .w = TOAST_W },
         .max_size_content = .width(TOAST_W),
@@ -11353,7 +12332,7 @@ fn confirmToast() void {
     defer line.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
-    if (toastButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) requestAction(.confirmed);
+    if (alertButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) requestAction(.confirmed);
 }
 
 /// The button that does what the toast asks, named for it.
@@ -11375,23 +12354,66 @@ fn confirmVerb(kind: Confirm.Kind) []const u8 {
     };
 }
 
-/// A toast's filled button, in `hue`.
-fn toastButton(src: std.builtin.SourceLocation, caption: []const u8, hue: dvui.Color, tag: []const u8) bool {
+// === Alerts ===
+//
+// One shape for every alert, whatever it says: a ground tinted with its
+// colour, framed in it, its icon and its words in it, and the thing to do
+// about it on the right — a button framed in the same colour.
+
+/// The alert's frame, its icon already in: what it says and the button
+/// after go in it, then `deinit`.
+fn alertBox(src: std.builtin.SourceLocation, id: usize, hue: dvui.Color, icon: []const u8, margin: dvui.Rect) *dvui.BoxWidget {
+    const box = dvui.box(src, .{ .dir = .horizontal }, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.tint(hue) },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = alertEdge(hue) },
+        .corners = style.radius.input,
+        .margin = margin,
+        .padding = .{ .x = style.space.lg, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+        .min_size_content = .{ .h = 36 },
+    });
+    dvui.icon(@src(), "alert_icon", icon, .{ .fill_color = .{ .color = hue } }, .{
+        .min_size_content = .{ .w = 14, .h = 14 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.md },
+    });
+    return box;
+}
+
+/// The alert's frame and its button's: its colour, halfway to the ground.
+fn alertEdge(hue: dvui.Color) dvui.Color {
+    return hue.lerp(style.surface(), 0.45);
+}
+
+/// What the alert says, in its colour, wrapped to what is left of the line.
+fn alertText(src: std.builtin.SourceLocation, text: []const u8, hue: dvui.Color) void {
+    var tl = dvui.textLayout(src, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0) });
+    tl.addText(text, .{ .font = style.smallBold(), .color_text = .{ .color = hue } });
+    tl.deinit();
+}
+
+/// The thing to do about an alert: framed in its colour, its caption in it.
+fn alertButton(src: std.builtin.SourceLocation, caption: []const u8, hue: dvui.Color, tag: ?[]const u8) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
         .background = true,
-        .color_fill = .{ .color = hue },
-        .color_fill_hover = .{ .color = hue.lerp(style.text(), 0.15) },
+        .color_fill = .{ .color = dvui.Color.transparent },
+        .color_fill_hover = .{ .color = style.tint(hue).lerp(hue, 0.12) },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = alertEdge(hue) },
         .corners = style.radius.input,
         .gravity_y = 0.5,
         .margin = .{ .x = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
     });
     defer bw.deinit();
     bw.processEvents();
     bw.drawBackground();
-    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.smallBold(), .color_text = .{ .color = style.textOnAccent() }, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.smallBold(), .color_text = .{ .color = hue }, .padding = dvui.Rect.all(0) });
     return bw.clicked();
 }
 
@@ -11432,23 +12454,18 @@ fn promptDialog() void {
     if (escapePressed()) return clearPrompt();
     var open = true;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &prompt_rect, &open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &prompt_rect, &open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
     var hint_buf: [160]u8 = undefined;
     dialogHeader(@src(), Prompt.icon(p.kind), Prompt.caption(p.kind), Prompt.hint(p.kind, p.arg, &hint_buf), &open);
 
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = PROMPT_W },
-        .max_size_content = .width(PROMPT_W),
-        .background = false,
-        .padding = dvui.Rect.all(style.space.xl),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), PROMPT_W);
     var entered = false;
     _ = dialogField(@src(), 0, Prompt.label(p.kind), &prompt_text, Prompt.placeholder(p.kind), true, &entered);
+    body.deinit();
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var line = dialogFooter(@src());
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -11630,34 +12647,36 @@ fn dropChoice(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8, hint
     return false;
 }
 
+/// What a toolbar button is, beyond its caption and icon.
+const Tool = struct {
+    /// How many commits Pull or Push would move, beside the caption when
+    /// not zero; the button is then lit in the accent, as what to do next.
+    badge: usize = 0,
+    /// Findable by this, whatever its caption says. Null: "toolbar:" and
+    /// the caption.
+    tag: ?[]const u8 = null,
+    /// Lit in the accent: a view it shows.
+    on: bool = false,
+    /// Faded and deaf unless so; its hint then says why.
+    usable: bool = true,
+    /// On hover, what it would do — and its keys. Null: its caption.
+    hint: ?[]const u8 = null,
+    /// The icon alone, whatever the bar's width: its hint names it.
+    icon_only: bool = false,
+    /// Its command is running: a spinner for the icon, and deaf meanwhile.
+    busy: bool = false,
+};
+
 /// Icon over caption: the icon is what you aim at, the caption is what makes
 /// it unambiguous.
-///
-/// `badge` is drawn beside the caption when it is not zero — how many commits
-/// Pull or Push would actually move.
-fn toolbarButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize) bool {
-    return toolbarButtonTagged(src, caption, icon, badge, frameTag("toolbar", caption));
-}
-
-/// As `toolbarButton`, findable by `tag` whatever its caption says.
-fn toolbarButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8) bool {
-    return toolbarButtonOn(src, caption, icon, badge, tag, false);
-}
-
-/// As `toolbarButtonTagged`, lit in the accent while `on`: a view it shows.
-fn toolbarButtonOn(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8, on: bool) bool {
-    return toolbarButtonFull(src, caption, icon, badge, tag, on, true, null);
-}
-
-/// As `toolbarButtonOn`, faded and deaf unless `usable`, and saying `hint`
-/// on hover — what it would do — rather than only its caption.
-fn toolbarButtonFull(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, badge: usize, tag: ?[]const u8, on: bool, usable: bool, hint: ?[]const u8) bool {
-    const enabled = repo != null and usable;
+fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, t: Tool) bool {
+    const enabled = repo != null and t.usable and !t.busy;
+    const bare = t.icon_only or toolbar_compact;
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
-        .tag = tag,
-        .min_size_content = .{ .w = if (toolbar_compact) TOOL_H else TOOL_W, .h = TOOL_H },
+        .tag = t.tag orelse frameTag("toolbar", caption),
+        .min_size_content = .{ .w = if (bare) TOOL_H else TOOL_W, .h = TOOL_H },
         .gravity_y = 0.5,
         .background = false,
         .margin = .{ .x = 2, .w = 2 },
@@ -11668,26 +12687,31 @@ fn toolbarButtonFull(src: std.builtin.SourceLocation, caption: []const u8, icon:
     bw.processEvents();
 
     const hovered = enabled and bw.hovered();
-    const color = if (!enabled) style.textFaint() else if (on) style.accent() else if (hovered) style.text() else style.textMuted();
-    // Without its caption, the caption says itself on hover; a hint, what
-    // the button would do, says itself either way.
-    if (bw.hovered()) if (hint orelse if (toolbar_compact) caption else null) |words| {
-        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{words}, .{ .font = style.small() });
-    };
+    const loud = enabled and t.badge > 0;
+    const color = if (!enabled and !t.busy) style.textFaint() else if (t.on or loud or t.busy) style.accent() else if (hovered) style.text() else style.textMuted();
+    // Every button says on hover what it would do, or why it cannot.
+    if (bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{t.hint orelse caption}, .{ .font = style.small() });
 
     {
         var cell = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
-            .background = hovered or on,
-            .color_fill = .{ .color = if (on) style.accentDim() else style.rowHover() },
+            .background = hovered or t.on,
+            .color_fill = .{ .color = if (t.on) style.accentDim() else style.rowHover() },
             .corners = style.radius.input,
             .padding = .{ .x = style.space.md, .y = 5, .w = style.space.md, .h = 5 },
         });
         defer cell.deinit();
 
-        dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
+        if (t.busy) dvui.spinner(@src(), .{
             .min_size_content = .{ .w = 17, .h = 17 },
             .gravity_x = 0.5,
+            .gravity_y = if (bare) 0.5 else null,
+            .margin = .{ .h = 4 },
+            .color_text = .{ .color = color },
+        }) else dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
+            .min_size_content = .{ .w = 17, .h = 17 },
+            .gravity_x = 0.5,
+            .gravity_y = if (bare) 0.5 else null,
             .margin = .{ .h = 4 },
         });
 
@@ -11698,20 +12722,20 @@ fn toolbarButtonFull(src: std.builtin.SourceLocation, caption: []const u8, icon:
         });
         defer line.deinit();
 
-        if (!toolbar_compact) dvui.label(@src(), "{s}", .{caption}, .{
-            .font = style.small(),
+        if (!bare) dvui.label(@src(), "{s}", .{caption}, .{
+            .font = if (loud) style.smallBold() else style.small(),
             .color_text = .{ .color = color },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
             .margin = dvui.Rect.all(0),
         });
 
-        if (badge > 0 and enabled) {
-            dvui.label(@src(), "{d}", .{badge}, .{
-                .font = style.tiny(),
-                .color_text = .{ .color = style.accent() },
+        if (loud) {
+            dvui.label(@src(), "{d}", .{t.badge}, .{
+                .font = style.tinyBold(),
+                .color_text = .{ .color = style.background() },
                 .background = true,
-                .color_fill = .{ .color = style.accentDim() },
+                .color_fill = .{ .color = style.accent() },
                 .corners = style.radius.tag,
                 .gravity_y = 0.5,
                 .margin = .{ .x = style.space.xs },
@@ -11925,7 +12949,7 @@ fn chipButtonTagged(src: std.builtin.SourceLocation, icon: []const u8, caption: 
         .color_border = .{ .color = if (accent) style.accent().opacity(0.4) else style.border() },
         .corners = style.radius.input,
         .margin = .{ .x = style.space.sm },
-        .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.md, .h = 3 },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
     });
     defer bw.deinit();
     bw.processEvents();
@@ -12357,8 +13381,8 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
         });
         defer row.deinit();
 
-        sectionFace(collapsed.*, section.icon(), section.title(), all_hidden);
-        if (all_hidden) dvui.icon(@src(), "section_hidden", dvui.entypo.eye_with_line, .{ .fill_color = .{ .color = style.textFaint() } }, .{
+        sectionFace(collapsed.*, section.title(), all_hidden);
+        if (all_hidden) dvui.icon(@src(), "section_hidden", eyeIcon(true), .{ .fill_color = .{ .color = style.textFaint() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
             .margin = .{ .x = style.space.sm },
@@ -12466,11 +13490,12 @@ fn hideAll(kind: git.Ref.Kind, hide: bool) void {
 const SECTION_MAX_H: f32 = 300;
 
 // The sidebar's columns. Every line's text starts where its section's title
-// does — past the header's chevron and icon — a remote's branches one step
+// does — past the header's chevron — a remote's branches one step
 // further in, and nothing reaches the scroll bar on the right.
 /// Where a section title's text starts: the header's left padding, chevron,
-/// gap, icon, gap.
-const SIDE_TEXT_X: f32 = style.space.md + 12 + style.space.xs + 13 + style.space.sm;
+/// gap.
+const SIDE_TEXT_X: f32 = style.space.md + 12 + SECTION_CHEVRON_GAP;
+const SECTION_CHEVRON_GAP: f32 = style.space.sm + style.space.xs;
 /// One level in: a remote's branches under it.
 const SIDE_NEST: f32 = style.space.lg;
 /// Kept clear on the right, for a section's scroll bar.
@@ -12716,7 +13741,7 @@ fn sectionMenu(
         };
         var buf: [64]u8 = undefined;
         const caption = std.fmt.bufPrint(&buf, "{s} all the {s} {s} the graph", .{ if (hd.shown) "Hide" else "Show", what, if (hd.shown) "from" else "in" }) catch "";
-        if (menuIcon(@src(), if (hd.shown) dvui.entypo.eye_with_line else dvui.entypo.eye, caption, false)) {
+        if (menuIcon(@src(), eyeIcon(hd.shown), caption, false)) {
             fw.close();
             hideAll(hd.kind, hd.shown);
         }
@@ -12980,21 +14005,14 @@ fn prCreateDialog() void {
     if (!pr_new_open) return;
     const h = history orelse return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &pr_new_rect, &pr_new_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &pr_new_rect, &pr_new_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
     dialogHeader(@src(), dvui.entypo.merge, "New pull request", h.head orelse "", &pr_new_open);
 
     // A fixed width: the description comes filled in with the template and
     // the commits, and its longest line would otherwise set the dialog's.
-    const width = @min(PR_CREATE_W, win.w - 80);
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = width },
-        .max_size_content = .width(width),
-        .background = false,
-        .padding = dvui.Rect.all(style.space.xl),
-    });
-    defer body.deinit();
+    var body = dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
 
     // The two branches, as GitHub's compare bar has them: into, from.
     {
@@ -13012,18 +14030,12 @@ fn prCreateDialog() void {
     else
         remoteHas(head);
     if (!pushed and head.len > 0) {
-        var note = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.tint(style.get().orange) },
-            .corners = style.radius.input,
-            .margin = .{ .h = style.space.lg },
-            .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
-        });
+        const orange = style.get().orange;
+        var note = alertBox(@src(), 0, orange, dvui.entypo.upload, .{ .h = style.space.lg });
         defer note.deinit();
         const missing = !on_head or h.tracking.upstream == null;
-        dvui.label(@src(), "{s}", .{if (missing) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first."}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
-        if (dialogButton(@src(), "Push", true)) {
+        alertText(@src(), if (missing) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first.", orange);
+        if (alertButton(@src(), "Push", orange, "pr_new:push")) {
             if (on_head) {
                 requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
             } else if (defaultRemote()) |remote| requestNetwork("Pushing", &.{ "push", "-u", remote, head });
@@ -13051,9 +14063,16 @@ fn prCreateDialog() void {
         peoplePicker(3, "Assignees", &pr_new_assignees, "Assign someone", false, "pr_new:assignees");
         labelPicker(4, &pr_new_labels, "pr_new:labels");
     }
+    // What GitHub refused, where it was asked.
+    if (!pr_creating) if (command_error) |why| {
+        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0) });
+        tl.addText(firstLine(why), .{ .font = style.small(), .color_text = .{ .color = style.danger() } });
+        tl.deinit();
+    };
+    body.deinit();
 
     {
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+        var line = dialogFooter(@src());
         defer line.deinit();
         typePicker(5, &pr_new_draft, "pr_new:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -13066,12 +14085,6 @@ fn prCreateDialog() void {
             if (pushed and dialogButton(@src(), if (pr_new_draft) "Create draft" else "Create pull request", true)) createRequest();
         }
     }
-    // What GitHub refused, where it was asked.
-    if (!pr_creating) if (command_error) |why| {
-        var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.md } });
-        tl.addText(firstLine(why), .{ .font = style.small(), .color_text = .{ .color = style.danger() } });
-        tl.deinit();
-    };
     if (escapePressed() and pick_open == null and !pr_creating) pr_new_open = false;
 }
 
@@ -13739,7 +14752,7 @@ fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
             .gravity_y = 0.5,
             .margin = .{ .x = (SIDE_GUTTER - 11) / 2, .w = (SIDE_GUTTER - 11) / 2 },
         });
-    } else if (iconButtonTagged(@src(), "ref_eye", if (hidden) "Show in the graph" else "Hide from the graph", if (hidden) dvui.entypo.eye_with_line else dvui.entypo.eye, if (hidden) style.textMuted() else if (hover) style.textFaint() else dvui.Color.transparent, frameTag("eye", ref.name))) {
+    } else if (iconButtonTagged(@src(), "ref_eye", if (hidden) "Show in the graph" else "Hide from the graph", eyeIcon(hidden), if (hidden) style.textMuted() else if (hover) style.textFaint() else dvui.Color.transparent, frameTag("eye", ref.name))) {
         toggleHidden(ref);
     }
 
@@ -14184,7 +15197,7 @@ fn refMenu(
             toggleGraphPref(&graph_pinned, "zit.pinned", ref.name);
         }
         const hidden = isHidden(ref.name);
-        if (menuIcon(@src(), if (hidden) dvui.entypo.eye else dvui.entypo.eye_with_line, if (hidden) "Show in the graph" else "Hide from the graph", false)) {
+        if (menuIcon(@src(), eyeIcon(!hidden), if (hidden) "Show in the graph" else "Hide from the graph", false)) {
             fw.close();
             toggleHidden(ref);
         }
@@ -15101,7 +16114,7 @@ fn graphNotes() void {
     // Hidden ones: say so, and bring them back in one click.
     if (hidden) {
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "{d} hidden — show all", .{graph_hidden.items.len}) catch "Show all";
-        if (chipButton(@src(), dvui.entypo.eye_with_line, caption, false)) unhideAll();
+        if (chipButton(@src(), eyeIcon(true), caption, false)) unhideAll();
     }
     // Narrowed to authors: who, how many of the commits shown are theirs,
     // and back to everyone in one click — or, with none of theirs here,
@@ -15972,6 +16985,33 @@ fn avatar(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?d
 /// As `avatar`, `d` across: the commit pane's is bigger than a graph node.
 fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color, d: f32) void {
     const name = commit.author;
+    // Pictures off in the settings: a dot, in the lane's colour or the
+    // author's — no picture asked for, no initials.
+    if (!show_avatars) {
+        const dot = d * 0.5;
+        var room = dvui.box(src, .{}, .{
+            .id_extra = id,
+            .rect = if (at) |p| dvui.Rect{ .x = p.x, .y = p.y, .w = d, .h = d } else null,
+            .background = false,
+            .min_size_content = .{ .w = d, .h = d },
+            .max_size_content = .size(.{ .w = d, .h = d }),
+            .gravity_y = 0.5,
+            .margin = if (at == null) .{ .w = style.space.sm } else dvui.Rect.all(0),
+            .padding = dvui.Rect.all(0),
+        });
+        defer room.deinit();
+        var disc = dvui.box(@src(), .{}, .{
+            .background = true,
+            .color_fill = .{ .color = ring orelse style.laneColor(std.hash.Wyhash.hash(0, name) % 6) },
+            .corners = .all(dot / 2),
+            .min_size_content = .{ .w = dot, .h = dot },
+            .max_size_content = .size(.{ .w = dot, .h = dot }),
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+        });
+        disc.deinit();
+        return;
+    }
     const rect: ?dvui.Rect = if (at) |p| .{ .x = p.x, .y = p.y, .w = d, .h = d } else null;
     const border: dvui.Rect = if (ring != null) dvui.Rect.all(1.5) else dvui.Rect.all(0);
 
@@ -15997,7 +17037,8 @@ fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, a
     // goes without a sha: asking with the commit's would answer with its
     // author's picture.
     const unborn = std.mem.allEqual(u8, std.mem.asBytes(&commit.id), 0);
-    if (avatars.get(commit.email, if (unborn) "" else git.oidHex(commit.id, &hex))) |png| {
+    // Off in the settings: not even asked for, the initials below.
+    if (if (show_avatars) avatars.get(commit.email, if (unborn) "" else git.oidHex(commit.id, &hex)) else null) |png| {
         _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = png, .name = "avatar" } }, .shrink = .both }, .{
             .expand = .both,
             // Half of what is left inside the ring: half the whole disc
@@ -16776,7 +17817,8 @@ fn diffPanel() void {
         else => null,
     };
 
-    const rh = style.diff_row;
+    // Taller with a larger editor text, never shorter.
+    const rh = style.diff_row * @max(1, style.code_scale);
     const total_rows = if (diff_split) split_rows.items.len else diff_rows;
     diff_scroll.virtual_size.h = @as(f32, @floatFromInt(total_rows)) * rh;
 
@@ -16808,6 +17850,7 @@ fn diffPanel() void {
             const pick = sr.file == 0;
             switch (sr.kind) {
                 .file => diffFileRow(@src(), file, r, r, width, rh),
+                .pad => {},
                 .hunk => diffLineRow(@src(), file, file.lines[sr.left], r, width, rh, side, if (pick) sr.left else null),
                 .pair => {
                     const y = @as(f32, @floatFromInt(r)) * rh;
@@ -16821,8 +17864,9 @@ fn diffPanel() void {
 
     var row: usize = 0;
     for (d.files, 0..) |file, fi| {
-        if (row >= first and row < last) diffFileRow(@src(), file, fi, row, width, rh);
-        row += 1;
+        // Its second line too, so a header scrolled half out is still drawn.
+        if (row + 1 >= first and row < last) diffFileRow(@src(), file, fi, row, width, rh);
+        row += FILE_ROWS;
 
         for (file.lines, 0..) |line, li| {
             if (row >= first and row < last) {
@@ -16889,7 +17933,7 @@ fn diffMarkers(area: dvui.RectScale, d: git.Diff, total_rows: usize) void {
                 flush(run_kind, run_start, row, area, x, strip_w, scale, min_h);
                 run_kind = .none;
             }
-            row += 1;
+            row += FILE_ROWS;
             for (file.lines) |line| {
                 const kind: Kind = switch (line.kind) {
                     .addition => .add,
@@ -16908,6 +17952,9 @@ fn diffMarkers(area: dvui.RectScale, d: git.Diff, total_rows: usize) void {
     flush(run_kind, run_start, row, area, x, strip_w, scale, min_h);
 }
 
+/// The diff's own bar: its controls with room around them.
+const DIFF_HEAD_H: f32 = 52;
+
 /// "← Graph": the way back from a diff to the commit list, said in words.
 fn backButton(src: std.builtin.SourceLocation) bool {
     var bw: dvui.ButtonWidget = undefined;
@@ -16921,7 +17968,7 @@ fn backButton(src: std.builtin.SourceLocation) bool {
         .color_border = .{ .color = style.border() },
         .corners = style.radius.input,
         .margin = .{ .x = style.space.xs, .w = style.space.md },
-        .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.md, .h = 3 },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
     });
     defer bw.deinit();
     bw.processEvents();
@@ -16929,7 +17976,7 @@ fn backButton(src: std.builtin.SourceLocation) bool {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
         defer row.deinit();
-        const color = if (bw.hovered()) style.accent() else style.textMuted();
+        const color = if (bw.hovered()) style.accent() else style.text();
         dvui.icon(@src(), "back_icon", dvui.entypo.chevron_small_left, .{ .fill_color = .{ .color = color } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
@@ -16952,10 +17999,10 @@ fn diffHeader() void {
         .expand = .horizontal,
         .background = true,
         .color_fill = .{ .color = style.surface() },
-        .min_size_content = .{ .h = style.toolbar_cell },
+        .min_size_content = .{ .h = DIFF_HEAD_H },
         .border = .{ .h = 1 },
-        .color_border = .{ .color = style.borderSubtle() },
-        .padding = .{ .x = style.space.xs, .w = style.space.md },
+        .color_border = .{ .color = style.border() },
+        .padding = .{ .x = style.space.md, .w = style.space.lg },
     });
     defer head.deinit();
 
@@ -16990,9 +18037,12 @@ fn diffHeader() void {
             dvui.label(@src(), "{s}", .{git.oidShort(id, &buf)}, .{
                 .font = style.mono(),
                 .color_text = .{ .color = style.accent() },
+                .background = true,
+                .color_fill = .{ .color = style.accentDim() },
+                .corners = style.radius.tag,
                 .gravity_y = 0.5,
-                .margin = .{ .w = style.space.sm },
-                .padding = dvui.Rect.all(0),
+                .margin = .{ .x = style.space.sm, .w = style.space.md },
+                .padding = .{ .x = style.space.sm, .y = 2, .w = style.space.sm, .h = 2 },
             });
             dvui.label(@src(), "{s}", .{commitSummary(id)}, .{
                 .font = style.small(),
@@ -17037,6 +18087,7 @@ fn diffHeader() void {
                 return;
             }
 
+            if (linkButton(@src(), "Open in editor", style.textMuted())) openInEditor(selected_path.items);
             if (linkButton(@src(), "Blame", style.textMuted())) selectBlame(selected_path.items);
 
             // The whole-file counterpart of the per-hunk buttons below, and the
@@ -17135,7 +18186,7 @@ fn blamePanel() void {
         return;
     };
 
-    const rh = style.diff_row;
+    const rh = style.diff_row * @max(1, style.code_scale);
     blame_scroll.virtual_size.h = @as(f32, @floatFromInt(b.lines.len)) * rh;
 
     var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &blame_scroll }, .{
@@ -17562,33 +18613,13 @@ fn conflictRegions() void {
 /// "2 of 3 conflicts can be resolved safely": one click for every region
 /// where one side alone changed things, line by line at the finest.
 fn safeBar(safe: usize) void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.tint(style.success()) },
-        .border = .{ .x = 3 },
-        .color_border = .{ .color = style.success() },
-        .corners = style.radius.input,
-        .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
-    });
+    var bar = alertBox(@src(), 0, style.success(), dvui.entypo.check, .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm });
     defer bar.deinit();
-    dvui.icon(@src(), "safe_icon", dvui.entypo.check, .{ .fill_color = .{ .color = style.success() } }, .{
-        .min_size_content = .{ .w = 13, .h = 13 },
-        .gravity_y = 0.5,
-        .margin = .{ .w = style.space.sm },
-    });
-    dvui.label(@src(), "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, plural(conflicts.len) }, .{
-        .font = style.small(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .max_size_content = .width(0),
-        .padding = dvui.Rect.all(0),
-    });
+    var text_buf: [160]u8 = undefined;
+    alertText(@src(), std.fmt.bufPrint(&text_buf, "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, plural(conflicts.len) }) catch "", style.success());
     var buf: [48]u8 = undefined;
     const caption = if (safe == 1) "Resolve it" else std.fmt.bufPrint(&buf, "Resolve these {d}", .{safe}) catch "Resolve them";
-    if (opButton(@src(), caption, "conflict:resolve_safe")) requestAction(.resolve_safe);
+    if (alertButton(@src(), caption, style.success(), "conflict:resolve_safe")) requestAction(.resolve_safe);
 }
 
 /// A file one side deleted and the other changed: keep it, or let it go.
@@ -17867,29 +18898,38 @@ fn diffFileRow(
 ) void {
     var box = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
-        .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row)) * rh, .w = width, .h = rh },
+        .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row)) * rh, .w = width, .h = FILE_ROWS * rh },
         .background = true,
         .color_fill = .{ .color = style.surface() },
-        .padding = .{ .x = style.space.md, .w = style.space.md },
+        .border = .{ .y = if (row > 0) 1 else 0, .h = 1 },
+        .color_border = .{ .color = style.border() },
+        .padding = .{ .x = style.space.lg, .w = style.space.lg },
     });
     defer box.deinit();
 
-    dvui.label(@src(), "{s}", .{file.status.glyph()}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.fileStatusColor(file.status) },
-        .gravity_y = 0.5,
-        .min_size_content = .{ .w = 12 },
-        .padding = dvui.Rect.all(0),
-    });
-
-    dvui.label(@src(), "{s}", .{file.path}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .max_size_content = .width(0),
-        .padding = dvui.Rect.all(0),
-    });
+    statusFlag(@src(), file.status);
+    // Its folder faint, its name in full: the name is what is looked for.
+    const slash = std.mem.lastIndexOfScalar(u8, file.path, '/');
+    const folder = if (slash) |i| file.path[0 .. i + 1] else "";
+    const name = if (slash) |i| file.path[i + 1 ..] else file.path;
+    {
+        var names = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
+        defer names.deinit();
+        if (folder.len > 0) dvui.label(@src(), "{s}", .{folder}, .{
+            .font = style.body(),
+            .color_text = .{ .color = style.textMuted() },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.label(@src(), "{s}", .{name}, .{
+            .font = style.bodyBold(),
+            .color_text = .{ .color = style.text() },
+            .gravity_y = 0.5,
+            .expand = .horizontal,
+            .max_size_content = .width(0),
+            .padding = dvui.Rect.all(0),
+        });
+    }
 
     if (file.binary) {
         dvui.label(@src(), "binary", .{}, .{
@@ -17902,6 +18942,7 @@ fn diffFileRow(
 
     switch (selection) {
         .commit => |commit_id| {
+            if (file.status != .deleted and chipButton(@src(), dvui.entypo.edit, "Open in editor", false)) openInEditor(file.path);
             if (chipButton(@src(), dvui.entypo.clock, "History", false)) showFileHistory(file.path);
             // Nothing to restore of a file this commit deleted.
             if (file.status != .deleted) {
@@ -17951,8 +18992,8 @@ fn diffLineRow(
     if (line.kind == .hunk_header) {
         var header_buf: [MAX_SHOWN_LINE]u8 = undefined;
         dvui.label(@src(), "{s}", .{detab(&header_buf, line.text)}, .{
-            .font = style.mono(),
-            .color_text = .{ .color = style.textMuted() },
+            .font = style.graphMono(),
+            .color_text = .{ .color = style.textFaint() },
             .gravity_y = 0.5,
             .expand = .horizontal,
             .max_size_content = .width(0),
@@ -18037,7 +19078,7 @@ fn codeLine(file: git.FileDiff, index: usize) void {
         .deletion => style.danger(),
         else => style.textFaint(),
     };
-    dvui.label(@src(), "{s}", .{git.linePrefix(line.kind)}, .{ .font = style.mono(), .color_text = .{ .color = sign_color }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{s}", .{git.linePrefix(line.kind)}, .{ .font = style.code(), .color_text = .{ .color = sign_color }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
 
     var tokens_buf: [128]syntax.Token = undefined;
     var tokens = syntax.tokenize(syntax.langOf(file.path), text, &tokens_buf);
@@ -18073,7 +19114,7 @@ fn codeLine(file: git.FileDiff, index: usize) void {
             if (b <= a) continue;
             const marked = if (span) |sp| a >= sp[0] and b <= sp[1] else false;
             tl.addText(text[a..b], .{
-                .font = style.mono(),
+                .font = style.code(),
                 .color_text = .{ .color = syntaxColor(tok.kind) },
                 .color_fill = if (marked) .{ .color = strong } else null,
             });
@@ -18177,12 +19218,21 @@ fn lineNumber(src: std.builtin.SourceLocation, n: u32) void {
     var buf: [12]u8 = undefined;
     const text = if (n == 0) "" else std.fmt.bufPrint(&buf, "{d}", .{n}) catch "";
 
-    dvui.label(src, "{s}", .{text}, .{
-        .font = style.mono(),
+    // A column of its own, the number to its right: in the row itself the
+    // gravity would send it to the row's far end, over the code.
+    var column = dvui.box(src, .{}, .{
+        .gravity_y = 0.5,
+        .min_size_content = .{ .w = 38 },
+        .max_size_content = .width(38),
+        .background = false,
+        .margin = .{ .w = style.space.sm },
+    });
+    defer column.deinit();
+    dvui.label(@src(), "{s}", .{text}, .{
+        .font = style.code(),
         .color_text = .{ .color = style.textFaint() },
         .gravity_y = 0.5,
         .gravity_x = 1.0,
-        .min_size_content = .{ .w = 38 },
         .padding = dvui.Rect.all(0),
     });
 }
@@ -18314,16 +19364,15 @@ fn commitDetail(id: git.Oid) void {
     {
         var card = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .padding = dvui.Rect.all(style.space.md + style.space.xs),
+            .background = false,
+            .padding = dvui.Rect.all(style.space.lg),
             .border = .{ .h = 1 },
             .color_border = .{ .color = style.border() },
         });
         defer card.deinit();
 
         {
-            var chips = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.sm } });
+            var chips = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.md } });
             defer chips.deinit();
             shaChip(id);
             if (history) |h| for (h.refs, 0..) |ref, i| {
@@ -18336,25 +19385,41 @@ fn commitDetail(id: git.Oid) void {
 
         var title = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
         dropStaleTextSelection(title);
-        title.addText(commitSummary(id), .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() } });
+        title.addText(commitSummary(id), .{ .font = style.title().withSize(15 * style.ui_scale), .color_text = .{ .color = style.text() } });
         title.deinit();
 
+        // The message past its title, read as the host would show it: its
+        // lists as lists, its code as code.
         if (split.text.len > 0) {
-            var body = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.sm } });
-            dropStaleTextSelection(body);
-            body.addText(split.text, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() } });
-            body.deinit();
+            var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
+            defer body.deinit();
+            markdownText(unwrapMessage(dvui.currentWindow().arena(), split.text), style.small());
         }
 
-        // The trailers apart, as chips; co-authors are under the authors.
-        var chips = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .margin = .{ .y = style.space.xs } });
-        defer chips.deinit();
+        // The trailers apart, in the mono face git wrote them in;
+        // co-authors are under the authors.
         var lines = trailerLines(split.trailers);
+        var trailers: ?*dvui.BoxWidget = null;
+        defer if (trailers) |b| b.deinit();
         var i: usize = 0;
         while (lines.next()) |t| : (i += 1) {
             if (std.ascii.eqlIgnoreCase(t.key, "Co-authored-by")) continue;
-            const text = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}: {s}", .{ t.key, t.value }) catch continue;
-            signalChip(@src(), i, dvui.entypo.text, text, style.textMuted());
+            if (trailers == null) trailers = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .expand = .horizontal,
+                .background = true,
+                .color_fill = .{ .color = style.surfaceInput() },
+                .corners = style.radius.input,
+                .margin = .{ .y = style.space.md },
+                .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+            });
+            dvui.label(@src(), "{s}: {s}", .{ t.key, t.value }, .{
+                .id_extra = i,
+                .font = style.mono(),
+                .color_text = .{ .color = style.textMuted() },
+                .expand = .horizontal,
+                .max_size_content = .width(0),
+                .padding = dvui.Rect.all(0),
+            });
         }
     }
 
@@ -18393,6 +19458,42 @@ fn commitDetail(id: git.Oid) void {
     if (accordion(@src(), 1, "Files", files, &detail_open[1], false)) {
         if (diff != null) commitFiles(id);
     }
+}
+
+/// A commit message's lines as the paragraphs and list items they are: git
+/// wraps at 72 columns, so a line that carries on the one before joins it —
+/// unless it starts something of its own.
+fn unwrapMessage(a: std.mem.Allocator, text: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var prev_blank = true;
+    var in_code = false;
+    while (it.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        const t = std.mem.trimStart(u8, line, " \t");
+        const fence = std.mem.startsWith(u8, t, "```");
+        const starts = fence or t.len == 0 or in_code or
+            std.mem.startsWith(u8, t, "- ") or std.mem.startsWith(u8, t, "* ") or
+            std.mem.startsWith(u8, t, "#") or std.mem.startsWith(u8, t, ">") or
+            (t.len > 1 and std.ascii.isDigit(t[0]) and (t[1] == '.' or t[1] == ')'));
+        if (!prev_blank and !starts) {
+            out.append(a, ' ') catch {};
+            out.appendSlice(a, t) catch {};
+        } else {
+            if (out.items.len > 0) out.append(a, '\n') catch {};
+            out.appendSlice(a, line) catch {};
+        }
+        if (fence) in_code = !in_code;
+        prev_blank = t.len == 0 or in_code or fence;
+    }
+    return out.items;
+}
+
+test "a commit message's wrapped lines join, its lists and paragraphs stay apart" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const got = unwrapMessage(arena.allocator(), "Intro that\nwraps.\n\n- one item\n  that wraps\n- two\n\n```\ncode\nkept\n```");
+    try std.testing.expectEqualStrings("Intro that wraps.\n\n- one item that wraps\n- two\n\n```\ncode\nkept\n```", got);
 }
 
 /// Every file of a commit's tree, for "All files": read once per commit,
@@ -18471,7 +19572,7 @@ fn rowsSpacer(src: std.builtin.SourceLocation, id: usize, rows: usize, rh: f32) 
 /// folder with the folders folding away. Only the rows in sight are built.
 fn commitFiles(id: git.Oid) void {
     {
-        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.xs } });
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .w = style.space.lg, .h = style.space.sm } });
         defer bar.deinit();
         var track = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_y = 0.5,
@@ -18482,31 +19583,43 @@ fn commitFiles(id: git.Oid) void {
             .corners = style.radius.input,
             .padding = dvui.Rect.all(2),
         });
-        viewToggle(@src(), .path, "Path", dvui.entypo.list);
-        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree);
+        viewToggle(@src(), .path, "Path", dvui.entypo.list, true);
+        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree, true);
         track.deinit();
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        dvui.label(@src(), "All files", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        // The kinds between, on the same line.
+        if (diff_all.len > 0) fileFilters() else _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        dvui.label(@src(), "All", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
         if (toggle(@src(), commit_all_files)) commit_all_files = !commit_all_files;
     }
 
     if (!commit_all_files) {
         if (diff_all.len == 0) return sidebarNote(@src(), "This commit changed no files.");
-        fileCounts();
     }
 
-    const paths_n = if (commit_all_files) blk: {
+    const total_n = if (commit_all_files) blk: {
         loadTreeFiles(id);
         break :blk tree_files.paths.len;
     } else diff_all.len;
     const Files = struct {
         fn path(all: bool, i: usize) []const u8 {
-            return if (all) tree_files.paths[i] else diff_all[i].path;
+            const at = files_shown[i];
+            return if (all) tree_files.paths[at] else diff_all[at].path;
         }
         fn status(all: bool, i: usize) git.Status {
+            const at = files_shown[i];
+            return if (all) (if (at < tree_files.status.len) tree_files.status[at] else .unchanged) else diff_all[at].status;
+        }
+        fn raw(all: bool, i: usize) git.Status {
             return if (all) (if (i < tree_files.status.len) tree_files.status[i] else .unchanged) else diff_all[i].status;
         }
     };
+    {
+        var shown: std.ArrayList(usize) = .empty;
+        const a = dvui.currentWindow().arena();
+        for (0..total_n) |i| if (file_filter.matches(Files.raw(commit_all_files, i))) shown.append(a, i) catch {};
+        files_shown = shown.items;
+    }
+    const paths_n = files_shown.len;
 
     const rh = style.row_height;
     var list = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
@@ -18515,7 +19628,7 @@ fn commitFiles(id: git.Oid) void {
     if (changes_view != .tree) {
         const in_sight = rowsInSight(list.data(), paths_n, rh);
         rowsSpacer(@src(), 0, in_sight.first, rh);
-        for (in_sight.first..in_sight.last) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), i, null);
+        for (in_sight.first..in_sight.last) |i| fileRow(@src(), id, Files.path(commit_all_files, i), Files.status(commit_all_files, i), files_shown[i], null);
         rowsSpacer(@src(), 1, paths_n - in_sight.last, rh);
         return;
     }
@@ -18526,6 +19639,7 @@ fn commitFiles(id: git.Oid) void {
     key.update(std.mem.asBytes(&paths_n));
     const files: usize = if (commit_all_files) @intFromPtr(tree_files.paths.ptr) else @intFromPtr(diff_all.ptr);
     key.update(std.mem.asBytes(&files));
+    key.update(std.mem.asBytes(&file_filter));
     commit_tree.build(key.final(), paths_n, commit_all_files, Files.path);
 
     // The lines unfolded: walked whole, a few pointers each, to know how
@@ -18543,7 +19657,7 @@ fn commitFiles(id: git.Oid) void {
         if (row >= in_sight.last) break;
         if (row < in_sight.first) continue;
         if (shown.row.file) |f| {
-            fileRow(@src(), id, Files.path(commit_all_files, f), Files.status(commit_all_files, f), f, @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON);
+            fileRow(@src(), id, Files.path(commit_all_files, f), Files.status(commit_all_files, f), files_shown[f], @as(f32, @floatFromInt(shown.row.depth)) * TREE_INDENT + TREE_CHEVRON);
         } else if (folderLine(@src(), shown.index, shown.row, shown.folded, null)) {
             fold = shown.row.path;
         }
@@ -18691,20 +19805,17 @@ fn accordion(src: std.builtin.SourceLocation, id: usize, title: []const u8, coun
 }
 
 /// A folding section's header, the same on either side of the window: the
-/// chevron in the text's colour, the section's icon, its name semi-bold.
+/// chevron in the text's colour, its name semi-bold.
 /// `faded`: everything in it out of the graph.
-fn sectionFace(folded: bool, icon: []const u8, title: []const u8, faded: bool) void {
+fn sectionFace(folded: bool, title: []const u8, faded: bool) void {
     // In the toolbar's grey, as its buttons' captions are: a head says where
     // things are, and white made it louder than what it heads.
+    // The gap after the chevron puts the title over the rows' names, which
+    // start past the eye's gutter.
     dvui.icon(@src(), "section_chevron", if (folded) dvui.entypo.chevron_small_right else dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = if (faded) style.textFaint() else style.textMuted() } }, .{
         .min_size_content = .{ .w = 12, .h = 12 },
         .gravity_y = 0.5,
-        .margin = .{ .w = style.space.xs },
-    });
-    dvui.icon(@src(), "section_icon", icon, .{ .fill_color = .{ .color = if (faded) style.textFaint() else style.textMuted() } }, .{
-        .min_size_content = .{ .w = 13, .h = 13 },
-        .gravity_y = 0.5,
-        .margin = .{ .w = style.space.sm },
+        .margin = .{ .w = SECTION_CHEVRON_GAP },
     });
     dvui.label(@src(), "{s}", .{title}, .{
         .font = style.smallBold(),
@@ -18712,13 +19823,6 @@ fn sectionFace(folded: bool, icon: []const u8, title: []const u8, faded: bool) v
         .gravity_y = 0.5,
         .padding = dvui.Rect.all(0),
     });
-}
-
-/// The line over a section header that parts it from the one above.
-fn sectionHairline(wd: *dvui.WidgetData) void {
-    const rs = wd.borderRectScale();
-    (dvui.Rect.Physical{ .x = rs.r.x, .y = rs.r.y, .w = rs.r.w, .h = @max(1, rs.s) })
-        .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
 }
 
 /// The same line, under a panel's title.
@@ -18780,28 +19884,112 @@ fn detailLine(src: std.builtin.SourceLocation, id: usize, caption: []const u8, v
     dvui.label(@src(), "{s}", .{value}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
 }
 
-/// "2 added · 1 deleted · 3 modified", over a commit's files.
-fn fileCounts() void {
-    var n = [_]usize{0} ** 4;
-    for (diff_all) |file| switch (file.status) {
-        .added => n[0] += 1,
-        .deleted => n[1] += 1,
-        .renamed => n[2] += 1,
-        else => n[3] += 1,
-    };
-    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .padding = .{ .x = style.space.lg, .h = style.space.xs } });
-    defer line.deinit();
-    const kinds = [_]struct { []const u8, dvui.Color }{
-        .{ "added", style.success() },
-        .{ "deleted", style.danger() },
-        .{ "renamed", style.get().blue },
-        .{ "modified", style.get().orange },
-    };
-    for (kinds, n, 0..) |kind, count, i| {
-        if (count == 0) continue;
-        dvui.label(@src(), "{d} {s}", .{ count, kind[0] }, .{ .id_extra = i, .font = style.tiny(), .color_text = .{ .color = kind[1] }, .margin = .{ .w = style.space.md }, .padding = dvui.Rect.all(0) });
+/// Which of a commit's files the list shows: all of them, or those of one
+/// kind.
+const FileFilter = enum {
+    all,
+    modified,
+    added,
+    deleted,
+    renamed,
+
+    fn matches(self: FileFilter, status: git.Status) bool {
+        return switch (self) {
+            .all => true,
+            .added => status == .added,
+            .deleted => status == .deleted,
+            .renamed => status == .renamed,
+            .modified => status != .added and status != .deleted and status != .renamed and status != .unchanged,
+        };
+    }
+
+    fn icon(self: FileFilter) []const u8 {
+        return switch (self) {
+            .all => dvui.entypo.documents,
+            .modified => dvui.entypo.edit,
+            .added => dvui.entypo.plus,
+            .deleted => dvui.entypo.minus,
+            .renamed => dvui.entypo.arrow_long_right,
+        };
+    }
+
+    fn hue(self: FileFilter) dvui.Color {
+        return switch (self) {
+            .all => style.textMuted(),
+            .modified => style.fileStatusColor(.modified),
+            .added => style.fileStatusColor(.added),
+            .deleted => style.fileStatusColor(.deleted),
+            .renamed => style.fileStatusColor(.renamed),
+        };
+    }
+};
+var file_filter: FileFilter = .all;
+
+/// Over a commit's files, a tab per kind: its mark in its colour and how
+/// many — the one picked lit, the empty ones faded. A click shows only those.
+fn fileFilters() void {
+    var n = std.enums.EnumArray(FileFilter, usize).initFill(0);
+    for (diff_all) |file| {
+        n.getPtr(.all).* += 1;
+        for ([_]FileFilter{ .modified, .added, .deleted, .renamed }) |f| {
+            if (f.matches(file.status)) n.getPtr(f).* += 1;
+        }
+    }
+    // A kind this commit has none of shows nothing: back to all of them.
+    if (n.get(file_filter) == 0) file_filter = .all;
+
+    // Between Path / Tree and All files, framed as they are, its kinds in
+    // segments of one width.
+    var track = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
+        .expand = .horizontal,
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm, .w = style.space.sm },
+        .background = true,
+        .color_fill = .{ .color = style.surfaceInput() },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = style.border() },
+        .corners = style.radius.input,
+        .padding = dvui.Rect.all(2),
+    });
+    defer track.deinit();
+    for (std.enums.values(FileFilter), 0..) |f, i| {
+        const count = n.get(f);
+        const on = file_filter == f;
+        const usable = count > 0;
+        var bw: dvui.ButtonWidget = undefined;
+        bw.init(@src(), .{ .draw_focus = false }, .{
+            .id_extra = i,
+            .tag = frameTag("files", @tagName(f)),
+            .expand = .horizontal,
+            .background = true,
+            .color_fill = .{ .color = if (on) style.accentDim() else dvui.Color.transparent },
+            .color_fill_hover = .{ .color = if (on) style.accentDim() else if (usable) style.rowHover() else dvui.Color.transparent },
+            .corners = style.radius.input,
+            .margin = dvui.Rect.all(0),
+            .padding = .{ .x = style.space.xs, .y = 3, .w = style.space.xs, .h = 3 },
+        });
+        bw.processEvents();
+        bw.drawBackground();
+        {
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .background = false });
+            defer row.deinit();
+            const faded = !usable;
+            dvui.icon(@src(), "filter_icon", f.icon(), .{ .fill_color = .{ .color = if (faded) style.textFaint() else f.hue() } }, .{
+                .min_size_content = .{ .w = 11, .h = 11 },
+                .gravity_y = 0.5,
+                .margin = .{ .w = style.space.xs },
+            });
+            dvui.label(@src(), "{d}", .{count}, .{ .font = if (on) style.tinyBold() else style.tiny(), .color_text = .{ .color = if (faded) style.textFaint() else if (on) style.accent() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+        }
+        if (bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{d} {s}", .{ count, if (f == .all) "files" else @tagName(f) }, .{ .font = style.small() });
+        if (usable and bw.clicked()) file_filter = f;
+        bw.deinit();
     }
 }
+
+/// The files the list shows, under the filter, by their place in the whole
+/// list: what the tree and the rows read their paths through.
+var files_shown: []const usize = &.{};
 
 /// A comparison: the two ends, and every file that differs between them.
 fn compareDetail() void {
@@ -18882,8 +20070,8 @@ fn workingDetail() void {
             .corners = style.radius.input,
             .padding = dvui.Rect.all(2),
         });
-        viewToggle(@src(), .path, "Path", dvui.entypo.list);
-        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree);
+        viewToggle(@src(), .path, "Path", dvui.entypo.list, false);
+        viewToggle(@src(), .tree, "Tree", dvui.entypo.flow_tree, false);
         track.deinit();
     }
 
@@ -19379,7 +20567,8 @@ fn statusFlag(src: std.builtin.SourceLocation, status: git.Status) void {
     });
 }
 
-fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []const u8, icon: []const u8) void {
+/// `bare`: the icon alone, its caption on hover — where the line is short.
+fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []const u8, icon: []const u8, bare: bool) void {
     const selected = changes_view == view;
 
     var bw: dvui.ButtonWidget = undefined;
@@ -19409,15 +20598,16 @@ fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []con
         dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
             .min_size_content = .{ .w = 10, .h = 10 },
             .gravity_y = 0.5,
-            .margin = .{ .w = style.space.xs },
+            .margin = .{ .w = if (bare) 0 else style.space.xs },
         });
-        dvui.label(@src(), "{s}", .{caption}, .{
+        if (!bare) dvui.label(@src(), "{s}", .{caption}, .{
             .font = if (selected) style.tinyBold() else style.tiny(),
             .color_text = .{ .color = color },
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
     }
+    if (bare and bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{caption}, .{ .font = style.small() });
 
     if (bw.clicked()) changes_view = view;
 }
@@ -19444,15 +20634,13 @@ fn changesSection(
     defer section.deinit();
 
     {
-        // As a sidebar section's header, line for line: the hover and the
-        // hairline drawn by hand — a box's border, with no ground of its own,
-        // painted all of it in the hairline's colour — a button as high, set
-        // in as far, and the same face. Then the count, and the links.
+        // As a sidebar section's header, line for line: the hover drawn by
+        // hand, a button as high, set in as far, and the same face — no rule
+        // between Unstaged and Staged. Then the count, and the links.
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer head.deinit();
         const head_rect = head.data().borderRectScale().r;
         if (head_rect.contains(dvui.currentWindow().mouse_pt)) head_rect.fill(.{}, .{ .color = .{ .color = style.rowHover() }, .fade = 0 });
-        if (id > 0) sectionHairline(head.data());
 
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
@@ -19467,7 +20655,7 @@ fn changesSection(
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both, .background = false, .padding = .{ .x = style.space.md } });
             defer row.deinit();
-            sectionFace(folded.*, if (staged) dvui.entypo.check else dvui.entypo.pencil, caption, false);
+            sectionFace(folded.*, caption, false);
             countPill(changes.len);
         }
         if (bw.clicked()) folded.* = !folded.*;
@@ -20199,55 +21387,102 @@ fn scopeMenu(src: std.builtin.SourceLocation) void {
 fn recentMessages(src: std.builtin.SourceLocation) void {
     const h = history orelse return;
     if (h.commits.len == 0) return;
-    var dd: dvui.DropdownWidget = undefined;
-    pillInit(&dd, src, "recent_messages", .{ .w = style.space.md });
-    pillFace(&dd, dvui.entypo.clock, "");
-    if (dd.dropped()) {
-        dropHeading(@src(), 0, "RECENT MESSAGES");
-        var seen: [12][]const u8 = undefined;
-        var n: usize = 0;
-        for (h.commits[0..@min(h.commits.len, 200)]) |c| {
-            if (c.summary.len == 0) continue;
-            const had = for (seen[0..n]) |x| {
-                if (std.mem.eql(u8, x, c.summary)) break true;
-            } else false;
-            if (had) continue;
-            seen[n] = c.summary;
-            n += 1;
-            if (dropChoice(&dd, dvui.entypo.text_document, c.summary, "")) {
-                commit_summary.clearRetainingCapacity();
-                commit_summary.appendSlice(gpa, c.summary) catch {};
-            }
-            if (n == seen.len) break;
+    const p = pillMenu(src, "recent_messages", dvui.entypo.clock, .{ .w = style.space.md }, "Recent messages");
+    defer p.end();
+    const m = p.menu orelse return;
+    dropHeading(@src(), 0, "RECENT MESSAGES");
+    var list = pickList();
+    defer list.deinit();
+    var seen: [12][]const u8 = undefined;
+    var n: usize = 0;
+    for (h.commits[0..@min(h.commits.len, 200)]) |c| {
+        if (c.summary.len == 0) continue;
+        const had = for (seen[0..n]) |x| {
+            if (std.mem.eql(u8, x, c.summary)) break true;
+        } else false;
+        if (had) continue;
+        seen[n] = c.summary;
+        n += 1;
+        // Cut at a width, not the whole message: the menu would span the window.
+        var fit: [MAX_SHOWN_LINE]u8 = undefined;
+        if (pickRow(n, fitText(&fit, c.summary, style.small(), 420), "", false, null)) {
+            commit_summary.clearRetainingCapacity();
+            commit_summary.appendSlice(gpa, c.summary) catch {};
+            m.close();
         }
+        if (n == seen.len) break;
     }
-    dd.deinit();
 }
 
 /// Everyone who has authored a commit here, to credit as a co-author.
 fn coAuthorMenu(src: std.builtin.SourceLocation) void {
     const h = history orelse return;
-    var dd: dvui.DropdownWidget = undefined;
-    pillInit(&dd, src, "co_authors", .{ .w = style.space.xs });
-    pillFace(&dd, dvui.entypo.add_user, "");
-    const r = dd.data().borderRectScale().r;
-    if (r.contains(dvui.currentWindow().mouse_pt)) dvui.tooltip(@src(), .{ .active_rect = r, .position = .vertical, .delay = 400_000 }, "Add a co-author", .{}, .{ .font = style.small() });
-    if (dd.dropped()) {
-        var seen: [30][]const u8 = undefined;
-        var n: usize = 0;
-        for (h.commits) |c| {
-            if (c.email.len == 0) continue;
-            const had = for (seen[0..n]) |x| {
-                if (std.mem.eql(u8, x, c.email)) break true;
-            } else false;
-            if (had) continue;
-            seen[n] = c.email;
-            n += 1;
-            if (dropChoice(&dd, dvui.entypo.user, c.author, c.email)) addCoAuthor(c.author, c.email);
-            if (n == seen.len) break;
+    const p = pillMenu(src, "co_authors", dvui.entypo.add_user, .{ .w = style.space.xs }, "Add a co-author");
+    defer p.end();
+    const m = p.menu orelse return;
+    dropHeading(@src(), 0, "ADD A CO-AUTHOR");
+    var list = pickList();
+    defer list.deinit();
+    var seen: [30][]const u8 = undefined;
+    var n: usize = 0;
+    for (h.commits) |c| {
+        if (c.email.len == 0) continue;
+        const had = for (seen[0..n]) |x| {
+            if (std.mem.eql(u8, x, c.email)) break true;
+        } else false;
+        if (had) continue;
+        seen[n] = c.email;
+        n += 1;
+        if (pickRow(n, c.author, c.email, false, null)) {
+            addCoAuthor(c.author, c.email);
+            m.close();
         }
+        if (n == seen.len) break;
     }
-    dd.deinit();
+}
+
+/// A pill whose menu drops as a select's does: under it, or over it where
+/// the window has no room below — never on top of it. Its list scrolls past
+/// a height.
+fn pillMenu(src: std.builtin.SourceLocation, tag: []const u8, icon: []const u8, margin: dvui.Rect, hint: []const u8) Picker {
+    var button = DropButton.begin(src, .{
+        .tag = tag,
+        .min_size_content = .{ .h = 26 },
+        .gravity_y = 0.5,
+        .background = false,
+        .margin = margin,
+        .padding = dvui.Rect.all(0),
+        .corners = style.radius.input,
+    });
+    button.min_w = 280;
+    {
+        const lit = button.item.show_active or button.item.mouse_over;
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .both,
+            .background = true,
+            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
+            .border = dvui.Rect.all(1),
+            .color_border = .{ .color = style.border() },
+            .corners = style.radius.input,
+            .padding = .{ .x = style.space.sm, .w = style.space.xs },
+        });
+        defer face.deinit();
+        dvui.icon(@src(), "pill_icon", icon, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+            .min_size_content = .{ .w = 11, .h = 11 },
+            .gravity_y = 0.5,
+        });
+        dvui.icon(@src(), "pill_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textFaint() } }, .{
+            .min_size_content = .{ .w = 10, .h = 10 },
+            .gravity_y = 0.5,
+            .margin = .{ .x = 2 },
+        });
+    }
+    // Said on hover while its menu is shut: its place read before `open`,
+    // which is the end of the button.
+    const r = button.item.data().borderRectScale().r;
+    const menu = button.open();
+    if (menu == null and r.contains(dvui.currentWindow().mouse_pt)) dvui.tooltip(@src(), .{ .active_rect = r, .position = .vertical, .delay = 400_000 }, "{s}", .{hint}, .{ .font = style.small() });
+    return .{ .button = button, .menu = menu, .id = 0 };
 }
 
 /// One fact about the commit about to be made, as a chip: an icon and a word
@@ -20326,6 +21561,15 @@ fn statusBar() void {
     });
     defer bar.deinit();
 
+    // Each panel's fold on its own side: the branches' at this end.
+    panelToggle(@src(), &show_sidebar, dvui.entypo.align_left, "Branches panel — Ctrl+B", "status:sidebar");
+    _ = dvui.separator(@src(), .{
+        .min_size_content = .{ .w = 1, .h = 14 },
+        .gravity_y = 0.5,
+        .margin = .{ .x = style.space.sm, .w = style.space.md },
+        .color_fill = .{ .color = style.border() },
+    });
+
     // What the repository holds, each with its icon.
     if (history) |h| {
         statusStat(@src(), dvui.entypo.flow_line, h.commits.len, "commit", "commits");
@@ -20365,12 +21609,11 @@ fn statusBar() void {
         if (linkButtonTagged(@src(), caption, style.textMuted(), "status:zoom")) setZoom(1.0);
     }
 
-    // The keys, then the panels' folds — side by side, a side each.
+    // The keys, then the changes panel's fold, on its side.
     if (iconButtonTagged(@src(), "status_keys", "Keyboard shortcuts", dvui.entypo.keyboard, if (keys_open) style.accent() else style.textMuted(), "status:keys")) {
         keys_open = true;
         keys_rect = .{};
     }
-    panelToggle(@src(), &show_sidebar, dvui.entypo.align_left, "Branches panel — Ctrl+B", "status:sidebar");
     panelToggle(@src(), &show_detail, dvui.entypo.align_right, "Changes panel — Ctrl+J", "status:detail");
 
     // The version, at the far end: a click shows what this one can do.
@@ -20461,7 +21704,7 @@ const features = [_]Feature{
 fn featuresDialog() void {
     if (!features_open) return;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &features_rect, &features_open, style.background(), 0, dvui.Rect.all(0));
+    var fw = modalWindow(@src(), &features_rect, &features_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
@@ -20594,8 +21837,9 @@ fn statusPill(src: std.builtin.SourceLocation, color: dvui.Color, icon: []const 
     });
 }
 
-/// The new-tab page, and what shows with nothing open: the three ways to get a
-/// repository into a tab, and every one a tab has held, one click from open.
+/// The new-tab page, and what shows with nothing open: who you are, the
+/// three ways to get a repository into a tab, and every one a tab has held —
+/// found by typing, opened with Enter.
 fn startScreen() void {
     var scroll = dvui.scrollArea(@src(), .{}, .{
         .expand = .both,
@@ -20606,77 +21850,162 @@ fn startScreen() void {
 
     var page = dvui.box(@src(), .{ .dir = .vertical }, .{
         .gravity_x = 0.5,
-        .min_size_content = .{ .w = 640 },
-        .max_size_content = .width(640),
+        .min_size_content = .{ .w = START_W },
+        .max_size_content = .width(START_W),
         .background = false,
-        .padding = .{ .y = 56, .h = style.space.xxl },
+        .padding = .{ .y = 48, .h = style.space.xxl },
     });
     defer page.deinit();
 
-    // The wordmark whose letters read on this theme: white on dark.
-    _ = dvui.image(@src(), .{
-        .source = .{ .imageFile = .{
-            .bytes = if (dark_theme) @embedFile("brand/zit-logo-light.png") else @embedFile("brand/zit-logo-dark.png"),
-            .name = "zit logo",
-        } },
-        .shrink = .ratio,
-    }, .{
-        .gravity_x = 0.5,
-        .min_size_content = .{ .w = 216, .h = 120 },
-        .margin = .{ .h = style.space.sm },
-    });
+    {
+        // The mark, small, and a word to whoever git says is here.
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.xl } });
+        defer head.deinit();
+        _ = dvui.image(@src(), .{
+            .source = .{ .imageFile = .{
+                .bytes = if (dark_theme) @embedFile("brand/zit-logo-light.png") else @embedFile("brand/zit-logo-dark.png"),
+                .name = "zit logo",
+            } },
+            .shrink = .ratio,
+        }, .{
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 86, .h = 48 },
+            .max_size_content = .size(.{ .w = 86, .h = 48 }),
+            .margin = .{ .w = style.space.lg },
+        });
+        var words = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false });
+        defer words.deinit();
+        loadMe();
+        const first = std.mem.sliceTo(std.mem.trim(u8, me_name.items, " "), ' ');
+        if (first.len > 0)
+            dvui.label(@src(), "Hello, {s}", .{first}, .{ .font = style.title(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) })
+        else
+            dvui.label(@src(), "Welcome to Zit", .{}, .{ .font = style.title(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "Pick up where you left off, or bring a repository in.", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.xxs } });
+    }
 
     if (open_error) |message| {
         if (repo == null) dvui.label(@src(), "{s}", .{message}, .{
             .font = style.small(),
             .color_text = .{ .color = style.textFaint() },
-            .gravity_x = 0.5,
             .padding = dvui.Rect.all(0),
+            .margin = .{ .h = style.space.md },
         });
     }
 
     {
-        var cards = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
-            .expand = .horizontal,
-            .background = false,
-            .margin = .{ .y = style.space.xl, .h = 32 },
-        });
-        defer cards.deinit();
-
-        if (startCard(@src(), 0, dvui.entypo.folder, "Open a repository", "One already on this computer")) requestAction(.open_repo);
-        if (startCard(@src(), 1, dvui.entypo.download, "Clone", "From a URL — GitHub, GitLab, anywhere")) openRepoDialog(.clone);
-        if (startCard(@src(), 2, dvui.entypo.plus, "Start a new one", "An empty repository, in a new folder")) openRepoDialog(.create);
+        var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.xl } });
+        defer actions.deinit();
+        if (startAction(@src(), dvui.entypo.folder, "Open a folder", "Ctrl+O", "start:Open a repository", true)) requestAction(.open_repo);
+        if (startAction(@src(), dvui.entypo.download, "Clone", null, "start:Clone", false)) openRepoDialog(.clone);
+        if (startAction(@src(), dvui.entypo.plus, "New repository", null, "start:Start a new one", false)) openRepoDialog(.create);
     }
 
-    dvui.label(@src(), "RECENT", .{}, .{
-        .font = style.section(),
-        .color_text = .{ .color = style.textMuted() },
-        .margin = .{ .x = style.space.md, .h = style.space.sm },
-        .padding = dvui.Rect.all(0),
-    });
+    // What the list shows, as typed: by name or anywhere in the path.
+    const field = searchField(@src(), &start_filter, "Find a repository", "start_filter", .{ .h = style.space.lg });
+    focusOnce(field);
+    const needle = std.mem.trim(u8, start_filter.items, " ");
 
-    var any = false;
-    for (groups.items, 0..) |group, gi| {
-        for (group.tabs.items, 0..) |tab, ti| {
-            if (listedEarlier(gi, ti, tab.path)) continue;
-            any = true;
-            recentRow(@src(), gi * 1000 + ti, tab.path, true);
+    // Every row shown, in order, so the keys can walk them.
+    var shown: std.ArrayList([]const u8) = .empty;
+    defer shown.deinit(dvui.currentWindow().arena());
+    const arena = dvui.currentWindow().arena();
+    var open_n: usize = 0;
+    for (groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
+        if (listedEarlier(gi, ti, tab.path) or !startMatches(needle, tab.path)) continue;
+        shown.append(arena, tab.path) catch {};
+        open_n += 1;
+    };
+    for (recent.items) |path| {
+        if (isOpenTab(path) or !startMatches(needle, path)) continue;
+        shown.append(arena, path) catch {};
+    }
+
+    // Up and down walk the rows while the field has the keys; Enter opens
+    // the one picked.
+    if (start_pick >= shown.items.len) start_pick = shown.items.len -| 1;
+    if (dvui.focusedWidgetId() == field) for (dvui.events()) |*e| {
+        if (e.handled) continue;
+        const ke = switch (e.evt) {
+            .key => |k| k,
+            else => continue,
+        };
+        if (ke.action == .up) continue;
+        if (pressed(ke, .down, false)) {
+            e.handled = true;
+            if (start_pick + 1 < shown.items.len) start_pick += 1;
+        } else if (pressed(ke, .up, false)) {
+            e.handled = true;
+            start_pick -|= 1;
         }
-    }
-    for (recent.items, 0..) |path, i| {
-        if (isOpenTab(path)) continue;
-        any = true;
-        recentRow(@src(), 900_000 + i, path, false);
+    };
+    if (search_entered == field) {
+        search_entered = null;
+        if (start_pick < shown.items.len) requestOpenKnown(shown.items[start_pick]);
     }
 
-    if (!any) {
-        dvui.label(@src(), "Nothing yet. What you open is remembered here.", .{}, .{
+    for (shown.items, 0..) |path, i| {
+        if (i == 0 and open_n > 0) startHeading(@src(), 0, "Open in tabs", open_n);
+        if (i == open_n) startHeading(@src(), 1, "Recent", shown.items.len - open_n);
+        recentRow(@src(), i, path, i < open_n, i == start_pick);
+    }
+
+    if (shown.items.len == 0) {
+        dvui.label(@src(), "{s}", .{if (needle.len > 0) "No repository by that name." else "Nothing yet. What you open is remembered here."}, .{
             .font = style.small(),
             .color_text = .{ .color = style.textFaint() },
-            .margin = .{ .x = style.space.md },
+            .margin = .{ .x = style.space.md, .y = style.space.md },
             .padding = dvui.Rect.all(0),
         });
     }
+}
+
+const START_W: f32 = 720;
+/// What the start page's list is narrowed to, and the row the keys are on.
+var start_filter: std.ArrayList(u8) = .empty;
+var start_pick: usize = 0;
+
+fn startMatches(needle: []const u8, path: []const u8) bool {
+    return needle.len == 0 or std.ascii.indexOfIgnoreCase(path, needle) != null;
+}
+
+/// Over a run of rows: what they are, and how many.
+fn startHeading(src: std.builtin.SourceLocation, id: usize, title: []const u8, count: usize) void {
+    var line = dvui.box(src, .{ .dir = .horizontal }, .{ .id_extra = id, .background = false, .margin = .{ .x = style.space.md, .y = style.space.lg, .h = style.space.xs } });
+    defer line.deinit();
+    dvui.label(@src(), "{s}", .{title}, .{ .font = style.smallBold(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{d}", .{count}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
+}
+
+/// One of the three ways in, as a button in a row: the first filled in the
+/// accent, the others framed; `keys` after its caption.
+fn startAction(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8, keys: ?[]const u8, tag: []const u8, primary: bool) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{ .draw_focus = false }, .{
+        .tag = tag,
+        .background = true,
+        .color_fill = .{ .color = if (primary) style.accent() else style.surface() },
+        .color_fill_hover = .{ .color = if (primary) style.accent().lerp(style.text(), 0.15) else style.surfaceRaised() },
+        .border = dvui.Rect.all(if (primary) 0 else 1),
+        .color_border = .{ .color = style.border() },
+        .corners = style.radius.input,
+        .margin = .{ .w = style.space.sm },
+        .padding = .{ .x = style.space.lg, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
+    });
+    defer bw.deinit();
+    bw.processEvents();
+    bw.drawBackground();
+    const ink = if (primary) style.background() else style.text();
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+    defer line.deinit();
+    dvui.icon(@src(), "start_icon", icon, .{ .fill_color = .{ .color = if (primary) ink else style.accent() } }, .{
+        .min_size_content = .{ .w = 14, .h = 14 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+    });
+    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.bodyBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+    if (keys) |k| dvui.label(@src(), "{s}", .{k}, .{ .font = style.tiny(), .color_text = .{ .color = ink.opacity(0.7) }, .gravity_y = 0.5, .margin = .{ .x = style.space.md }, .padding = dvui.Rect.all(0) });
+    return bw.clicked();
 }
 
 fn isOpenTab(path: []const u8) bool {
@@ -20688,20 +22017,22 @@ fn isOpenTab(path: []const u8) bool {
     return false;
 }
 
-/// One repository on the start page: click to open, the × to forget it —
-/// which asks first.
-fn recentRow(src: std.builtin.SourceLocation, id: usize, path: []const u8, open: bool) void {
+/// One repository on the start page: its initials, as its tab shows them,
+/// its name and the folder it is in. A click opens it, Enter too when the
+/// keys are on it; the × — on hover — forgets it, after asking.
+fn recentRow(src: std.builtin.SourceLocation, id: usize, path: []const u8, open: bool, picked: bool) void {
     var row_box = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
         .expand = .horizontal,
         .background = false,
     });
     defer row_box.deinit();
+    const hover = row_box.data().borderRectScale().r.contains(dvui.currentWindow().mouse_pt);
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .expand = .horizontal,
-        .min_size_content = .{ .h = 40 },
+        .min_size_content = .{ .h = 44 },
         .background = false,
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(0),
@@ -20710,18 +22041,21 @@ fn recentRow(src: std.builtin.SourceLocation, id: usize, path: []const u8, open:
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .both,
-            .background = bw.hovered(),
-            .color_fill = .{ .color = style.rowHover() },
+            .background = picked or bw.hovered(),
+            .color_fill = .{ .color = if (picked) style.accentDim() else style.rowHover() },
             .corners = style.radius.input,
             .padding = .{ .x = style.space.md, .w = style.space.md },
         });
         defer row.deinit();
 
-        dvui.icon(@src(), "recent_icon", dvui.entypo.folder, .{ .fill_color = .{ .color = style.accent() } }, .{
-            .min_size_content = .{ .w = 14, .h = 14 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.md },
-        });
+        const trimmed = std.mem.trimEnd(u8, path, "/\\");
+        {
+            // One column for the initials, however wide two letters are, so
+            // the names line up.
+            var mark = dvui.box(@src(), .{}, .{ .min_size_content = .{ .w = 34 }, .max_size_content = .width(34), .gravity_y = 0.5, .background = false });
+            defer mark.deinit();
+            tabBadge(git.repoName(path), open or picked);
+        }
 
         var text = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
@@ -20729,41 +22063,35 @@ fn recentRow(src: std.builtin.SourceLocation, id: usize, path: []const u8, open:
             .background = false,
             .padding = dvui.Rect.all(0),
         });
-        defer text.deinit();
-
-        {
-            var name_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-            defer name_row.deinit();
-            dvui.label(@src(), "{s}", .{git.repoName(path)}, .{
-                .font = style.bodyBold(),
-                .color_text = .{ .color = style.text() },
-                .padding = dvui.Rect.all(0),
-            });
-            if (open) {
-                dvui.label(@src(), "open", .{}, .{
-                    .font = style.tiny(),
-                    .color_text = .{ .color = style.accent() },
-                    .background = true,
-                    .color_fill = .{ .color = style.accentDim() },
-                    .corners = style.radius.tag,
-                    .gravity_y = 0.5,
-                    .margin = .{ .x = style.space.sm },
-                    .padding = .{ .x = style.space.xs, .w = style.space.xs },
-                });
-            }
-        }
-        dvui.label(@src(), "{s}", .{path}, .{
+        dvui.label(@src(), "{s}", .{git.repoName(path)}, .{
+            .font = style.bodyBold(),
+            .color_text = .{ .color = style.text() },
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.label(@src(), "{s}", .{std.fs.path.dirname(trimmed) orelse trimmed}, .{
             .font = style.tiny(),
             .color_text = .{ .color = style.textFaint() },
             .max_size_content = .width(0),
             .expand = .horizontal,
             .padding = dvui.Rect.all(0),
         });
+        text.deinit();
+
+        if (picked) dvui.label(@src(), "Enter", .{}, .{
+            .font = style.tiny(),
+            .color_text = .{ .color = style.accent() },
+            .background = true,
+            .color_fill = .{ .color = style.background() },
+            .corners = style.radius.tag,
+            .gravity_y = 0.5,
+            .margin = .{ .x = style.space.sm },
+            .padding = .{ .x = style.space.xs, .w = style.space.xs },
+        });
     }
     if (bw.clicked()) requestOpenKnown(path);
     bw.deinit();
 
-    if (iconButton(@src(), "forget_repo", "Remove from Zit…", dvui.entypo.cross, style.textFaint())) {
+    if (iconButton(@src(), "forget_repo", "Remove from Zit…", dvui.entypo.cross, if (hover or picked) style.textFaint() else dvui.Color.transparent)) {
         askForget(path);
     }
 }
@@ -20837,16 +22165,14 @@ fn forgetDialog() void {
 
     var open = true;
     const win = dvui.windowRect();
-    var fw = modalWindow(@src(), &forget_rect, &open, style.surface(), 420, dvui.Rect.all(style.space.lg));
+    var fw = modalWindow(@src(), &forget_rect, &open, style.surface(), 420, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
-    dvui.label(@src(), "Remove {s} from Zit?", .{git.repoName(path)}, .{
-        .font = style.title(),
-        .color_text = .{ .color = style.text() },
-        .padding = dvui.Rect.all(0),
-        .margin = .{ .h = style.space.sm },
-    });
+    var title_buf: [160]u8 = undefined;
+    dialogHeader(@src(), dvui.entypo.trash, std.fmt.bufPrint(&title_buf, "Remove {s} from Zit?", .{git.repoName(path)}) catch "Remove it from Zit?", path, &open);
+
+    var body = dialogBody(@src(), null);
     // Two lines: a label does not wrap.
     for ([_][]const u8{ "It leaves the recent list and any tab it is open in.", "The folder and everything in it stay where they are." }, 0..) |line, i| {
         dvui.label(@src(), "{s}", .{line}, .{
@@ -20854,18 +22180,11 @@ fn forgetDialog() void {
             .font = style.small(),
             .color_text = .{ .color = style.textMuted() },
             .padding = dvui.Rect.all(0),
-            .margin = .{ .h = if (i == 1) style.space.sm else 0 },
         });
     }
-    dvui.label(@src(), "{s}", .{path}, .{
-        .font = style.mono(),
-        .color_text = .{ .color = style.textFaint() },
-        .max_size_content = .width(420),
-        .padding = dvui.Rect.all(0),
-        .margin = .{ .h = style.space.lg },
-    });
+    body.deinit();
 
-    var foot = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
+    var foot = dialogFooter(@src());
     defer foot.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -20879,53 +22198,6 @@ fn runForget() void {
     const path = forget_path orelse return;
     defer clearForget();
     forgetRepo(path);
-}
-
-/// One of the three ways in: a big target with an icon, a name and a line on
-/// what it is for.
-fn startCard(src: std.builtin.SourceLocation, id: usize, icon: []const u8, title: []const u8, hint: []const u8) bool {
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(src, .{ .draw_focus = false }, .{
-        .tag = frameTag("start", title),
-        .id_extra = id,
-        .expand = .horizontal,
-        .min_size_content = .{ .h = 96 },
-        .background = false,
-        .margin = .{ .x = style.space.xs, .w = style.space.xs },
-        .padding = dvui.Rect.all(0),
-    });
-    defer bw.deinit();
-    bw.processEvents();
-
-    var card = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = true,
-        .color_fill = .{ .color = if (bw.hovered()) style.surfaceRaised() else style.surface() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = if (bw.hovered()) style.accent() else style.border() },
-        .corners = style.radius.row,
-        .padding = dvui.Rect.all(style.space.lg),
-    });
-    defer card.deinit();
-
-    dvui.icon(@src(), "card_icon", icon, .{ .fill_color = .{ .color = style.accent() } }, .{
-        .min_size_content = .{ .w = 20, .h = 20 },
-        .margin = .{ .h = style.space.md },
-    });
-    dvui.label(@src(), "{s}", .{title}, .{
-        .font = style.bodyBold(),
-        .color_text = .{ .color = style.text() },
-        .padding = dvui.Rect.all(0),
-    });
-    dvui.label(@src(), "{s}", .{hint}, .{
-        .font = style.tiny(),
-        .color_text = .{ .color = style.textFaint() },
-        .max_size_content = .width(0),
-        .expand = .horizontal,
-        .padding = .{ .y = style.space.xxs },
-    });
-
-    return bw.clicked();
 }
 
 /// Centred message for a pane with nothing in it yet.
@@ -21177,6 +22449,11 @@ fn resetUiGlobals() void {
     forgetTabs();
     groups.deinit(gpa);
     groups = .empty;
+    workspaces.deinit(gpa);
+    workspaces = .empty;
+    ws_name.deinit(gpa);
+    ws_name = .empty;
+    ws_dialog = null;
     tab_revealed = null;
     config_dir.deinit(gpa);
     config_dir = .empty;
@@ -21212,9 +22489,25 @@ fn resetUiGlobals() void {
     sidebar_filter.deinit(gpa);
     default_branch.deinit(gpa);
     default_branch = .empty;
+    editor_cmd.deinit(gpa);
+    editor_cmd = .empty;
+    terminal_cmd.deinit(gpa);
+    terminal_cmd = .empty;
     signing_key.deinit(gpa);
     signing_key = .empty;
     signing_loaded = false;
+    if (repo_prefs_job) |j| j.deinit(app_io);
+    repo_prefs_job = null;
+    repo_prefs_loaded = false;
+    repo_name_local.deinit(gpa);
+    repo_name_local = .empty;
+    repo_email_local.deinit(gpa);
+    repo_email_local = .empty;
+    repo_settings_path.deinit(gpa);
+    repo_settings_path = .empty;
+    if (editors_job) |j| j.deinit(app_io);
+    editors_job = null;
+    editors_loaded = false;
     if (signing_job) |j| j.deinit(app_io);
     signing_job = null;
     if (repo_config_job) |j| j.deinit(app_io);
@@ -21226,9 +22519,6 @@ fn resetUiGlobals() void {
     job_after = .remote;
     action_after = .remote;
     sidebar_filter = .empty;
-    ws_name.deinit(gpa);
-    ws_name = .empty;
-    ws_dialog = null;
 
     clearRecent();
     recent.deinit(gpa);
@@ -21294,6 +22584,7 @@ fn resetUiGlobals() void {
 fn forgetTabs() void {
     for (groups.items) |*group| group.deinit();
     groups.clearRetainingCapacity();
+    freeWorkspaces();
     clearRecent();
     active_group = 0;
     active_tab = 0;
@@ -23385,7 +24676,105 @@ test "a tab dragged onto another takes its place, and the one shown stays shown"
     try std.testing.expectEqualStrings("c", repo_name);
 }
 
-test "workspaces keep their own tabs, and switching opens the one each was on" {
+test "workspaces hold their own groups, and switching opens the tab each was on" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try useTestConfig(root);
+    try git.init();
+    defer git.shutdown();
+    defer closeRepo();
+    defer clearCommandError();
+
+    var buf_a: [std.fs.max_path_bytes]u8 = undefined;
+    var buf_b: [std.fs.max_path_bytes]u8 = undefined;
+    var buf_c: [std.fs.max_path_bytes]u8 = undefined;
+    const a = try std.fmt.bufPrint(&buf_a, "{s}/a", .{root});
+    const b = try std.fmt.bufPrint(&buf_b, "{s}/b", .{root});
+    const c = try std.fmt.bufPrint(&buf_c, "{s}/c", .{root});
+    inline for (.{ "a", "b", "c" }) |name| try expectGit(root, &.{ "init", "-q", "-b", "main", name });
+
+    loadWorkspace();
+    try std.testing.expectEqual(@as(usize, 1), workspaces.items.len);
+    openAndRemember(a);
+    openAndRemember(b);
+    // Groups as ever, inside the workspace.
+    groupTab("Side", 0, 1);
+    try std.testing.expectEqualStrings("Side", groups.items[1].name);
+    try std.testing.expectEqual(@as(usize, 0), groups.items[1].ws);
+
+    // A new workspace: empty, its own group, nothing open.
+    const w = newWorkspace("Client", 3).?;
+    selectWorkspace(w);
+    try std.testing.expectEqual(w, active_ws);
+    try std.testing.expect(repo == null and new_tab_open);
+    openAndRemember(c);
+    try std.testing.expectEqual(w, groups.items[active_group].ws);
+
+    // Back: b, where it was, in its group.
+    selectWorkspace(0);
+    try std.testing.expectEqualStrings("b", repo_name);
+    try std.testing.expectEqualStrings("Side", groups.items[active_group].name);
+    selectWorkspace(w);
+    try std.testing.expectEqualStrings("c", repo_name);
+
+    // All of it after a restart.
+    saveWorkspace();
+    closeRepo();
+    forgetTabs();
+    loadWorkspace();
+    try std.testing.expectEqual(@as(usize, 2), workspaces.items.len);
+    try std.testing.expectEqualStrings("Client", workspaces.items[1].name);
+    try std.testing.expectEqual(@as(u8, 3), workspaces.items[1].color);
+    var side = false;
+    for (groups.items) |g| side = side or (std.mem.eql(u8, g.name, "Side") and g.ws == 0);
+    try std.testing.expect(side);
+
+    // Deleted: its tabs to the recent list, the other workspace stays.
+    deleteWorkspace(1);
+    try std.testing.expectEqual(@as(usize, 1), workspaces.items.len);
+    for (groups.items) |g| try std.testing.expectEqual(@as(usize, 0), g.ws);
+}
+
+test "a group is made in a dialog, with its colour and no name" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try useTestConfig(root);
+    try git.init();
+    defer git.shutdown();
+    defer closeRepo();
+    var buf_a: [std.fs.max_path_bytes]u8 = undefined;
+    const a = try std.fmt.bufPrint(&buf_a, "{s}/a", .{root});
+    try expectGit(root, &.{ "init", "-q", "-b", "main", "a" });
+    loadWorkspace();
+    openAndRemember(a);
+
+    group_target = .{ 0, 0 };
+    openWorkspaceDialog(.group);
+    try std.testing.expect(ws_dialog == .group);
+    try std.testing.expect(prompt == null);
+    // Only a colour asked for: a group is its dot.
+    ws_color = 4;
+    applyWorkspaceDialog();
+    try std.testing.expect(ws_dialog == null);
+    // Its only tab gone, the group it came from goes too.
+    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
+    try std.testing.expectEqualStrings(GROUP_MARK, groups.items[0].name);
+    try std.testing.expectEqual(@as(u8, 4), groups.items[0].color);
+    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
+}
+
+test "a group keeps its own tabs, and the last group cannot be closed" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
@@ -23404,46 +24793,33 @@ test "workspaces keep their own tabs, and switching opens the one each was on" {
 
     var buf_a: [std.fs.max_path_bytes]u8 = undefined;
     var buf_b: [std.fs.max_path_bytes]u8 = undefined;
-    var buf_c: [std.fs.max_path_bytes]u8 = undefined;
     const a = try std.fmt.bufPrint(&buf_a, "{s}/a", .{root});
     const b = try std.fmt.bufPrint(&buf_b, "{s}/b", .{root});
-    const c = try std.fmt.bufPrint(&buf_c, "{s}/c", .{root});
     try expectGit(root, &.{ "init", "-q", "-b", "main", "a" });
     try expectGit(root, &.{ "init", "-q", "-b", "main", "b" });
-    try expectGit(root, &.{ "init", "-q", "-b", "main", "c" });
 
     loadWorkspace();
     openAndRemember(a);
+
     openAndRemember(b);
-    // Both in the default workspace.
+    // Two tabs in no group to begin with.
     try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqualStrings("Default", workspaceName(groups.items[0]));
+    try std.testing.expectEqualStrings("", groups.items[0].name);
     try std.testing.expectEqual(@as(usize, 2), groups.items[0].tabs.items.len);
 
-    // A new workspace starts empty, on its start page, nothing open.
-    newWorkspace("Side");
+    // b into a group of its own, still the one open.
+    groupTab("Side", 0, 1);
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+    try std.testing.expectEqualStrings("Side", groups.items[1].name);
     try std.testing.expectEqual(@as(usize, 1), active_group);
-    try std.testing.expect(repo == null and new_tab_open);
-    // What is opened there is its own.
-    openAndRemember(c);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[1].tabs.items.len);
-    try std.testing.expectEqualStrings("c", repo_name);
-
-    // Back to Default: the repository it was on, b, not its first tab.
-    selectGroup(0);
     try std.testing.expectEqualStrings("b", repo_name);
-    // And back again: c.
-    selectGroup(1);
-    try std.testing.expectEqualStrings("c", repo_name);
 
-    // A tab moved over; the workspace it leaves keeps the rest.
-    selectGroup(0);
-    moveTab(0, 0, 1);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 2), groups.items[1].tabs.items.len);
+    // A tab of the other group, picked straight from the strip.
+    selectTabIn(0, 0);
+    try std.testing.expectEqualStrings("a", repo_name);
 
-    // Everything survives the restart: names, colours, tabs, where each was.
+    // Both groups survive the restart, with their tabs, colour and fold.
+    groups.items[1].collapsed = true;
     groups.items[1].color = 3;
     saveWorkspace();
     closeRepo();
@@ -23451,47 +24827,20 @@ test "workspaces keep their own tabs, and switching opens the one each was on" {
     loadWorkspace();
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
     try std.testing.expectEqualStrings("Side", groups.items[1].name);
+    try std.testing.expect(groups.items[1].collapsed);
     try std.testing.expectEqual(@as(u8, 3), groups.items[1].color);
-    try std.testing.expectEqual(@as(usize, 2), groups.items[1].tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), groups.items[1].tabs.items.len);
 
-    // A workspace whose last tab closes stays, empty, on its start page.
-    selectGroup(0);
-    closeTab(0);
+    // Out of the group again: the group, empty, goes.
+    ungroupTab(1, 0);
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expect(repo == null and new_tab_open);
-    new_tab_open = false;
+    try std.testing.expectEqualStrings("", groups.items[1].name);
 
-    // Deleting one closes its tabs; the last one standing stays.
-    closeGroup(1);
+    // Closing a group closes its tabs; the last one standing stays.
+    closeGroup(0);
     closeGroup(0);
     try std.testing.expectEqual(@as(usize, 1), groups.items.len);
     try std.testing.expectEqual(@as(usize, 0), groups.items[0].tabs.items.len);
-}
-
-test "a workspace is named in a dialog, not a bar" {
-    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1000, .h = 700 } });
-    defer t.deinit();
-    gpa = std.testing.allocator;
-    app_io = std.testing.io;
-    try style.applyEmbedded(gpa, true);
-    defer resetUiGlobals();
-    loadWorkspace();
-    try dvui.testing.settle(frameArrowCursor);
-
-    try clickAt(try tagCenter("workspace:switcher"));
-    try clickAt(try tagCenter("menu:New workspace…"));
-    try std.testing.expect(ws_dialog == .new);
-    try std.testing.expect(prompt == null);
-    try ws_name.appendSlice(gpa, "Client");
-    ws_color = 4;
-    try clickAt(try tagCenter("dialog:Create"));
-    try dvui.testing.settle(frameArrowCursor);
-
-    try std.testing.expect(ws_dialog == null);
-    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqualStrings("Client", groups.items[1].name);
-    try std.testing.expectEqual(@as(u8, 4), groups.items[1].color);
-    try std.testing.expectEqual(@as(usize, 1), active_group);
 }
 
 test "First-parent shows the mainline through a merge, All branches the side branch too" {
@@ -23524,25 +24873,6 @@ test "First-parent shows the mainline through a merge, All branches the side bra
     for (history.?.commits) |c| try std.testing.expect(!std.mem.eql(u8, c.summary, "on the side"));
     // The merge is still a merge, drawn without a line to the side.
     try std.testing.expectEqual(@as(u16, 1), lanes.?.lane_count);
-}
-
-test "the ungrouped runs of an old workspace file become one Default" {
-    gpa = std.testing.allocator;
-    defer resetUiGlobals();
-    for ([_][]const u8{ "", "Work", "" }, 0..) |name, i| {
-        var group: TabGroup = .{ .name = try gpa.dupe(u8, name), .tabs = .empty };
-        try group.tabs.append(gpa, .{ .path = try std.fmt.allocPrint(gpa, "/r{d}/", .{i}) });
-        try groups.append(gpa, group);
-    }
-    active_group = 2;
-    active_tab = 0;
-    mergeDefaultWorkspaces();
-    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqual(@as(usize, 2), groups.items[0].tabs.items.len);
-    try std.testing.expectEqualStrings("Work", groups.items[1].name);
-    // The tab shown is still the one shown, now in Default.
-    try std.testing.expectEqual(@as(usize, 0), active_group);
-    try std.testing.expectEqualStrings("/r2/", groups.items[0].tabs.items[active_tab].path);
 }
 
 /// Type `text` into the open prompt and answer it, the way Enter would.
@@ -24259,7 +25589,7 @@ test "the avatar's menu opens the signing card, and asks before signing out" {
     try std.testing.expect(settings_open);
     try std.testing.expectEqual(@as(usize, 6), settings_page);
     // Another section from the list, and back.
-    try clickAt(try tagCenter("settings:GitHub"));
+    try clickAt(try tagCenter("settings:Integrations"));
     try std.testing.expectEqual(@as(usize, 3), settings_page);
     try clickAt(try tagCenter("settings:Commit signing"));
     try std.testing.expectEqual(@as(usize, 6), settings_page);
@@ -27108,27 +28438,23 @@ test "a closed tab is remembered, and only forgetting removes it" {
     try std.testing.expectEqual(@as(usize, 1), active_group);
     try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
 
-    // Forgotten while it is the only tab of the active workspace and a tab
-    // of another one too: gone from both, and the workspace stays, empty, on
-    // its start page — b is not opened again.
+    // Forgotten while it is the only tab of the active group and a tab of
+    // another one too: the group goes, and what opens is not b again.
     try groups.items[0].tabs.append(gpa, .{ .path = try gpa.dupe(u8, b_path) });
     forgetRepo(b_path);
-    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
     try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 0), groups.items[1].tabs.items.len);
-    try std.testing.expect(repo == null and new_tab_open);
-    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
-    new_tab_open = false;
-
-    // Forgotten while a tab of a workspace not shown: that workspace keeps
-    // its place, and what is open stays open.
-    selectGroup(1);
-    openAndRemember(b);
-    selectGroup(0);
     try std.testing.expectEqualStrings("a", repo_name);
-    forgetRepo(b_path);
+    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
+
+    // Forgotten while the only tab of a group that is not the active one: no
+    // empty group left behind.
+    openAndRemember(b);
+    groupTab("Solo", 0, 1);
+    selectTabIn(0, 0);
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqual(@as(usize, 0), groups.items[1].tabs.items.len);
+    forgetRepo(b_path);
+    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
     try std.testing.expectEqualStrings("a", repo_name);
 }
 
@@ -27506,13 +28832,14 @@ test "the split view sets each removed line against the line that replaced it" {
     buildSplitRows();
 
     const r = split_rows.items;
-    // file, hunk, a|a, b|B, c|-, d|d
-    try std.testing.expectEqual(@as(usize, 6), r.len);
-    try std.testing.expectEqual(@as(u32, 2), r[3].left);
-    try std.testing.expectEqual(@as(u32, 4), r[3].right);
-    try std.testing.expectEqual(@as(u32, 3), r[4].left);
-    try std.testing.expectEqual(NO_LINE, r[4].right);
-    try std.testing.expectEqual(@as(u32, 5), r[5].left);
+    // file (two rows high), hunk, a|a, b|B, c|-, d|d
+    try std.testing.expectEqual(@as(usize, 7), r.len);
+    try std.testing.expect(r[1].kind == .pad);
+    try std.testing.expectEqual(@as(u32, 2), r[4].left);
+    try std.testing.expectEqual(@as(u32, 4), r[4].right);
+    try std.testing.expectEqual(@as(u32, 3), r[5].left);
+    try std.testing.expectEqual(NO_LINE, r[5].right);
+    try std.testing.expectEqual(@as(u32, 5), r[6].left);
 }
 
 test "a commit date reads as a date, and fits its column" {
@@ -27633,3 +28960,47 @@ test "changes picked: asked by path, taken off again, one side at a time" {
     try std.testing.expect(!isChangePicked(.staged, "c.txt"));
     try std.testing.expectEqual(@as(u32, 0), picked_set.count());
 }
+
+
+
+
+
+
+test "a repository's own settings are written to its config and read back" {
+    gpa = std.testing.allocator;
+    app_io = std.testing.io;
+    defer resetUiGlobals();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try git.init();
+    defer git.shutdown();
+    try makeTestRepo(&tmp, dir, "a.txt", "a\n");
+    openRepo(dir);
+    defer closeRepo();
+    repo_settings_path.appendSlice(gpa, dir) catch unreachable;
+
+    setLocalConfig("user.name", "Work Me");
+    setLocalConfig("pull.ff", "only");
+    setLocalConfig("commit.gpgsign", "false");
+    while (!repo_prefs_loaded) loadRepoPrefs();
+    try std.testing.expectEqualStrings("Work Me", repo_name_local.items);
+    try std.testing.expect(repo_pull == .ff_only);
+    try std.testing.expect(repo_sign == .off);
+    try std.testing.expect(repo_prune == .global);
+
+    // Back to as everywhere: unset, and nothing said about it.
+    setLocalConfig("pull.ff", "");
+    setLocalConfig("pull.ff", "");
+    while (!repo_prefs_loaded) loadRepoPrefs();
+    try std.testing.expect(repo_pull == .global);
+    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+}
+
+
+
+
+
+
+
