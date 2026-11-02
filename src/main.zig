@@ -1554,7 +1554,7 @@ fn ensureDiff() void {
     if (diff == null or !sameDiff(diff.?, next)) picked_lines.clearRetainingCapacity();
 
     var rows: usize = 0;
-    for (next.files) |f| rows += 1 + f.lines.len;
+    for (next.files) |f| rows += FILE_ROWS + f.lines.len;
 
     if (diff) |*d| d.deinit();
     diff = next;
@@ -1592,8 +1592,13 @@ var diff_split: bool = false;
 
 const NO_LINE = std.math.maxInt(u32);
 
+/// A file's header in the diff: two lines high, room for its name and its
+/// buttons.
+const FILE_ROWS = 2;
+
 const SplitRow = struct {
-    kind: enum { file, hunk, pair },
+    /// `pad`: the header's second line, drawn by the first.
+    kind: enum { file, pad, hunk, pair },
     file: u32,
     /// Indices into that file's lines; NO_LINE where the side has nothing.
     left: u32 = NO_LINE,
@@ -1615,6 +1620,7 @@ fn buildSplitRows() void {
     for (d.files, 0..) |file, fi_usize| {
         const fi: u32 = @intCast(fi_usize);
         split_rows.append(gpa, .{ .kind = .file, .file = fi }) catch return;
+        split_rows.append(gpa, .{ .kind = .pad, .file = fi }) catch return;
         var dels: std.ArrayList(u32) = .empty;
         defer dels.deinit(gpa);
         var adds: std.ArrayList(u32) = .empty;
@@ -1754,11 +1760,11 @@ fn diffModeToggle(src: std.builtin.SourceLocation) void {
                 .background = selected or bw.hovered(),
                 .color_fill = .{ .color = if (selected) style.accentDim() else style.rowHover() },
                 .corners = style.radius.input,
-                .padding = .{ .x = style.space.sm, .w = style.space.sm, .y = 1, .h = 1 },
+                .padding = .{ .x = style.space.md, .w = style.space.md, .y = style.space.xs, .h = style.space.xs },
             });
             defer cell.deinit();
             dvui.label(@src(), "{s}", .{if (split) "Split" else "Unified"}, .{
-                .font = if (selected) style.tinyBold() else style.tiny(),
+                .font = if (selected) style.smallBold() else style.small(),
                 .color_text = .{ .color = if (selected) style.accent() else style.textFaint() },
                 .padding = dvui.Rect.all(0),
             });
@@ -6125,6 +6131,9 @@ fn foldedRun(id: usize, author: []const u8, hidden: usize) bool {
     return chipButton(@src(), dvui.entypo.chevron_small_down, std.fmt.bufPrint(&buf, "Show {d} more from {s}", .{ hidden, author }) catch "Show more", false);
 }
 
+/// A heading in a comment: above its text, not the same size as it.
+const MD_HEADING_SIZE: f32 = 15;
+
 /// A comment's text, read the way the host would show it — enough of
 /// Markdown to read: headings, lists, quotes, code blocks; `**` and `` ` ``
 /// marks dropped rather than shown.
@@ -6166,7 +6175,7 @@ fn markdownBody(body: []const u8) void {
         if (trimmed[0] == '#') {
             const words = std.mem.trimStart(u8, clean, "# ");
             var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = n, .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.xs } });
-            tl.addText(words, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() } });
+            tl.addText(words, .{ .font = style.bodyBold().withSize(MD_HEADING_SIZE), .color_text = .{ .color = style.text() } });
             tl.deinit();
         } else if (std.mem.startsWith(u8, trimmed, "- ") or std.mem.startsWith(u8, trimmed, "* ") or std.mem.startsWith(u8, trimmed, "+ ")) {
             var item = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = n, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.sm } });
@@ -6188,9 +6197,9 @@ fn markdownBody(body: []const u8) void {
                 });
                 if (checked) dvui.icon(@src(), "md_tick", dvui.entypo.check, .{ .fill_color = .{ .color = style.textOnAccent() } }, .{ .min_size_content = .{ .w = 9, .h = 9 }, .gravity_x = 0.5, .gravity_y = 0.5 });
                 tick.deinit();
-            } else dvui.label(@src(), "•", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+            } else dvui.label(@src(), "•", .{}, .{ .font = style.body(), .color_text = .{ .color = style.textMuted() }, .margin = .{ .w = style.space.sm }, .padding = dvui.Rect.all(0) });
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(if (box_item) std.mem.trimStart(u8, clean[2..], "[xX ] ") else clean[2..], .{ .font = style.small(), .color_text = .{ .color = style.text() } });
+            tl.addText(if (box_item) std.mem.trimStart(u8, clean[2..], "[xX ] ") else clean[2..], .{ .font = style.body(), .color_text = .{ .color = style.text() } });
             tl.deinit();
         } else if (trimmed[0] == '>') {
             // Filled as the card under it: dvui fills a box with a border on
@@ -6198,11 +6207,11 @@ fn markdownBody(body: []const u8) void {
             var quote = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = n, .expand = .horizontal, .background = true, .color_fill = .{ .color = style.surface() }, .border = .{ .x = 3 }, .color_border = .{ .color = style.border() }, .padding = .{ .x = style.space.sm }, .margin = .{ .y = 2, .h = 2 } });
             defer quote.deinit();
             var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(std.mem.trimStart(u8, clean, "> "), .{ .font = style.small(), .color_text = .{ .color = style.textMuted() } });
+            tl.addText(std.mem.trimStart(u8, clean, "> "), .{ .font = style.body(), .color_text = .{ .color = style.textMuted() } });
             tl.deinit();
         } else {
             var tl = dvui.textLayout(@src(), .{}, .{ .id_extra = n, .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
-            tl.addText(clean, .{ .font = style.small(), .color_text = .{ .color = style.text() } });
+            tl.addText(clean, .{ .font = style.body(), .color_text = .{ .color = style.text() } });
             tl.deinit();
         }
     }
@@ -6317,13 +6326,11 @@ var pr_tab: PrTab = .conversation;
 /// who wants what merged where, who reviews it, its labels, and a line on
 /// what still stands between it and a merge.
 fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) void {
+    // On the page's own ground: the title is what stands out, not its box.
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
-        .border = .{ .h = 1 },
-        .color_border = .{ .color = style.border() },
-        .padding = .{ .x = inset, .y = style.space.lg, .w = inset, .h = style.space.md },
+        .background = false,
+        .padding = .{ .x = inset, .y = style.space.xl, .w = inset, .h = style.space.sm },
     });
     defer head.deinit();
 
@@ -6340,9 +6347,9 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
         else
             .{ "Open", style.success() };
         statePill(word, hue);
-        dvui.label(@src(), "#{d}", .{d.number}, .{ .font = style.title(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "#{d}", .{d.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
-        tl.addText(d.title, .{ .font = style.title(), .color_text = .{ .color = style.text() } });
+        tl.addText(d.title, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.text() } });
         tl.deinit();
 
         // What to do with it, short of answering it: icons at the end of
@@ -6393,6 +6400,9 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
     mergeReadiness(d);
 }
 
+/// A request's title: the largest words on its page.
+const PR_TITLE_SIZE: f32 = 18;
+
 /// The request `number` as the list it was picked in has it.
 fn listedRequest(number: u32) ?pr.Request {
     for (pr.list) |r| if (r.number == number) return r;
@@ -6406,8 +6416,7 @@ fn loadingHeader(r: pr.Request) void {
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .tag = "pr:loading",
         .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
+        .background = false,
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
         .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.md },
@@ -6417,9 +6426,9 @@ fn loadingHeader(r: pr.Request) void {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
         if (r.draft) statePill("Draft", style.textMuted()) else statePill("Open", style.success());
-        dvui.label(@src(), "#{d}", .{r.number}, .{ .font = style.title(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "#{d}", .{r.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
-        tl.addText(r.title, .{ .font = style.title(), .color_text = .{ .color = style.text() } });
+        tl.addText(r.title, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.text() } });
         tl.deinit();
     }
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
@@ -6730,20 +6739,11 @@ fn mergeReadiness(d: pr.Detail) void {
         if (mergeUnknown(d)) break :blk .{ dvui.entypo.clock, style.textMuted(), "GitHub is still working out whether it can merge…" };
         break :blk .{ dvui.entypo.check, style.success(), if (t.passed > 0) std.fmt.bufPrint(&buf, "Ready to merge: {d} check{s} passed", .{ t.passed, plural(t.passed) }) catch "" else "Ready to merge" };
     };
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.tint(hue) },
-        .corners = style.radius.input,
-        .margin = .{ .y = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.xs, .h = style.space.xs },
-        .min_size_content = .{ .h = 26 },
-    });
+    var bar = alertBox(@src(), 0, hue, icon, .{ .y = style.space.md, .h = style.space.xs });
     defer bar.deinit();
-    dvui.icon(@src(), "ready_icon", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 13, .h = 13 }, .gravity_y = 0.5, .margin = .{ .w = style.space.md } });
-    dvui.label(@src(), "{s}", .{text}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
+    alertText(@src(), text, hue);
     if (d.auto_merge) tinyBadge(@src(), 0, "auto-merge on", style.accent());
-    readinessAction(d, t);
+    readinessAction(d, t, hue);
 
     // Asked again every few seconds while GitHub has no answer yet — about
     // one still open: a merged one's stays unknown for good.
@@ -6788,42 +6788,42 @@ fn rerequestReview(d: pr.Detail) void {
 /// The one thing to do next about a request, at the end of its readiness
 /// line: resolve its conflicts here, bring it up to date on GitHub, look at
 /// the failing checks, put a draft up for review, or merge it.
-fn readinessAction(d: pr.Detail, t: anytype) void {
+fn readinessAction(d: pr.Detail, t: anytype, hue: dvui.Color) void {
     if (!requestOpen(d)) return;
     if (std.mem.eql(u8, d.mergeable, "CONFLICTING")) {
         // Rebased onto its base, here: the conflicts come up one by one.
-        if (!d.fork and opButton(@src(), "Rebase onto it here", "pr:resolve")) resolveRequestLocally(d, true);
-        if (!d.fork and linkButtonTagged(@src(), "or merge it in", style.textMuted(), "pr:resolve_merge")) resolveRequestLocally(d, false);
+        if (!d.fork and alertButton(@src(), "Rebase onto it here", hue, "pr:resolve")) resolveRequestLocally(d, true);
+        if (!d.fork and linkButtonTagged(@src(), "or merge it in", hue, "pr:resolve_merge")) resolveRequestLocally(d, false);
         return;
     }
     // In the order the line above says what is in the way.
     if (t.failed > 0) {
-        if (opButton(@src(), "See the checks", "pr:see_checks")) pr_tab = .checks;
+        if (alertButton(@src(), "See the checks", hue, "pr:see_checks")) pr_tab = .checks;
         return;
     }
     // Changes asked for: to the conversations left, then onto its branch to
     // make them, then the reviewers asked again.
     if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) {
-        if (openThreads(d) > 0 and linkButtonTagged(@src(), "Show them", style.textMuted(), "pr:to_threads")) {
+        if (openThreads(d) > 0 and linkButtonTagged(@src(), "Show them", hue, "pr:to_threads")) {
             pr_tab = .conversation;
             pr_scroll_thread = true;
         }
         if (!onRequestBranch(d)) {
-            if (opButton(@src(), "Check out to fix", "pr:fix")) checkoutRequest(d.number, d.head, d.fork);
-        } else if (opButton(@src(), "Re-request review", "pr:rerequest")) rerequestReview(d);
+            if (alertButton(@src(), "Check out to fix", hue, "pr:fix")) checkoutRequest(d.number, d.head, d.fork);
+        } else if (alertButton(@src(), "Re-request review", hue, "pr:rerequest")) rerequestReview(d);
         return;
     }
     if (std.mem.eql(u8, d.merge_state, "BEHIND")) {
-        if (opButton(@src(), "Update branch", "pr:update")) updateRequestBranch(d);
+        if (alertButton(@src(), "Update branch", hue, "pr:update")) updateRequestBranch(d);
         return;
     }
     if (d.draft) {
-        if (opButton(@src(), "Ready for review", "pr:ready")) requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
+        if (alertButton(@src(), "Ready for review", hue, "pr:ready")) requestOnRequest("Marking ready", "markPullRequestReadyForReview", d.id);
         return;
     }
     if (mergeUnknown(d) or t.running > 0) return;
     var num: [12]u8 = undefined;
-    if (opButton(@src(), "Merge…", "pr:merge")) ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
+    if (alertButton(@src(), "Merge…", hue, "pr:merge")) ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
 }
 
 /// The base merged into the request's branch, on GitHub — refused there if
@@ -6860,8 +6860,7 @@ fn requestTabs(d: pr.Detail, inset: f32) void {
     // Sideways when the pane is narrower than the four of them.
     var scroll = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto, .horizontal_bar = .auto_overlay }, .{
         .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
+        .background = false,
         .border = .{ .h = 1 },
         .color_border = .{ .color = style.border() },
     });
@@ -6884,32 +6883,33 @@ fn requestTabs(d: pr.Detail, inset: f32) void {
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = i,
             .tag = frameTag("prtab", tab[2]),
-            // No underline: the one shown sits on the accent's tint.
-            .background = true,
-            .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
-            .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
-            .corners = style.radius.input,
-            .margin = .{ .y = style.space.sm, .h = style.space.sm, .w = style.space.xs },
-            .padding = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.md, .h = style.space.xs },
+            // Words on the page's ground; the one shown underlined in the
+            // accent, on the bar's rule.
+            .background = false,
+            .margin = .{ .w = style.space.md },
+            .padding = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.md },
         });
         bw.processEvents();
-        bw.drawBackground();
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
             defer row.deinit();
             const ink = if (on) style.accent() else if (bw.hovered()) style.text() else style.textMuted();
-            dvui.icon(@src(), "prtab_icon", tab[1], .{ .fill_color = .{ .color = ink } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .w = style.space.sm } });
-            dvui.label(@src(), "{s}", .{tab[2]}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+            dvui.label(@src(), "{s}", .{tab[2]}, .{ .font = style.body(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
             if (tab[3] > 0) dvui.label(@src(), "{d}", .{tab[3]}, .{
                 .font = style.tinyBold(),
-                .color_text = .{ .color = style.accent() },
+                .color_text = .{ .color = style.textMuted() },
                 .background = true,
-                .color_fill = .{ .color = style.accentDim() },
+                .color_fill = .{ .color = style.surfaceRaised() },
                 .corners = style.radius.tag,
                 .gravity_y = 0.5,
                 .margin = .{ .x = style.space.sm },
                 .padding = .{ .x = 5, .w = 5 },
             });
+        }
+        if (on) {
+            const rs = bw.data().borderRectScale();
+            (dvui.Rect.Physical{ .x = rs.r.x, .y = rs.r.y + rs.r.h - 2 * rs.s, .w = rs.r.w, .h = 2 * rs.s })
+                .fill(.{}, .{ .color = .{ .color = style.accent() }, .fade = 0 });
         }
         if (bw.clicked()) pr_tab = tab[0];
         bw.deinit();
@@ -10974,21 +10974,26 @@ fn moveTabToWorkspace(g: usize, t: usize, w: usize) void {
 fn workspaceSwitcher() void {
     if (active_ws >= workspaces.items.len) return;
     const current = workspaces.items[active_ws];
+    // On its own colour, the name dark on it, as a tab group's label was:
+    // which workspace this is reads before its name does.
+    const hue = groupColor(current.color);
     const button = DropButton.begin(@src(), .{
         .tag = "workspace:switcher",
         .gravity_y = 0.5,
-        .background = false,
-        .color_fill_hover = .{ .color = style.rowHover() },
+        .background = true,
+        .color_fill = .{ .color = hue },
+        .color_fill_hover = .{ .color = hue.lerp(style.text(), 0.2) },
         .corners = style.radius.input,
-        .margin = .{ .x = style.space.sm, .w = style.space.xs },
-        .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.xs, .h = 3 },
+        .min_size_content = .{ .w = 110 },
+        .margin = .{ .x = style.space.sm, .w = style.space.sm },
+        .padding = .{ .x = style.space.md, .y = 3, .w = style.space.sm, .h = 3 },
     });
     {
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .expand = .horizontal });
         defer face.deinit();
-        workspaceDot(@src(), 0, current.color);
-        dvui.label(@src(), "{s}", .{workspaceName(current)}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
-        dvui.icon(@src(), "workspace_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
+        const ink = style.background();
+        dvui.label(@src(), "{s}", .{workspaceName(current)}, .{ .font = style.smallBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
+        dvui.icon(@src(), "workspace_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = ink } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
             .margin = .{ .x = style.space.xs },
@@ -11679,10 +11684,11 @@ fn toastWindow(src: std.builtin.SourceLocation, rect: *dvui.Rect, hue: dvui.Colo
         .resize = .none,
         .window_avoid = .none,
     }, .{
+        // An alert's shape, floating: its colour's ground and frame.
         .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
-        .border = .{ .x = 3, .y = 1, .w = 1, .h = 1 },
-        .color_border = .{ .color = hue },
+        .color_fill = .{ .color = style.tint(hue) },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = alertEdge(hue) },
         .corners = style.radius.popover,
         .min_size_content = .{ .w = TOAST_W },
         .max_size_content = .width(TOAST_W),
@@ -11758,7 +11764,7 @@ fn confirmToast() void {
     defer line.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
-    if (toastButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) requestAction(.confirmed);
+    if (alertButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) requestAction(.confirmed);
 }
 
 /// The button that does what the toast asks, named for it.
@@ -11780,23 +11786,66 @@ fn confirmVerb(kind: Confirm.Kind) []const u8 {
     };
 }
 
-/// A toast's filled button, in `hue`.
-fn toastButton(src: std.builtin.SourceLocation, caption: []const u8, hue: dvui.Color, tag: []const u8) bool {
+// === Alerts ===
+//
+// One shape for every alert, whatever it says: a ground tinted with its
+// colour, framed in it, its icon and its words in it, and the thing to do
+// about it on the right — a button framed in the same colour.
+
+/// The alert's frame, its icon already in: what it says and the button
+/// after go in it, then `deinit`.
+fn alertBox(src: std.builtin.SourceLocation, id: usize, hue: dvui.Color, icon: []const u8, margin: dvui.Rect) *dvui.BoxWidget {
+    const box = dvui.box(src, .{ .dir = .horizontal }, .{
+        .id_extra = id,
+        .expand = .horizontal,
+        .background = true,
+        .color_fill = .{ .color = style.tint(hue) },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = alertEdge(hue) },
+        .corners = style.radius.input,
+        .margin = margin,
+        .padding = .{ .x = style.space.lg, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
+        .min_size_content = .{ .h = 36 },
+    });
+    dvui.icon(@src(), "alert_icon", icon, .{ .fill_color = .{ .color = hue } }, .{
+        .min_size_content = .{ .w = 14, .h = 14 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.md },
+    });
+    return box;
+}
+
+/// The alert's frame and its button's: its colour, halfway to the ground.
+fn alertEdge(hue: dvui.Color) dvui.Color {
+    return hue.lerp(style.surface(), 0.45);
+}
+
+/// What the alert says, in its colour, wrapped to what is left of the line.
+fn alertText(src: std.builtin.SourceLocation, text: []const u8, hue: dvui.Color) void {
+    var tl = dvui.textLayout(src, .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0) });
+    tl.addText(text, .{ .font = style.smallBold(), .color_text = .{ .color = hue } });
+    tl.deinit();
+}
+
+/// The thing to do about an alert: framed in its colour, its caption in it.
+fn alertButton(src: std.builtin.SourceLocation, caption: []const u8, hue: dvui.Color, tag: ?[]const u8) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
         .background = true,
-        .color_fill = .{ .color = hue },
-        .color_fill_hover = .{ .color = hue.lerp(style.text(), 0.15) },
+        .color_fill = .{ .color = dvui.Color.transparent },
+        .color_fill_hover = .{ .color = style.tint(hue).lerp(hue, 0.12) },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = alertEdge(hue) },
         .corners = style.radius.input,
         .gravity_y = 0.5,
         .margin = .{ .x = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
     });
     defer bw.deinit();
     bw.processEvents();
     bw.drawBackground();
-    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.smallBold(), .color_text = .{ .color = style.textOnAccent() }, .padding = dvui.Rect.all(0) });
+    dvui.label(@src(), "{s}", .{caption}, .{ .font = style.smallBold(), .color_text = .{ .color = hue }, .padding = dvui.Rect.all(0) });
     return bw.clicked();
 }
 
@@ -12332,7 +12381,7 @@ fn chipButtonTagged(src: std.builtin.SourceLocation, icon: []const u8, caption: 
         .color_border = .{ .color = if (accent) style.accent().opacity(0.4) else style.border() },
         .corners = style.radius.input,
         .margin = .{ .x = style.space.sm },
-        .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.md, .h = 3 },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
     });
     defer bw.deinit();
     bw.processEvents();
@@ -13413,18 +13462,12 @@ fn prCreateDialog() void {
     else
         remoteHas(head);
     if (!pushed and head.len > 0) {
-        var note = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.tint(style.get().orange) },
-            .corners = style.radius.input,
-            .margin = .{ .h = style.space.lg },
-            .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
-        });
+        const orange = style.get().orange;
+        var note = alertBox(@src(), 0, orange, dvui.entypo.upload, .{ .h = style.space.lg });
         defer note.deinit();
         const missing = !on_head or h.tracking.upstream == null;
-        dvui.label(@src(), "{s}", .{if (missing) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first."}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
-        if (dialogButton(@src(), "Push", true)) {
+        alertText(@src(), if (missing) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first.", orange);
+        if (alertButton(@src(), "Push", orange, "pr_new:push")) {
             if (on_head) {
                 requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
             } else if (defaultRemote()) |remote| requestNetwork("Pushing", &.{ "push", "-u", remote, head });
@@ -17210,6 +17253,7 @@ fn diffPanel() void {
             const pick = sr.file == 0;
             switch (sr.kind) {
                 .file => diffFileRow(@src(), file, r, r, width, rh),
+                .pad => {},
                 .hunk => diffLineRow(@src(), file, file.lines[sr.left], r, width, rh, side, if (pick) sr.left else null),
                 .pair => {
                     const y = @as(f32, @floatFromInt(r)) * rh;
@@ -17223,8 +17267,9 @@ fn diffPanel() void {
 
     var row: usize = 0;
     for (d.files, 0..) |file, fi| {
-        if (row >= first and row < last) diffFileRow(@src(), file, fi, row, width, rh);
-        row += 1;
+        // Its second line too, so a header scrolled half out is still drawn.
+        if (row + 1 >= first and row < last) diffFileRow(@src(), file, fi, row, width, rh);
+        row += FILE_ROWS;
 
         for (file.lines, 0..) |line, li| {
             if (row >= first and row < last) {
@@ -17291,7 +17336,7 @@ fn diffMarkers(area: dvui.RectScale, d: git.Diff, total_rows: usize) void {
                 flush(run_kind, run_start, row, area, x, strip_w, scale, min_h);
                 run_kind = .none;
             }
-            row += 1;
+            row += FILE_ROWS;
             for (file.lines) |line| {
                 const kind: Kind = switch (line.kind) {
                     .addition => .add,
@@ -17310,6 +17355,9 @@ fn diffMarkers(area: dvui.RectScale, d: git.Diff, total_rows: usize) void {
     flush(run_kind, run_start, row, area, x, strip_w, scale, min_h);
 }
 
+/// The diff's own bar: its controls with room around them.
+const DIFF_HEAD_H: f32 = 52;
+
 /// "← Graph": the way back from a diff to the commit list, said in words.
 fn backButton(src: std.builtin.SourceLocation) bool {
     var bw: dvui.ButtonWidget = undefined;
@@ -17323,7 +17371,7 @@ fn backButton(src: std.builtin.SourceLocation) bool {
         .color_border = .{ .color = style.border() },
         .corners = style.radius.input,
         .margin = .{ .x = style.space.xs, .w = style.space.md },
-        .padding = .{ .x = style.space.sm, .y = 3, .w = style.space.md, .h = 3 },
+        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
     });
     defer bw.deinit();
     bw.processEvents();
@@ -17331,7 +17379,7 @@ fn backButton(src: std.builtin.SourceLocation) bool {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
         defer row.deinit();
-        const color = if (bw.hovered()) style.accent() else style.textMuted();
+        const color = if (bw.hovered()) style.accent() else style.text();
         dvui.icon(@src(), "back_icon", dvui.entypo.chevron_small_left, .{ .fill_color = .{ .color = color } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
@@ -17354,10 +17402,10 @@ fn diffHeader() void {
         .expand = .horizontal,
         .background = true,
         .color_fill = .{ .color = style.surface() },
-        .min_size_content = .{ .h = style.toolbar_cell },
+        .min_size_content = .{ .h = DIFF_HEAD_H },
         .border = .{ .h = 1 },
-        .color_border = .{ .color = style.borderSubtle() },
-        .padding = .{ .x = style.space.xs, .w = style.space.md },
+        .color_border = .{ .color = style.border() },
+        .padding = .{ .x = style.space.md, .w = style.space.lg },
     });
     defer head.deinit();
 
@@ -17392,9 +17440,12 @@ fn diffHeader() void {
             dvui.label(@src(), "{s}", .{git.oidShort(id, &buf)}, .{
                 .font = style.mono(),
                 .color_text = .{ .color = style.accent() },
+                .background = true,
+                .color_fill = .{ .color = style.accentDim() },
+                .corners = style.radius.tag,
                 .gravity_y = 0.5,
-                .margin = .{ .w = style.space.sm },
-                .padding = dvui.Rect.all(0),
+                .margin = .{ .x = style.space.sm, .w = style.space.md },
+                .padding = .{ .x = style.space.sm, .y = 2, .w = style.space.sm, .h = 2 },
             });
             dvui.label(@src(), "{s}", .{commitSummary(id)}, .{
                 .font = style.small(),
@@ -17964,33 +18015,13 @@ fn conflictRegions() void {
 /// "2 of 3 conflicts can be resolved safely": one click for every region
 /// where one side alone changed things, line by line at the finest.
 fn safeBar(safe: usize) void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.tint(style.success()) },
-        .border = .{ .x = 3 },
-        .color_border = .{ .color = style.success() },
-        .corners = style.radius.input,
-        .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
-    });
+    var bar = alertBox(@src(), 0, style.success(), dvui.entypo.check, .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm });
     defer bar.deinit();
-    dvui.icon(@src(), "safe_icon", dvui.entypo.check, .{ .fill_color = .{ .color = style.success() } }, .{
-        .min_size_content = .{ .w = 13, .h = 13 },
-        .gravity_y = 0.5,
-        .margin = .{ .w = style.space.sm },
-    });
-    dvui.label(@src(), "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, plural(conflicts.len) }, .{
-        .font = style.small(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .max_size_content = .width(0),
-        .padding = dvui.Rect.all(0),
-    });
+    var text_buf: [160]u8 = undefined;
+    alertText(@src(), std.fmt.bufPrint(&text_buf, "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, plural(conflicts.len) }) catch "", style.success());
     var buf: [48]u8 = undefined;
     const caption = if (safe == 1) "Resolve it" else std.fmt.bufPrint(&buf, "Resolve these {d}", .{safe}) catch "Resolve them";
-    if (opButton(@src(), caption, "conflict:resolve_safe")) requestAction(.resolve_safe);
+    if (alertButton(@src(), caption, style.success(), "conflict:resolve_safe")) requestAction(.resolve_safe);
 }
 
 /// A file one side deleted and the other changed: keep it, or let it go.
@@ -18269,29 +18300,38 @@ fn diffFileRow(
 ) void {
     var box = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
-        .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row)) * rh, .w = width, .h = rh },
+        .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row)) * rh, .w = width, .h = FILE_ROWS * rh },
         .background = true,
         .color_fill = .{ .color = style.surface() },
-        .padding = .{ .x = style.space.md, .w = style.space.md },
+        .border = .{ .y = if (row > 0) 1 else 0, .h = 1 },
+        .color_border = .{ .color = style.border() },
+        .padding = .{ .x = style.space.lg, .w = style.space.lg },
     });
     defer box.deinit();
 
-    dvui.label(@src(), "{s}", .{file.status.glyph()}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.fileStatusColor(file.status) },
-        .gravity_y = 0.5,
-        .min_size_content = .{ .w = 12 },
-        .padding = dvui.Rect.all(0),
-    });
-
-    dvui.label(@src(), "{s}", .{file.path}, .{
-        .font = style.smallBold(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .max_size_content = .width(0),
-        .padding = dvui.Rect.all(0),
-    });
+    statusFlag(@src(), file.status);
+    // Its folder faint, its name in full: the name is what is looked for.
+    const slash = std.mem.lastIndexOfScalar(u8, file.path, '/');
+    const folder = if (slash) |i| file.path[0 .. i + 1] else "";
+    const name = if (slash) |i| file.path[i + 1 ..] else file.path;
+    {
+        var names = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
+        defer names.deinit();
+        if (folder.len > 0) dvui.label(@src(), "{s}", .{folder}, .{
+            .font = style.body(),
+            .color_text = .{ .color = style.textMuted() },
+            .gravity_y = 0.5,
+            .padding = dvui.Rect.all(0),
+        });
+        dvui.label(@src(), "{s}", .{name}, .{
+            .font = style.bodyBold(),
+            .color_text = .{ .color = style.text() },
+            .gravity_y = 0.5,
+            .expand = .horizontal,
+            .max_size_content = .width(0),
+            .padding = dvui.Rect.all(0),
+        });
+    }
 
     if (file.binary) {
         dvui.label(@src(), "binary", .{}, .{
@@ -18353,8 +18393,8 @@ fn diffLineRow(
     if (line.kind == .hunk_header) {
         var header_buf: [MAX_SHOWN_LINE]u8 = undefined;
         dvui.label(@src(), "{s}", .{detab(&header_buf, line.text)}, .{
-            .font = style.mono(),
-            .color_text = .{ .color = style.textMuted() },
+            .font = style.graphMono(),
+            .color_text = .{ .color = style.textFaint() },
             .gravity_y = 0.5,
             .expand = .horizontal,
             .max_size_content = .width(0),
@@ -18579,12 +18619,21 @@ fn lineNumber(src: std.builtin.SourceLocation, n: u32) void {
     var buf: [12]u8 = undefined;
     const text = if (n == 0) "" else std.fmt.bufPrint(&buf, "{d}", .{n}) catch "";
 
-    dvui.label(src, "{s}", .{text}, .{
+    // A column of its own, the number to its right: in the row itself the
+    // gravity would send it to the row's far end, over the code.
+    var column = dvui.box(src, .{}, .{
+        .gravity_y = 0.5,
+        .min_size_content = .{ .w = 38 },
+        .max_size_content = .width(38),
+        .background = false,
+        .margin = .{ .w = style.space.sm },
+    });
+    defer column.deinit();
+    dvui.label(@src(), "{s}", .{text}, .{
         .font = style.mono(),
         .color_text = .{ .color = style.textFaint() },
         .gravity_y = 0.5,
         .gravity_x = 1.0,
-        .min_size_content = .{ .w = 38 },
         .padding = dvui.Rect.all(0),
     });
 }
@@ -18716,16 +18765,15 @@ fn commitDetail(id: git.Oid) void {
     {
         var card = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .padding = dvui.Rect.all(style.space.md + style.space.xs),
+            .background = false,
+            .padding = dvui.Rect.all(style.space.lg),
             .border = .{ .h = 1 },
             .color_border = .{ .color = style.border() },
         });
         defer card.deinit();
 
         {
-            var chips = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.sm } });
+            var chips = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.md } });
             defer chips.deinit();
             shaChip(id);
             if (history) |h| for (h.refs, 0..) |ref, i| {
@@ -18738,25 +18786,41 @@ fn commitDetail(id: git.Oid) void {
 
         var title = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
         dropStaleTextSelection(title);
-        title.addText(commitSummary(id), .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() } });
+        title.addText(commitSummary(id), .{ .font = style.title().withSize(15), .color_text = .{ .color = style.text() } });
         title.deinit();
 
+        // The message past its title, read as the host would show it: its
+        // lists as lists, its code as code.
         if (split.text.len > 0) {
-            var body = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.sm } });
-            dropStaleTextSelection(body);
-            body.addText(split.text, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() } });
-            body.deinit();
+            var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
+            defer body.deinit();
+            markdownBody(unwrapMessage(dvui.currentWindow().arena(), split.text));
         }
 
-        // The trailers apart, as chips; co-authors are under the authors.
-        var chips = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .margin = .{ .y = style.space.xs } });
-        defer chips.deinit();
+        // The trailers apart, in the mono face git wrote them in;
+        // co-authors are under the authors.
         var lines = trailerLines(split.trailers);
+        var trailers: ?*dvui.BoxWidget = null;
+        defer if (trailers) |b| b.deinit();
         var i: usize = 0;
         while (lines.next()) |t| : (i += 1) {
             if (std.ascii.eqlIgnoreCase(t.key, "Co-authored-by")) continue;
-            const text = std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}: {s}", .{ t.key, t.value }) catch continue;
-            signalChip(@src(), i, dvui.entypo.text, text, style.textMuted());
+            if (trailers == null) trailers = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .expand = .horizontal,
+                .background = true,
+                .color_fill = .{ .color = style.surfaceInput() },
+                .corners = style.radius.input,
+                .margin = .{ .y = style.space.md },
+                .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
+            });
+            dvui.label(@src(), "{s}: {s}", .{ t.key, t.value }, .{
+                .id_extra = i,
+                .font = style.mono(),
+                .color_text = .{ .color = style.textMuted() },
+                .expand = .horizontal,
+                .max_size_content = .width(0),
+                .padding = dvui.Rect.all(0),
+            });
         }
     }
 
@@ -18795,6 +18859,42 @@ fn commitDetail(id: git.Oid) void {
     if (accordion(@src(), 1, "Files", files, &detail_open[1], false)) {
         if (diff != null) commitFiles(id);
     }
+}
+
+/// A commit message's lines as the paragraphs and list items they are: git
+/// wraps at 72 columns, so a line that carries on the one before joins it —
+/// unless it starts something of its own.
+fn unwrapMessage(a: std.mem.Allocator, text: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var prev_blank = true;
+    var in_code = false;
+    while (it.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        const t = std.mem.trimStart(u8, line, " \t");
+        const fence = std.mem.startsWith(u8, t, "```");
+        const starts = fence or t.len == 0 or in_code or
+            std.mem.startsWith(u8, t, "- ") or std.mem.startsWith(u8, t, "* ") or
+            std.mem.startsWith(u8, t, "#") or std.mem.startsWith(u8, t, ">") or
+            (t.len > 1 and std.ascii.isDigit(t[0]) and (t[1] == '.' or t[1] == ')'));
+        if (!prev_blank and !starts) {
+            out.append(a, ' ') catch {};
+            out.appendSlice(a, t) catch {};
+        } else {
+            if (out.items.len > 0) out.append(a, '\n') catch {};
+            out.appendSlice(a, line) catch {};
+        }
+        if (fence) in_code = !in_code;
+        prev_blank = t.len == 0 or in_code or fence;
+    }
+    return out.items;
+}
+
+test "a commit message's wrapped lines join, its lists and paragraphs stay apart" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const got = unwrapMessage(arena.allocator(), "Intro that\nwraps.\n\n- one item\n  that wraps\n- two\n\n```\ncode\nkept\n```");
+    try std.testing.expectEqualStrings("Intro that wraps.\n\n- one item that wraps\n- two\n\n```\ncode\nkept\n```", got);
 }
 
 /// Every file of a commit's tree, for "All files": read once per commit,
@@ -27971,13 +28071,14 @@ test "the split view sets each removed line against the line that replaced it" {
     buildSplitRows();
 
     const r = split_rows.items;
-    // file, hunk, a|a, b|B, c|-, d|d
-    try std.testing.expectEqual(@as(usize, 6), r.len);
-    try std.testing.expectEqual(@as(u32, 2), r[3].left);
-    try std.testing.expectEqual(@as(u32, 4), r[3].right);
-    try std.testing.expectEqual(@as(u32, 3), r[4].left);
-    try std.testing.expectEqual(NO_LINE, r[4].right);
-    try std.testing.expectEqual(@as(u32, 5), r[5].left);
+    // file (two rows high), hunk, a|a, b|B, c|-, d|d
+    try std.testing.expectEqual(@as(usize, 7), r.len);
+    try std.testing.expect(r[1].kind == .pad);
+    try std.testing.expectEqual(@as(u32, 2), r[4].left);
+    try std.testing.expectEqual(@as(u32, 4), r[4].right);
+    try std.testing.expectEqual(@as(u32, 3), r[5].left);
+    try std.testing.expectEqual(NO_LINE, r[5].right);
+    try std.testing.expectEqual(@as(u32, 5), r[6].left);
 }
 
 test "a commit date reads as a date, and fits its column" {
@@ -28098,4 +28199,5 @@ test "changes picked: asked by path, taken off again, one side at a time" {
     try std.testing.expect(!isChangePicked(.staged, "c.txt"));
     try std.testing.expectEqual(@as(u32, 0), picked_set.count());
 }
+
 
