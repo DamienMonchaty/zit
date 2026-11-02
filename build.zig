@@ -14,13 +14,17 @@ pub fn build(b: *std.Build) !void {
 
     // Stripped unless debugging: the symbols are three quarters of the
     // binary (46 MB against 11). A stripped build says "Unable to dump stack
-    // trace" on a panic, so `-Dstrip=false` — or a Debug build — keeps them
-    // for chasing one.
-    const strip = b.option(bool, "strip", "Drop debug symbols (default: yes, except in Debug)") orelse
-        (optimize != .Debug);
+    // trace" on a panic, so `-Dtrace` — or a Debug build — keeps what a trace
+    // needs: the symbols, and the unwind tables (`.eh_frame`) the stripped
+    // build leaves out too, Zit's and its C libraries'. `-Dstrip=false` alone
+    // keeps both as well.
+    const trace = b.option(bool, "trace", "Keep symbols and unwind tables for stack traces (default: only in Debug)") orelse
+        (optimize == .Debug);
+    const strip = b.option(bool, "strip", "Drop debug symbols (default: yes, unless -Dtrace)") orelse !trace;
+    const unwind_tables = trace or !strip;
     const system_libgit2 = b.option(bool, "system-libgit2", "Link the system's libgit2 instead of building it") orelse false;
 
-    const exe = addZit(b, target, optimize, strip, system_libgit2);
+    const exe = addZit(b, target, optimize, strip, unwind_tables, system_libgit2);
     b.installArtifact(exe);
 
     const install_desktop = b.addInstallFile(b.path("assets/zit.desktop"), "share/applications/zit.desktop");
@@ -92,7 +96,7 @@ pub fn build(b: *std.Build) !void {
     for (dists) |d| {
         const query = try std.Target.Query.parse(.{ .arch_os_abi = d.query });
         const resolved = b.resolveTargetQuery(query);
-        const dist_exe = addZit(b, resolved, .ReleaseSafe, true, false);
+        const dist_exe = addZit(b, resolved, .ReleaseSafe, true, false, false);
 
         if (resolved.result.os.tag == .windows) {
             const install = b.addInstallArtifact(dist_exe, .{
@@ -147,9 +151,21 @@ fn addZit(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     strip: bool,
+    unwind_tables: bool,
     system_libgit2: bool,
 ) *std.Build.Step.Compile {
-    const dvui_dep = b.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 });
+    // dvui's SDL3 backend builds in tree-sitter and tinyfiledialogs unless
+    // told not to: dead weight, since Zit highlights code with its own lexer
+    // and picks folders through SDL's dialog. FreeType stays: stb_truetype in
+    // its place saves 0.8 MB but draws the text wider and softer — a line
+    // of the history shows three fewer letters.
+    const dvui_dep = b.dependency("dvui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .sdl3,
+        .@"tree-sitter" = false,
+        .@"tiny-file-dialogs" = false,
+    });
 
     const exe = b.addExecutable(.{
         .name = "zit",
@@ -161,6 +177,7 @@ fn addZit(
         }),
     });
 
+    slimDvui(b, dvui_dep);
     exe.root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
 
     // The version the app shows is the one in build.zig.zon, read here: the
@@ -198,8 +215,165 @@ fn addZit(
     // to set on the other systems.
     if (optimize != .Debug and target.result.os.tag == .windows) exe.subsystem = .Windows;
 
+    // Each function and each constant of the C libraries in a section of
+    // its own, so that the linker, which already drops the sections nothing
+    // refers to, drops them one by one instead of whole files at a time.
+    // Nothing changes in the code that stays.
+    if (optimize != .Debug) {
+        const linked = Linked.of(b, exe);
+        for (linked.libs.items) |lib| {
+            lib.link_function_sections = true;
+            lib.link_data_sections = true;
+        }
+        exe.link_function_sections = true;
+        exe.link_data_sections = true;
+    }
+
+    // Built for size, the C libraries no hot path goes through: SDL — the
+    // window, its events, handing each frame to the GPU — FreeType, which
+    // draws each glyph once into dvui's atlas, and mbedtls, which libgit2
+    // needs for HTTPS, which Zit leaves to `git`, and for hashing SHA-256
+    // repositories; SHA-1 is libgit2's own sha1dc. Most of what this saves
+    // is the UBSan checks ReleaseSafe compiles into C code, so undefined
+    // behaviour in those three no longer traps. libgit2, its zlib and Zit
+    // keep the app's mode: the history, the diffs and the status are read
+    // through them.
+    if (optimize == .ReleaseSafe or optimize == .ReleaseFast) {
+        const linked = Linked.of(b, exe);
+        for ([_][]const u8{ "SDL3", "freetype", "mbedtls" }) |name| {
+            if (linked.named(name)) |lib| lib.root_module.optimize = .ReleaseSmall;
+        }
+    }
+
+    // No unwind tables in a release build: nothing in Zit or its C libraries
+    // throws, and without symbols a panic prints no trace to unwind for.
+    // Not on Windows: x64 code there is unwound through `.pdata`, and the
+    // system's exception dispatch walks through Zit's frames with it — the
+    // ABI requires it.
+    if (!unwind_tables and target.result.os.tag != .windows) {
+        for (Linked.of(b, exe).modules.items) |module| module.unwind_tables = .none;
+    }
+
+    // SDL as Zit uses it: video and events, nothing else. Its dynamic API
+    // — a table of every SDL function, so that `SDL3_DYNAMIC_API` can swap a
+    // newer SDL in at run time — keeps all of them linked, used or not;
+    // `SDL_THREAD_SAFETY_ANALYSIS` is the switch SDL_dynapi.h leaves for
+    // turning it off (on clang its only other effect is attributes). And
+    // audio, joysticks (and with them HID), haptics, sensors, cameras and
+    // power are compiled out: dvui starts SDL with `SDL_INIT_VIDEO |
+    // SDL_INIT_EVENTS`.
+    if (Linked.of(b, exe).named("SDL3")) |sdl| leanSdl(sdl);
+
     return exe;
 }
+
+/// dvui built from a copy of its sources with the changes below: code and
+/// data it compiles in that Zit has no use for, and no option of its turns
+/// off. Each change finds its place by the text around it, and fails the
+/// build, saying where, when a new dvui has moved it.
+fn slimDvui(b: *std.Build, dvui_dep: *std.Build.Dependency) void {
+    const io = b.graph.io;
+    const copy = b.addWriteFiles();
+    var left_out: std.ArrayList([]const u8) = .empty;
+
+    // The window starts on dvui's Adwaita theme, before Zit's replaces it,
+    // and that theme embeds ten Bitstream Vera faces: 578 KB of fonts Zit
+    // never draws with. Kept: Vera Sans, dvui's fallback face.
+    {
+        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.path("src/themes/Adwaita.zig").getPath(b), b.allocator, .limited(1 << 20)) catch
+            @panic("dvui: cannot read src/themes/Adwaita.zig");
+        const from = std.mem.indexOf(u8, text, "const fonts: []const Font.Source = &.{") orelse
+            @panic("dvui: Adwaita's font list has moved, see slimDvui");
+        const to = std.mem.indexOfPos(u8, text, from, "\npub const light") orelse
+            @panic("dvui: Adwaita's light theme has moved, see slimDvui");
+        _ = copy.add("src/themes/Adwaita.zig", b.fmt(
+            "{s}const fonts: []const Font.Source = &.{{.{{ .family = Font.array(\"Vera Sans\"), .bytes = Font.Source.fallback.bytes }}}};\n{s}",
+            .{ text[0..from], text[to..] },
+        ));
+        _ = copy.addCopyFile(dvui_dep.path("src/fonts/bitstream-vera/Vera.ttf"), "src/fonts/bitstream-vera/Vera.ttf");
+        left_out.appendSlice(b.allocator, &.{ "Adwaita.zig", ".ttf", ".otf" }) catch @panic("OOM");
+    }
+
+    // dvui's debug window — an inspector, a colour picker, nineteen copies
+    // of a slider — draws only once `dvui.toggleDebugWindow` has opened it,
+    // which Zit never calls; but every frame's end asks for it, so all of it
+    // is linked.
+    {
+        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.path("src/Debug.zig").getPath(b), b.allocator, .limited(1 << 22)) catch
+            @panic("dvui: cannot read src/Debug.zig");
+        const show = "pub fn show(self: *Debug) void {";
+        const at = (std.mem.indexOf(u8, text, show) orelse @panic("dvui: Debug.show has moved, see slimDvui")) + show.len;
+        _ = copy.add("src/Debug.zig", b.fmt("{s}\n    if (true) return;{s}", .{ text[0..at], text[at..] }));
+        left_out.append(b.allocator, "Debug.zig") catch @panic("OOM");
+    }
+
+    // `exclude_extensions` matches the end of each path, so a file name works.
+    _ = copy.addCopyDirectory(dvui_dep.path("src"), "src", .{ .exclude_extensions = left_out.items });
+    dvui_dep.module("dvui_sdl3").root_source_file = copy.getDirectory().path(b, "src/dvui.zig");
+}
+
+fn leanSdl(sdl: *std.Build.Step.Compile) void {
+    sdl.root_module.addCMacro("SDL_THREAD_SAFETY_ANALYSIS", "1");
+    for (sdl.root_module.include_dirs.items) |dir| switch (dir) {
+        .config_header_step => |config| if (std.mem.eql(u8, config.include_path, "SDL_build_config.h")) {
+            const unused = [_][]const u8{ "SDL_AUDIO", "SDL_JOYSTICK", "SDL_HAPTIC", "SDL_SENSOR", "SDL_CAMERA", "SDL_POWER" };
+            var it = config.values.iterator();
+            while (it.next()) |entry| for (unused) |prefix| {
+                if (!std.mem.startsWith(u8, entry.key_ptr.*, prefix)) continue;
+                if (std.mem.endsWith(u8, entry.key_ptr.*, "_DISABLED")) {
+                    entry.value_ptr.* = .{ .boolean = true };
+                } else if (entry.value_ptr.* == .boolean) {
+                    entry.value_ptr.* = .{ .boolean = false };
+                }
+            };
+        },
+        else => {},
+    };
+    // With joysticks and sensors compiled out SDL falls back on its dummy
+    // drivers, which its build leaves out on Windows (both) and Linux (the
+    // joystick's).
+    const sdl_src = sdl.step.owner.path("src");
+    sdl.root_module.addCSourceFiles(.{ .root = sdl_src, .files = &.{"joystick/dummy/SDL_sysjoystick.c"} });
+    if (sdl.rootModuleTarget().os.tag == .windows) {
+        sdl.root_module.addCSourceFiles(.{ .root = sdl_src, .files = &.{"sensor/dummy/SDL_dummysensor.c"} });
+    }
+}
+
+/// The static libraries `exe` links, at any depth — dvui's SDL, libgit2's
+/// zlib and mbedtls — and every module it is built from: what a setting has
+/// to reach to apply to the C dependencies as well as to Zit.
+const Linked = struct {
+    libs: std.ArrayList(*std.Build.Step.Compile) = .empty,
+    modules: std.ArrayList(*std.Build.Module) = .empty,
+
+    fn of(b: *std.Build, exe: *std.Build.Step.Compile) Linked {
+        var self: Linked = .{};
+        self.walk(b, exe.root_module);
+        return self;
+    }
+
+    fn walk(self: *Linked, b: *std.Build, module: *std.Build.Module) void {
+        for (self.modules.items) |seen| if (seen == module) return;
+        self.modules.append(b.allocator, module) catch @panic("OOM");
+        for (module.link_objects.items) |object| switch (object) {
+            .other_step => |linked| {
+                for (self.libs.items) |seen| {
+                    if (seen == linked) break;
+                } else {
+                    self.libs.append(b.allocator, linked) catch @panic("OOM");
+                    self.walk(b, linked.root_module);
+                }
+            },
+            else => {},
+        };
+        for (module.import_table.values()) |imported| self.walk(b, imported);
+    }
+
+    fn named(self: Linked, name: []const u8) ?*std.Build.Step.Compile {
+        for (self.libs.items) |l| if (std.mem.eql(u8, l.name, name)) return l;
+        return null;
+    }
+};
 
 fn linkLibgit2(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system_libgit2: bool) void {
     if (system_libgit2) {

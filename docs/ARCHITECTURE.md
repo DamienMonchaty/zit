@@ -15,7 +15,7 @@ Linux archives are packed by shelling out to them: `zit-linux-x86_64.tar.gz` and
 system — SDL loads X11 or Wayland itself) and `zit-windows-x86_64.exe`
 (Windows 10 and later; per-monitor DPI aware through `assets/zit.manifest`, so it is not
 stretched and blurred on a scaled display). All three are ReleaseSafe and
-stripped, about 11 MB (the Linux archives about 5 MB); a plain `zig build` strips too, `-Dstrip=false` keeps the symbols for a stack trace. `-Dsystem-libgit2=true` links the machine's libgit2
+stripped, 6 to 7.5 MB (the Linux archives about 3 MB); a plain `zig build` strips too, `-Dtrace` keeps the symbols and the unwind tables for a stack trace. `-Dsystem-libgit2=true` links the machine's libgit2
 instead, for a quicker local build.
 
 A Linux executable carries no icon — the desktop takes it from a `.desktop`
@@ -82,10 +82,8 @@ label before its tabs, underlined in its colour; a click on the label folds
 the group to it, a right-click renames, recolours, ungroups or closes it.
 A tab dragged onto another takes its place, in its group or another one;
 `Ctrl+Shift+PgUp`/`PgDn` moves the one shown without the mouse.
-`Ctrl+W` closes a tab, `Ctrl+B`
-and `Ctrl+J` hide the branches and changes panels, and `Ctrl+Shift+F` is
-**focus mode** — the graph and its diff alone, no tabs, toolbar or panels,
-until `Esc` or the key again puts them back as they were. A click on a branch,
+`Ctrl+W` closes a tab, and `Ctrl+B`
+and `Ctrl+J` hide the branches and changes panels. A click on a branch,
 remote branch, tag, worktree or stash in the sidebar brings its commit up in
 the graph (a stash's: the one it was made on); a double-click still checks
 out. The commit's summary and the lines of a diff are text you can select
@@ -147,8 +145,8 @@ feeding it to `git apply --cached` on stdin, which is the only place Zit writes
 anything to git other than a command line. A changed file answers a right-click
 with the rest of what it can do — stage, open, blame, copy the path, discard. Merge, rebase, cherry-pick, revert
 and reset are ordinary commands behind the right-click menus on branches and
-commits; when one of them stops on a conflict, the banner under the toolbar is
-what offers `--continue` and `--abort`. A commit's menu leads with checking
+commits; when one of them stops on a conflict, the toolbar's right end says so
+and offers `--continue` and `--abort`. A commit's menu leads with checking
 out — the branches on it, then the commit itself — and keeps the three resets
 in one submenu.
 
@@ -164,15 +162,14 @@ editor and reads exactly the list that was composed, and `core.editor=true`
 covers the message editor a squash would otherwise stop on.
 
 Everything that cannot be undone — discard, `reset --hard`, dropping a stash —
-goes through one confirmation bar under the toolbar; everything that needs a
-name first — a branch, a tag, a remote — through one prompt bar in the same
-place. **Blame** and the **remotes** list are read through
+goes through one confirmation toast, low on the right; everything that needs a
+name first — a branch, a tag, a remote — through one small dialog. **Blame** and the **remotes** list are read through
 libgit2 like the rest.
 
 The branch you are on answers a right-click with what the toolbar has no
 room for: pull with `--rebase` or `--ff-only`, a force push (always
-`--force-with-lease`, behind the confirmation bar), rename. Other branches
-add a no-ff merge, a squash merge, push-and-track, and `-D` behind the bar;
+`--force-with-lease`, behind the confirmation), rename. Other branches
+add a no-ff merge, a squash merge, push-and-track, and `-D` behind it too;
 remote branches and tags can be deleted on the remote, tags pushed. Push
 sets up the upstream itself on a branch that has none. A hunk can be
 discarded as well as staged, a file in a commit's diff restored to that

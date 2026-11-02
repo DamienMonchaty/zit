@@ -1,3 +1,6 @@
 // The Windows executable's icon and manifest.
+// The icon's 256 px image is stored as a PNG, assets/icons/256x256/zit.png
+// itself, which Windows has read since Vista: 113 KB for the file instead
+// of 373 KB with it as a bitmap.
 1 ICON "zit.ico"
 1 24 "zit.manifest"

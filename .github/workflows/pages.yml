@@ -1,0 +1,55 @@
+name: Pages
+
+# Builds the website in site/ on every pull request that touches it, and
+# publishes it at damienmonchaty.github.io/zit from main — so the site
+# describes the release people download.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - site/**
+      - CHANGELOG.md
+      - CONTRIBUTING.md
+      - PRIVACY.md
+      - SECURITY.md
+      - docs/screenshots/**
+      - assets/icons/**
+      - src/brand/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request replaces its build; a publish is never cut short.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: withastro/action@v6
+        with:
+          path: site
+
+  deploy:
+    name: Publish
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,123 @@
+{
+	"_comment": "Catppuccin Frappe (MIT, github.com/catppuccin/palette), laid out as Zit's own themes: the ground, panels a step off it, fields another.",
+	"background": {
+		"value": [
+			0.188,
+			0.204,
+			0.275,
+			1.0
+		]
+	},
+	"foreground": {
+		"value": [
+			0.161,
+			0.173,
+			0.235,
+			1.0
+		]
+	},
+	"text": {
+		"value": [
+			0.776,
+			0.816,
+			0.961,
+			1.0
+		]
+	},
+	"text_secondary": {
+		"value": [
+			0.647,
+			0.678,
+			0.808,
+			1.0
+		]
+	},
+	"text_background": {
+		"value": [
+			0.255,
+			0.271,
+			0.349,
+			1.0
+		]
+	},
+	"highlight_primary": {
+		"value": [
+			0.792,
+			0.62,
+			0.902,
+			1.0
+		]
+	},
+	"hover_primary": {
+		"value": [
+			0.729,
+			0.733,
+			0.945,
+			1.0
+		]
+	},
+	"highlight_secondary": {
+		"value": [
+			0.318,
+			0.341,
+			0.427,
+			1.0
+		]
+	},
+	"hover_secondary": {
+		"value": [
+			0.255,
+			0.271,
+			0.349,
+			1.0
+		]
+	},
+	"text_green": {
+		"value": [
+			0.651,
+			0.82,
+			0.537,
+			1.0
+		]
+	},
+	"text_blue": {
+		"value": [
+			0.549,
+			0.667,
+			0.933,
+			1.0
+		]
+	},
+	"text_orange": {
+		"value": [
+			0.937,
+			0.624,
+			0.463,
+			1.0
+		]
+	},
+	"text_yellow": {
+		"value": [
+			0.898,
+			0.784,
+			0.565,
+			1.0
+		]
+	},
+	"text_red": {
+		"value": [
+			0.906,
+			0.51,
+			0.518,
+			1.0
+		]
+	},
+	"text_purple": {
+		"value": [
+			0.957,
+			0.722,
+			0.894,
+			1.0
+		]
+	}
+}

@@ -16,6 +16,9 @@ const std = @import("std");
 
 pub const c = @cImport({
     @cInclude("git2.h");
+    // `git_repository_set_index`, and the status's count of files hashed.
+    @cInclude("git2/sys/repository.h");
+    @cInclude("git2/sys/diff.h");
 });
 
 pub const Error = error{Git};
@@ -26,6 +29,9 @@ pub const Error = error{Git};
 /// ponytail: hard cap, no paging. Add "load more" at the bottom of the graph if
 /// anyone actually scrolls into it.
 pub const MAX_COMMITS: usize = 5000;
+/// Most commits an author filter walks to find its MAX_COMMITS: the rest of
+/// a huge history is not looked through for one person's.
+pub const MAX_WALKED: usize = 400_000;
 
 /// Message from libgit2's thread-local error slot. Valid until the next failing
 /// libgit2 call on this thread, so copy it if it has to outlive the call site.
@@ -248,6 +254,16 @@ pub const RefFilter = struct {
     only: []const []const u8 = &.{},
     /// Remote branches walked too.
     remotes: bool = true,
+    /// GitComet's "First-parent": from HEAD — or the branches in `only` —
+    /// first parents alone, the mainline through its merges. Off, every
+    /// branch is walked: "All branches".
+    first_parent: bool = false,
+
+    /// The authors whose commits the walk keeps, as "name\nemail" — the
+    /// address in any case; none keeps every one. A kept commit is joined
+    /// to its nearest kept ancestors, so the lanes still say how one leads
+    /// to another, as `git log --author --graph` draws them.
+    authors: []const []const u8 = &.{},
 
     /// `hidden` as a set, where the caller keeps one, so each ref is one lookup.
     hidden_set: ?*const std.StringHashMapUnmanaged(void) = null,
@@ -292,8 +308,8 @@ pub const DiffSide = enum {
     unstaged,
 };
 
-/// What git is in the middle of, if anything. Drives the banner that offers
-/// continue/abort.
+/// What git is in the middle of, if anything. Drives the toolbar's controls
+/// that offer continue/abort.
 pub const State = enum {
     none,
     merge,
@@ -328,6 +344,46 @@ pub const State = enum {
         };
     }
 };
+
+/// The branch a rebase replays, from its `head-name` file:
+/// "refs/heads/feat" -> "feat". Null for a detached HEAD, which git writes
+/// as "detached HEAD".
+pub fn headName(text: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    const prefix = "refs/heads/";
+    if (!std.mem.startsWith(u8, t, prefix) or t.len == prefix.len) return null;
+    return t[prefix.len..];
+}
+
+/// What a merge brings in, from the first line of MERGE_MSG: the branch in
+/// "Merge branch 'feat'" — "into main" or "of <url>" after it — the
+/// remote's in "Merge remote-tracking branch 'origin/feat'", the commit in
+/// "Merge commit 'a1b2c3d'". Null when git wrote something else.
+pub fn mergeSource(msg: []const u8) ?[]const u8 {
+    const line = std.mem.trim(u8, msg[0 .. std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len], " \t\r");
+    for ([_][]const u8{ "Merge branch '", "Merge remote-tracking branch '", "Merge commit '", "Merge tag '" }) |prefix| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        const end = std.mem.indexOfScalar(u8, rest, '\'') orelse return null;
+        if (end == 0) return null;
+        return rest[0..end];
+    }
+    return null;
+}
+
+test "headName and mergeSource read git's own files" {
+    try std.testing.expectEqualStrings("feat/x", headName("refs/heads/feat/x\n").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), headName("detached HEAD\n"));
+    try std.testing.expectEqual(@as(?[]const u8, null), headName("refs/heads/"));
+
+    try std.testing.expectEqualStrings("feature/greeting", mergeSource("Merge branch 'feature/greeting'\n\n# Conflicts:\n").?);
+    try std.testing.expectEqualStrings("feat", mergeSource("Merge branch 'feat' into main").?);
+    try std.testing.expectEqualStrings("main", mergeSource("Merge branch 'main' of github.com:o/r").?);
+    try std.testing.expectEqualStrings("origin/feat", mergeSource("Merge remote-tracking branch 'origin/feat'").?);
+    try std.testing.expectEqualStrings("a1b2c3d", mergeSource("Merge commit 'a1b2c3d'").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), mergeSource("Merge branches 'a' and 'b'"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mergeSource(""));
+}
 
 // === Remotes ===
 
@@ -381,12 +437,48 @@ pub const Conflict = struct {
     ours: []const u8,
     theirs: []const u8,
     /// The common ancestor, there only when `merge.conflictStyle` is diff3 or
-    /// zdiff3. Shown when present, because it is what makes a conflict
-    /// readable, and never required.
+    /// zdiff3 — or when `attachBases` found it. Shown when present, because
+    /// it is what makes a conflict readable, and never required.
     base: []const u8,
+    /// Whether `base` is known: an empty one is a real answer — both sides
+    /// added lines where there were none — and not the same as no base.
+    has_base: bool = false,
 };
 
 pub const ConflictSide = enum { ours, theirs, both };
+
+/// Whether a commit by `name` and `email` is one of `keys`' — each
+/// "name\nemail", the name as it is, the address in any case.
+pub fn authorMatches(keys: []const []const u8, name: []const u8, email: []const u8) bool {
+    for (keys) |k| {
+        const at = std.mem.indexOfScalar(u8, k, '\n') orelse k.len;
+        const k_email = if (at < k.len) k[at + 1 ..] else "";
+        if (std.mem.eql(u8, k[0..at], name) and std.ascii.eqlIgnoreCase(k_email, email)) return true;
+    }
+    return false;
+}
+
+test "authorMatches goes by the name, and the address in any case" {
+    const keys = [_][]const u8{ "Ann Lee\nann@x.invalid", "bot\n" };
+    try std.testing.expect(authorMatches(&keys, "Ann Lee", "ANN@x.invalid"));
+    try std.testing.expect(!authorMatches(&keys, "Ann", "ann@x.invalid"));
+    try std.testing.expect(!authorMatches(&keys, "Bo", "ann@x.invalid"));
+    try std.testing.expect(authorMatches(&keys, "bot", ""));
+}
+
+/// How a path came to be conflicted.
+pub const ConflictKind = enum {
+    /// Both sides changed it: resolved region by region.
+    both_modified,
+    /// Both added it, with nothing in common to start from.
+    both_added,
+    /// We deleted it; they changed it.
+    deleted_by_us,
+    /// They deleted it; we changed it.
+    deleted_by_them,
+    /// Not conflicted in the index, or not readable.
+    none,
+};
 
 const OURS_MARK = "<<<<<<<";
 const BASE_MARK = "|||||||";
@@ -444,11 +536,10 @@ pub fn parseConflicts(gpa: std.mem.Allocator, text: []const u8) error{OutOfMemor
         }
 
         // Only a `|||||||` before the split is this region's base; a later one
-        // belongs to the next conflict down the file.
-        const base_at = blk: {
-            const at = findMarker(text, ours_start, BASE_MARK) orelse break :blk null;
-            break :blk if (at < split) at else null;
-        };
+        // belongs to the next conflict down the file. Looked for up to the
+        // split alone: git's default markers have none, and a search to the
+        // end of the file for each region was 88 ms for 500 of them in 1 MB.
+        const base_at = findMarker(text[0..split], ours_start, BASE_MARK);
 
         const ours_end = base_at orelse split;
         const end = lineEnd(text, close);
@@ -459,6 +550,7 @@ pub fn parseConflicts(gpa: std.mem.Allocator, text: []const u8) error{OutOfMemor
             .ours = text[ours_start..ours_end],
             .theirs = text[lineEnd(text, split)..close],
             .base = if (base_at) |at| text[lineEnd(text, at)..split] else "",
+            .has_base = base_at != null,
         }) catch return error.OutOfMemory;
 
         pos = end;
@@ -477,21 +569,256 @@ pub fn resolveConflict(
     conflict: Conflict,
     side: ConflictSide,
 ) error{OutOfMemory}![]u8 {
+    return switch (side) {
+        .ours => replaceRegion(gpa, text, conflict, &.{conflict.ours}),
+        .theirs => replaceRegion(gpa, text, conflict, &.{conflict.theirs}),
+        .both => replaceRegion(gpa, text, conflict, &.{ conflict.ours, conflict.theirs }),
+    };
+}
+
+/// What turned one text into another, kept to turn it back: the span that
+/// changed — between what the two share at the start and at the end — as it
+/// was before; and the text after, by its length and hash, to tell the
+/// text it is applied to is still that one.
+pub const Splice = struct {
+    start: usize,
+    /// The span's length in the text after.
+    len_after: usize,
+    /// The span as it was; owned.
+    before: []u8,
+    after_len: usize,
+    after_hash: u64,
+
+    pub fn deinit(self: Splice, gpa: std.mem.Allocator) void {
+        gpa.free(self.before);
+    }
+};
+
+pub fn spliceBetween(gpa: std.mem.Allocator, before: []const u8, after: []const u8) error{OutOfMemory}!Splice {
+    const head = std.mem.indexOfDiff(u8, before, after) orelse before.len;
+    const room = @min(before.len, after.len) - head;
+    var tail: usize = 0;
+    while (tail < room and before[before.len - 1 - tail] == after[after.len - 1 - tail]) tail += 1;
+    return .{
+        .start = head,
+        .len_after = after.len - head - tail,
+        .before = try gpa.dupe(u8, before[head .. before.len - tail]),
+        .after_len = after.len,
+        .after_hash = std.hash.Wyhash.hash(0, after),
+    };
+}
+
+/// `after` turned back into the text `splice` was taken from; null when
+/// `after` is not the text it left.
+pub fn spliceUndo(gpa: std.mem.Allocator, after: []const u8, splice: Splice) error{OutOfMemory}!?[]u8 {
+    if (after.len != splice.after_len or std.hash.Wyhash.hash(0, after) != splice.after_hash) return null;
+    const out = try gpa.alloc(u8, after.len - splice.len_after + splice.before.len);
+    @memcpy(out[0..splice.start], after[0..splice.start]);
+    @memcpy(out[splice.start..][0..splice.before.len], splice.before);
+    @memcpy(out[splice.start + splice.before.len ..], after[splice.start + splice.len_after ..]);
+    return out;
+}
+
+/// `text` with one region, markers and all, replaced by `parts` end to end.
+pub fn replaceRegion(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    conflict: Conflict,
+    parts: []const []const u8,
+) error{OutOfMemory}![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-
     try out.appendSlice(gpa, text[0..conflict.start]);
-    switch (side) {
-        .ours => try out.appendSlice(gpa, conflict.ours),
-        .theirs => try out.appendSlice(gpa, conflict.theirs),
-        .both => {
-            try out.appendSlice(gpa, conflict.ours);
-            try out.appendSlice(gpa, conflict.theirs);
-        },
-    }
+    for (parts) |part| try out.appendSlice(gpa, part);
     try out.appendSlice(gpa, text[conflict.end..]);
-
     return out.toOwnedSlice(gpa);
+}
+
+/// `text` with each of `regions` — in the order they come in it — replaced
+/// by its entry in `with`, or left as it is where that is null. One pass:
+/// replacing them one at a time copied the whole text once a region.
+pub fn replaceRegions(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    regions: []const Conflict,
+    with: []const ?[]const u8,
+) error{OutOfMemory}![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.ensureTotalCapacity(gpa, text.len);
+    var at: usize = 0;
+    for (regions, with) |region, replacement| {
+        const part = replacement orelse continue;
+        try out.appendSlice(gpa, text[at..region.start]);
+        try out.appendSlice(gpa, part);
+        at = region.end;
+    }
+    try out.appendSlice(gpa, text[at..]);
+    return out.toOwnedSlice(gpa);
+}
+
+/// Equal but for carriage returns: the working copy has CRLF where
+/// `core.autocrlf` put them, the index's copies LF.
+pub fn sameText(a: []const u8, b: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (true) {
+        while (i < a.len and a[i] == '\r') i += 1;
+        while (j < b.len and b[j] == '\r') j += 1;
+        if (i == a.len or j == b.len) return i == a.len and j == b.len;
+        if (a[i] != b[j]) return false;
+        i += 1;
+        j += 1;
+    }
+}
+
+/// Give `regions` — parsed from the working copy, plain markers — their
+/// bases from `with_base`, the same file merged again in diff3 style. A
+/// region takes the base of the next one there with the same two sides;
+/// one with no match is left without, which is how it was.
+pub fn attachBases(regions: []Conflict, with_base: []const Conflict) void {
+    var from: usize = 0;
+    for (regions) |*region| {
+        if (region.has_base) continue;
+        var k = from;
+        while (k < with_base.len) : (k += 1) {
+            const other = with_base[k];
+            if (!other.has_base) continue;
+            if (sameText(region.ours, other.ours) and sameText(region.theirs, other.theirs)) {
+                region.base = other.base;
+                region.has_base = true;
+                from = k + 1;
+                break;
+            }
+        }
+    }
+}
+
+/// Why a region can be resolved without asking, and is safe to.
+pub const AutoReason = enum {
+    /// Both sides made the same change.
+    same,
+    /// Only one side changed these lines: the other is still the base.
+    only_ours,
+    only_theirs,
+    /// Each side changed different lines, next to each other — which git
+    /// calls a conflict, and each line on its own is not.
+    lines_apart,
+};
+
+/// What a region resolves to on its own, and why; null when a person has
+/// to choose. Never guesses: a side wins only where the other is untouched,
+/// line by line at the finest. `text` is owned by `gpa`.
+pub fn autoResolve(gpa: std.mem.Allocator, region: Conflict) error{OutOfMemory}!?struct { reason: AutoReason, text: []u8 } {
+    if (sameText(region.ours, region.theirs)) return .{ .reason = .same, .text = try gpa.dupe(u8, region.ours) };
+    if (!region.has_base) return null;
+    if (sameText(region.ours, region.base)) return .{ .reason = .only_theirs, .text = try gpa.dupe(u8, region.theirs) };
+    if (sameText(region.theirs, region.base)) return .{ .reason = .only_ours, .text = try gpa.dupe(u8, region.ours) };
+
+    // Line by line, where the three have as many lines: each line from the
+    // side that changed it, refused at the first line both changed.
+    const n = lineCount(region.base);
+    if (n == 0 or lineCount(region.ours) != n or lineCount(region.theirs) != n) return null;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var o = LineIter{ .text = region.ours };
+    var t = LineIter{ .text = region.theirs };
+    var b = LineIter{ .text = region.base };
+    while (b.next()) |base_line| {
+        const ours_line = o.next().?;
+        const theirs_line = t.next().?;
+        const line = if (sameText(ours_line, theirs_line))
+            ours_line
+        else if (sameText(ours_line, base_line))
+            theirs_line
+        else if (sameText(theirs_line, base_line))
+            ours_line
+        else {
+            out.deinit(gpa);
+            return null;
+        };
+        try out.appendSlice(gpa, line);
+    }
+    return .{ .reason = .lines_apart, .text = try out.toOwnedSlice(gpa) };
+}
+
+/// Lines in `text`, a last one without a newline counted.
+fn lineCount(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    return std.mem.count(u8, text, "\n") + @intFromBool(text[text.len - 1] != '\n');
+}
+
+/// Each line with its own ending, so what is put back keeps CRLF or LF as
+/// the side had it.
+const LineIter = struct {
+    text: []const u8,
+    at: usize = 0,
+
+    fn next(self: *LineIter) ?[]const u8 {
+        if (self.at >= self.text.len) return null;
+        const end = if (std.mem.indexOfScalarPos(u8, self.text, self.at, '\n')) |nl| nl + 1 else self.text.len;
+        defer self.at = end;
+        return self.text[self.at..end];
+    }
+};
+
+test "sameText ignores carriage returns, and only those" {
+    try std.testing.expect(sameText("a\r\nb\r\n", "a\nb\n"));
+    try std.testing.expect(!sameText("a\nb\n", "a\nc\n"));
+    try std.testing.expect(!sameText("a\n", "a\nb\n"));
+    try std.testing.expect(sameText("", "\r"));
+}
+
+test "autoResolve takes a side only where the other is untouched" {
+    const gpa = std.testing.allocator;
+    const Case = struct { ours: []const u8, theirs: []const u8, base: ?[]const u8, want: ?AutoReason, text: []const u8 = "" };
+    const cases = [_]Case{
+        .{ .ours = "x\n", .theirs = "x\n", .base = null, .want = .same, .text = "x\n" },
+        .{ .ours = "a\n", .theirs = "b\n", .base = null, .want = null },
+        .{ .ours = "base\n", .theirs = "new\n", .base = "base\n", .want = .only_theirs, .text = "new\n" },
+        .{ .ours = "mine\n", .theirs = "base\n", .base = "base\n", .want = .only_ours, .text = "mine\n" },
+        // Adjacent edits: each line from the side that changed it.
+        .{ .ours = "X\n2\nZ\n", .theirs = "1\nY\n3\n", .base = "1\n2\n3\n", .want = .lines_apart, .text = "X\nY\nZ\n" },
+        // A line both changed is a real conflict.
+        .{ .ours = "X\n2\n", .theirs = "W\nY\n", .base = "1\n2\n", .want = null },
+        // Not as many lines: a person decides.
+        .{ .ours = "X\n2\n3\n", .theirs = "1\n", .base = "1\n2\n", .want = null },
+        // The working copy's CRLF is kept where its lines are taken.
+        .{ .ours = "X\r\n2\r\n", .theirs = "1\r\nY\r\n", .base = "1\n2\n", .want = .lines_apart, .text = "X\r\nY\r\n" },
+        // An empty base is a base: both added, differently.
+        .{ .ours = "a\n", .theirs = "b\n", .base = "", .want = null },
+    };
+    for (cases) |case| {
+        const region: Conflict = .{ .start = 0, .end = 0, .ours = case.ours, .theirs = case.theirs, .base = case.base orelse "", .has_base = case.base != null };
+        const got = try autoResolve(gpa, region);
+        if (case.want) |want| {
+            const g = got orelse return error.ExpectedResolution;
+            defer gpa.free(g.text);
+            try std.testing.expectEqual(want, g.reason);
+            try std.testing.expectEqualStrings(case.text, g.text);
+        } else {
+            if (got) |g| gpa.free(g.text);
+            try std.testing.expect(got == null);
+        }
+    }
+}
+
+test "attachBases gives a region the base of its match, in order" {
+    var regions = [_]Conflict{
+        .{ .start = 0, .end = 1, .ours = "a\r\n", .theirs = "b\r\n", .base = "" },
+        .{ .start = 2, .end = 3, .ours = "c\n", .theirs = "d\n", .base = "" },
+        .{ .start = 4, .end = 5, .ours = "e\n", .theirs = "f\n", .base = "" },
+    };
+    const with_base = [_]Conflict{
+        .{ .start = 0, .end = 0, .ours = "a\n", .theirs = "b\n", .base = "o\n", .has_base = true },
+        .{ .start = 0, .end = 0, .ours = "e\n", .theirs = "f\n", .base = "", .has_base = true },
+    };
+    attachBases(&regions, &with_base);
+    try std.testing.expect(regions[0].has_base);
+    try std.testing.expectEqualStrings("o\n", regions[0].base);
+    try std.testing.expect(!regions[1].has_base);
+    try std.testing.expect(regions[2].has_base);
+    try std.testing.expectEqualStrings("", regions[2].base);
 }
 
 // === Undo ===
@@ -718,10 +1045,126 @@ pub const Work = struct {
     arena: std.heap.ArenaAllocator,
     staged: []Change = &.{},
     unstaged: []Change = &.{},
+    /// Files libgit2 had to read and hash to tell whether they changed: those
+    /// whose stat info no longer matched the index's.
+    hashed: usize = 0,
 
     pub fn deinit(self: *Work) void {
         self.arena.deinit();
         self.* = undefined;
+    }
+};
+
+/// Status reads that do not hash, every time, the files touched without
+/// being changed. libgit2 tells a file unchanged by its stat info matching
+/// the index's; where it does not — a file saved as it was, a checkout in the
+/// second the index was written — it reads and hashes the file, at every
+/// read, until something writes the index back with the new stats, as
+/// `git status` does. Zit does not write the repository's index: the
+/// refreshed stats are kept in a copy of it (GitComet keeps them in memory
+/// the same way). libgit2 times its racily-clean check by the file an index
+/// was read from, so the copy is a file too — Zit's, in its cache, given the
+/// repository index's own modification time — copied again whenever the
+/// repository's index is rewritten.
+///
+/// Only the copy is kept between reads. Each read opens the repository
+/// again, as a plain read does, lends it the copy, and frees it: a
+/// repository kept open keeps its object cache and its pack windows, 26 MB
+/// of private memory on a 2,300-file repository, for nothing a read needs.
+pub const StatusCache = struct {
+    /// The repository this is for, as it was opened; owned.
+    path: []u8,
+    copy: *c.git_index,
+    /// The copy's file, NUL-terminated; owned.
+    copy_path: [:0]u8,
+    /// The repository's index, NUL-terminated; owned.
+    source_path: [:0]u8,
+    /// The repository's index as it was when copied. git writes a new file
+    /// and renames it over the old, so a rewrite is a new inode as well.
+    source: ?Stamp = null,
+
+    const Stamp = struct {
+        size: u64,
+        mtime: std.Io.Timestamp,
+        inode: std.Io.File.INode,
+
+        fn of(stat: std.Io.File.Stat) Stamp {
+            return .{ .size = stat.size, .mtime = stat.mtime, .inode = stat.inode };
+        }
+
+        fn eql(a: Stamp, b: Stamp) bool {
+            return a.size == b.size and a.mtime.nanoseconds == b.mtime.nanoseconds and a.inode == b.inode;
+        }
+    };
+
+    /// For the repository containing `path`, its index's copy kept at
+    /// `copy_path` — a file this cache alone writes.
+    pub fn open(gpa: std.mem.Allocator, path: []const u8, copy_path: []const u8) Error!StatusCache {
+        var repo = try Repo.open(path);
+        defer repo.deinit();
+        const owned_path = gpa.dupe(u8, path) catch return error.Git;
+        errdefer gpa.free(owned_path);
+        const owned_copy = gpa.dupeZ(u8, copy_path) catch return error.Git;
+        errdefer gpa.free(owned_copy);
+        const source_path = std.fmt.allocPrintSentinel(gpa, "{s}index", .{repo.gitdir()}, 0) catch return error.Git;
+        errdefer gpa.free(source_path);
+        var copy: ?*c.git_index = null;
+        try check(c.git_index_open(&copy, owned_copy.ptr));
+        return .{ .path = owned_path, .copy = copy.?, .copy_path = owned_copy, .source_path = source_path };
+    }
+
+    pub fn deinit(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) void {
+        c.git_index_free(self.copy);
+        std.Io.Dir.cwd().deleteFile(io, self.copy_path) catch {};
+        gpa.free(self.path);
+        gpa.free(self.copy_path);
+        gpa.free(self.source_path);
+        self.* = undefined;
+    }
+
+    pub fn readWork(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) Error!Work {
+        try self.sync(gpa, io);
+        var repo = try Repo.open(self.path);
+        defer repo.deinit();
+        // The repository holds a reference to the copy until it is freed;
+        // this cache keeps its own.
+        try check(c.git_repository_set_index(repo.ptr, self.copy));
+        return repo.readWorkWith(gpa, .refresh);
+    }
+
+    /// The copy made again if the repository's index has been rewritten
+    /// since it was taken.
+    fn sync(self: *StatusCache, gpa: std.mem.Allocator, io: std.Io) Error!void {
+        const cwd = std.Io.Dir.cwd();
+        // Read before the file, so that a rewrite between the two shows as a
+        // change at the next read rather than hiding behind this one.
+        const stat = cwd.statFile(io, self.source_path, .{}) catch |err| switch (err) {
+            // No index yet — a repository with nothing staged: an empty one.
+            error.FileNotFound => {
+                if (self.source != null) {
+                    try check(c.git_index_clear(self.copy));
+                    cwd.deleteFile(io, self.copy_path) catch {};
+                    self.source = null;
+                }
+                return;
+            },
+            else => return error.Git,
+        };
+        if (self.source) |s| if (s.eql(Stamp.of(stat))) return;
+
+        const bytes = cwd.readFileAlloc(io, self.source_path, gpa, .unlimited) catch return error.Git;
+        defer gpa.free(bytes);
+        cwd.writeFile(io, .{ .sub_path = self.copy_path, .data = bytes }) catch return error.Git;
+        // The repository index's time, not the copy's: an entry written in
+        // the same second as that index stays racily clean — hashed — as
+        // libgit2 would have it against the original.
+        {
+            var file = cwd.openFile(io, self.copy_path, .{ .mode = .read_write }) catch return error.Git;
+            defer file.close(io);
+            file.setTimestamps(io, .{ .access_timestamp = .{ .new = stat.mtime }, .modify_timestamp = .{ .new = stat.mtime } }) catch return error.Git;
+        }
+        try check(c.git_index_read(self.copy, 1));
+        self.source = Stamp.of(stat);
     }
 };
 
@@ -916,7 +1359,9 @@ pub const Repo = struct {
         git_error_clear();
 
         const items = refs.toOwnedSlice(arena) catch return error.Git;
-        std.mem.sort(Ref, items, {}, refLessThan);
+        // Unstable: no two refs have the same kind and name, so the order
+        // is total and a stable sort would only add code.
+        std.mem.sortUnstable(Ref, items, {}, refLessThan);
         return items;
     }
 
@@ -941,9 +1386,12 @@ pub const Repo = struct {
 
         // Every ref, not just HEAD: a branch that is not an ancestor of HEAD
         // still belongs on the graph, which is the whole point of drawing one.
+        // First-parent starts at HEAD alone, unless branches are picked.
         var pushed = false;
+        if (filter.first_parent) try check(c.git_revwalk_simplify_first_parent(walk));
         for (refs) |r| {
             if (!filter.walks(r)) continue;
+            if (filter.first_parent and filter.only.len == 0) continue;
             if (c.git_revwalk_push(walk, &r.target) == 0) pushed = true;
         }
         // HEAD itself too, unless branches are picked to show alone: a
@@ -975,11 +1423,59 @@ pub const Repo = struct {
             }
         }.f;
 
+        // The names people go by, as the repository's .mailmap has them: one
+        // person under two spellings or two addresses is one author.
+        var mailmap: ?*c.git_mailmap = null;
+        if (c.git_mailmap_from_repository(&mailmap, self.ptr) < 0) mailmap = null;
+        defer if (mailmap) |m| c.git_mailmap_free(m);
+
+        // Narrowed to authors: every commit walked, kept or not, in the walk's
+        // order with its parents — what joins the kept ones up afterwards.
+        const narrowed = filter.authors.len > 0;
+        var skip_arena: std.heap.ArenaAllocator = .init(gpa);
+        defer skip_arena.deinit();
+        var visits: std.ArrayList(Visit) = .empty;
+        defer visits.deinit(gpa);
+        var visited: usize = 0;
+
         var oid: Oid = undefined;
-        while (commits.items.len < MAX_COMMITS and c.git_revwalk_next(&oid, walk) == 0) {
+        while (commits.items.len < MAX_COMMITS and visited < MAX_WALKED and c.git_revwalk_next(&oid, walk) == 0) {
+            visited += 1;
             var commit: ?*c.git_commit = null;
             if (c.git_commit_lookup(&commit, self.ptr, &oid) < 0) continue;
             defer c.git_commit_free(commit);
+
+            if (narrowed) {
+                var name: [*c]const u8 = null;
+                var email: [*c]const u8 = null;
+                if (c.git_commit_author(commit)) |sig| {
+                    name = sig.*.name;
+                    email = sig.*.email;
+                }
+                if (mailmap) |m| {
+                    var real_name: [*c]const u8 = null;
+                    var real_email: [*c]const u8 = null;
+                    if (c.git_mailmap_resolve(&real_name, &real_email, m, name, email) == 0) {
+                        name = real_name;
+                        email = real_email;
+                    }
+                }
+                const n_text = if (name) |n| std.mem.span(n) else "";
+                const e_text = if (email) |e| std.mem.span(e) else "";
+                if (!authorMatches(filter.authors, n_text, e_text)) {
+                    // Passed over, its parents kept for the joining.
+                    const count = c.git_commit_parentcount(commit);
+                    const parents = skip_arena.allocator().alloc(Oid, count) catch return error.Git;
+                    var kept: usize = 0;
+                    for (0..count) |i| {
+                        parents[kept] = (c.git_commit_parent_id(commit, @intCast(i)) orelse continue).*;
+                        kept += 1;
+                    }
+                    visits.append(gpa, .{ .id = oid, .parents = parents[0..kept], .kept = null }) catch return error.Git;
+                    continue;
+                }
+                visits.append(gpa, .{ .id = oid, .parents = &.{}, .kept = @intCast(commits.items.len) }) catch return error.Git;
+            }
 
             var entry: Commit = .{
                 .id = oid,
@@ -997,8 +1493,18 @@ pub const Repo = struct {
                 entry.body = arena.dupe(u8, std.mem.trimEnd(u8, first, " \t\r")) catch return error.Git;
             }
             if (c.git_commit_author(commit)) |sig| {
-                if (sig.*.name) |n| entry.author = try intern(&names, gpa, arena, std.mem.span(n));
-                if (sig.*.email) |e| entry.email = try intern(&names, gpa, arena, std.mem.span(e));
+                var name: [*c]const u8 = sig.*.name;
+                var email: [*c]const u8 = sig.*.email;
+                if (mailmap) |m| {
+                    var real_name: [*c]const u8 = null;
+                    var real_email: [*c]const u8 = null;
+                    if (c.git_mailmap_resolve(&real_name, &real_email, m, name, email) == 0) {
+                        name = real_name;
+                        email = real_email;
+                    }
+                }
+                if (name) |n| entry.author = try intern(&names, gpa, arena, std.mem.span(n));
+                if (email) |e| entry.email = try intern(&names, gpa, arena, std.mem.span(e));
             }
 
             const n = c.git_commit_parentcount(commit);
@@ -1017,11 +1523,70 @@ pub const Repo = struct {
             commits.append(gpa, entry) catch return error.Git;
         }
 
+        if (narrowed) try joinKept(gpa, arena, commits.items, visits.items);
         return arena.dupe(Commit, commits.items) catch return error.Git;
+    }
+
+    /// A commit walked for an author filter: its parents if passed over, its
+    /// place among the kept ones if kept.
+    const Visit = struct { id: Oid, parents: []const Oid, kept: ?u32 };
+
+    /// The kept commits' parents, each passed-over one replaced by the
+    /// nearest kept ancestors through it. Backwards over the walk, which went
+    /// children first: a commit's parents are answered before it is.
+    fn joinKept(gpa: std.mem.Allocator, arena: std.mem.Allocator, kept: []Commit, visits: []const Visit) Error!void {
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        var is_kept: std.AutoHashMapUnmanaged(Oid, void) = .empty;
+        defer is_kept.deinit(gpa);
+        for (kept) |k| is_kept.put(gpa, k.id, {}) catch return error.Git;
+        // For a passed-over commit: the kept commits it leads to, at most a
+        // few — a lane for each is all the graph can draw anyway.
+        var reach: std.AutoHashMapUnmanaged(Oid, []const Oid) = .empty;
+        defer reach.deinit(gpa);
+
+        var i = visits.len;
+        while (i > 0) {
+            i -= 1;
+            const v = visits[i];
+            if (v.kept != null) continue;
+            var set: std.ArrayList(Oid) = .empty;
+            for (v.parents) |p| try addAncestors(a, &set, p, &is_kept, &reach);
+            reach.put(gpa, v.id, set.items) catch return error.Git;
+        }
+        for (kept) |*k| {
+            var set: std.ArrayList(Oid) = .empty;
+            for (k.parents) |p| try addAncestors(a, &set, p, &is_kept, &reach);
+            // No more than it had: joined through a merge passed over, a
+            // plain commit would otherwise be drawn as a merge it never was.
+            // The first is the nearest along its first parents.
+            const most = @min(set.items.len, k.parents.len);
+            k.parents = arena.dupe(Oid, set.items[0..most]) catch return error.Git;
+        }
+    }
+
+    const MAX_JOINED = 4;
+
+    fn addAncestors(a: std.mem.Allocator, set: *std.ArrayList(Oid), p: Oid, is_kept: *const std.AutoHashMapUnmanaged(Oid, void), reach: *const std.AutoHashMapUnmanaged(Oid, []const Oid)) Error!void {
+        const from: []const Oid = if (is_kept.contains(p)) &.{p} else reach.get(p) orelse &.{};
+        for (from) |o| {
+            if (set.items.len >= MAX_JOINED) return;
+            for (set.items) |had| {
+                if (oidEql(had, o)) break;
+            } else set.append(a, o) catch return error.Git;
+        }
     }
 
     /// Staged and unstaged changes, in a fresh snapshot.
     pub fn readWork(self: Repo, gpa: std.mem.Allocator) Error!Work {
+        return self.readWorkWith(gpa, .read_only);
+    }
+
+    /// `.refresh` writes the stats of files found unchanged back into the
+    /// index — which must be a `StatusCache`'s copy, never the
+    /// repository's own.
+    fn readWorkWith(self: Repo, gpa: std.mem.Allocator, index: enum { read_only, refresh }) Error!Work {
         var out: Work = .{ .arena = .init(gpa) };
         errdefer out.arena.deinit();
         const arena = out.arena.allocator();
@@ -1036,10 +1601,13 @@ pub const Repo = struct {
             c.GIT_STATUS_OPT_RENAMES_HEAD_TO_INDEX |
             c.GIT_STATUS_OPT_RENAMES_INDEX_TO_WORKDIR |
             c.GIT_STATUS_OPT_SORT_CASE_INSENSITIVELY;
+        if (index == .refresh) opts.flags |= c.GIT_STATUS_OPT_UPDATE_INDEX;
 
         var list: ?*c.git_status_list = null;
         try check(c.git_status_list_new(&list, self.ptr, &opts));
         defer c.git_status_list_free(list);
+        var perf: c.git_diff_perfdata = .{ .version = c.GIT_DIFF_PERFDATA_VERSION };
+        if (c.git_status_list_get_perfdata(&perf, list) == 0) out.hashed = perf.oid_calculations;
 
         var staged: std.ArrayList(Change) = .empty;
         var unstaged: std.ArrayList(Change) = .empty;
@@ -1173,16 +1741,27 @@ pub const Repo = struct {
     /// commit's against nothing. First parent only: a merge's full diff is a
     /// combined diff, which is a different thing to read and to render.
     pub fn readCommitDiff(self: Repo, gpa: std.mem.Allocator, id: Oid) Error!Diff {
+        return self.readCommitDiffLines(gpa, id, .all);
+    }
+
+    /// As `readCommitDiff`, with the lines of only the files `lines` says.
+    pub fn readCommitDiffLines(self: Repo, gpa: std.mem.Allocator, id: Oid, lines: Lines) Error!Diff {
         var commit: ?*c.git_commit = null;
         try check(c.git_commit_lookup(&commit, self.ptr, &id));
         defer c.git_commit_free(commit);
         const parent: ?Oid = if (c.git_commit_parentcount(commit) > 0) c.git_commit_parent_id(commit, 0).* else null;
-        return self.readRangeDiff(gpa, parent, id);
+        return self.readRangeDiffLines(gpa, parent, id, lines);
     }
 
     /// What changed from commit `from` to commit `to`, whatever lies between;
     /// from nothing at all when `from` is null.
     pub fn readRangeDiff(self: Repo, gpa: std.mem.Allocator, from: ?Oid, to: Oid) Error!Diff {
+        return self.readRangeDiffLines(gpa, from, to, .all);
+    }
+
+    /// As `readRangeDiff`, with the lines of only the files `lines` says:
+    /// every file is listed either way, with its name and what happened to it.
+    pub fn readRangeDiffLines(self: Repo, gpa: std.mem.Allocator, from: ?Oid, to: Oid, lines: Lines) Error!Diff {
         var out: Diff = .{ .arena = .init(gpa) };
         errdefer out.arena.deinit();
         const arena = out.arena.allocator();
@@ -1202,7 +1781,7 @@ pub const Repo = struct {
         // A rename as one file rather than a deletion and an addition.
         try check(c.git_diff_find_similar(diff, null));
 
-        out.files = try collectDiff(arena, diff.?);
+        out.files = try collectDiffLines(arena, diff.?, lines);
         return out;
     }
 
@@ -1277,6 +1856,52 @@ pub const Repo = struct {
             }) catch return &.{};
         }
         return out.toOwnedSlice(arena) catch &.{};
+    }
+
+    /// How `path` came to be conflicted, from which of its three stages the
+    /// index holds: the base (1), ours (2), theirs (3).
+    pub fn conflictKind(self: Repo, path: []const u8) ConflictKind {
+        var index: ?*c.git_index = null;
+        if (c.git_repository_index(&index, self.ptr) < 0) return .none;
+        defer c.git_index_free(index);
+        _ = c.git_index_read(index, 0);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return .none;
+        var ancestor: ?*const c.git_index_entry = null;
+        var ours: ?*const c.git_index_entry = null;
+        var theirs: ?*const c.git_index_entry = null;
+        if (c.git_index_conflict_get(&ancestor, &ours, &theirs, index, path_z) < 0) return .none;
+        if (ours == null and theirs == null) return .none;
+        if (ours == null) return .deleted_by_us;
+        if (theirs == null) return .deleted_by_them;
+        if (ancestor == null) return .both_added;
+        return .both_modified;
+    }
+
+    /// The conflicted file merged again from its three stages, diff3 style:
+    /// each region with its base, which the working copy lacks when git
+    /// wrote plain markers — its default. Null where a stage is missing.
+    pub fn mergedWithBase(self: Repo, gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
+        var index: ?*c.git_index = null;
+        if (c.git_repository_index(&index, self.ptr) < 0) return null;
+        defer c.git_index_free(index);
+        _ = c.git_index_read(index, 0);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return null;
+        var ancestor: ?*const c.git_index_entry = null;
+        var ours: ?*const c.git_index_entry = null;
+        var theirs: ?*const c.git_index_entry = null;
+        if (c.git_index_conflict_get(&ancestor, &ours, &theirs, index, path_z) < 0) return null;
+        if (ancestor == null or ours == null or theirs == null) return null;
+
+        var opts: c.git_merge_file_options = undefined;
+        if (c.git_merge_file_options_init(&opts, c.GIT_MERGE_FILE_OPTIONS_VERSION) < 0) return null;
+        opts.flags = @intCast(c.GIT_MERGE_FILE_STYLE_ZDIFF3);
+        var result: c.git_merge_file_result = std.mem.zeroes(c.git_merge_file_result);
+        if (c.git_merge_file_from_index(&result, self.ptr, ancestor, ours, theirs, &opts) < 0) return null;
+        defer c.git_merge_file_result_free(&result);
+        const ptr = result.ptr orelse return null;
+        return gpa.dupe(u8, ptr[0..result.len]) catch null;
     }
 
     /// A commit's whole message, trimmed, copied into `arena`; empty when the
@@ -1487,6 +2112,20 @@ pub const Repo = struct {
     }
 
     /// The blob or tree id at `path` in a commit, null where it does not exist.
+    /// A file's bytes as commit `id` has it, owned by `gpa`; null where the
+    /// commit has no such file.
+    pub fn blobAt(self: Repo, gpa: std.mem.Allocator, id: Oid, path: []const u8) ?[]u8 {
+        const path_z = gpa.dupeZ(u8, path) catch return null;
+        defer gpa.free(path_z);
+        const blob_id = self.entryAt(id, path_z) orelse return null;
+        var blob: ?*c.git_blob = null;
+        if (c.git_blob_lookup(&blob, self.ptr, &blob_id) < 0) return null;
+        defer c.git_blob_free(blob);
+        const size: usize = @intCast(c.git_blob_rawsize(blob));
+        const raw: [*]const u8 = @ptrCast(c.git_blob_rawcontent(blob) orelse return null);
+        return gpa.dupe(u8, raw[0..size]) catch null;
+    }
+
     fn entryAt(self: Repo, id: Oid, path: [*:0]const u8) ?Oid {
         const tree = self.commitTree(id) orelse return null;
         defer c.git_tree_free(tree);
@@ -1520,7 +2159,58 @@ pub const Repo = struct {
         const p = c.git_repository_path(self.ptr) orelse return "";
         return std.mem.span(p);
     }
+
+    /// Every value of `key` in the repository's own config file — what
+    /// `git config --local --get-all` answers — with no `git` to start.
+    /// Copied into `arena`; empty when the key is not there.
+    ///
+    /// The file is opened afresh each time: the config libgit2 keeps for a
+    /// repository would miss what `git config` wrote since.
+    pub fn localConfigAll(self: Repo, arena: std.mem.Allocator, key: [:0]const u8) Error![]const []const u8 {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "{s}config", .{self.commondir()}, 0) catch return error.Git;
+        var cfg: ?*c.git_config = null;
+        try check(c.git_config_open_ondisk(&cfg, path.ptr));
+        defer c.git_config_free(cfg);
+
+        var iter: ?*c.git_config_iterator = null;
+        const opened = c.git_config_multivar_iterator_new(&iter, cfg, key.ptr, null);
+        if (opened == c.GIT_ENOTFOUND) return &.{};
+        try check(opened);
+        defer c.git_config_iterator_free(iter);
+
+        var values: std.ArrayList([]const u8) = .empty;
+        var entry: ?*c.git_config_entry = null;
+        while (true) {
+            const rc = c.git_config_next(&entry, iter);
+            if (rc == c.GIT_ITEROVER) break;
+            try check(rc);
+            const value = arena.dupe(u8, std.mem.span(entry.?.value)) catch return error.Git;
+            values.append(arena, value) catch return error.Git;
+        }
+        return values.toOwnedSlice(arena) catch return error.Git;
+    }
+
+    /// Where the stash whose commit is `id` is in the list now: the `n` of
+    /// `stash@{n}`, the only name `pop` and `drop` take. Read afresh, as a
+    /// stash pushed or dropped since — in a terminal, say — moves every
+    /// index. Null when it is gone.
+    pub fn stashIndex(self: Repo, id: Oid) ?usize {
+        var find: StashFind = .{ .id = id };
+        _ = c.git_stash_foreach(self.ptr, findStash, &find);
+        return find.at;
+    }
 };
+
+const StashFind = struct { id: Oid, at: ?usize = null };
+
+fn findStash(index: usize, _: [*c]const u8, stash_id: [*c]const c.git_oid, payload: ?*anyopaque) callconv(.c) c_int {
+    const find: *StashFind = @ptrCast(@alignCast(payload.?));
+    if (!oidEql(stash_id.*, find.id)) return 0;
+    find.at = index;
+    // Non-zero stops the walk.
+    return 1;
+}
 
 /// A deleted file has no `new_file.path`; fall back to the old one so the row
 /// is not blank.
@@ -1587,12 +2277,49 @@ fn collectStash(_: usize, message: [*c]const u8, stash_id: [*c]const c.git_oid, 
 ///
 /// Every list at its size from the start — libgit2 knows each hunk's line
 /// count — since one grown in the arena leaves each buffer it outgrew there.
+/// Which files of a diff to read the lines of. Listing the files is a walk
+/// of two trees; a file's lines are a diff of its two blobs, and over a
+/// commit of thousands of files that is seconds — for the one file looked at.
+pub const Lines = union(enum) {
+    all,
+    none,
+    /// The file of this name, new or old.
+    one: []const u8,
+};
+
 fn collectDiff(arena: std.mem.Allocator, diff: *c.git_diff) Error![]FileDiff {
+    return collectDiffLines(arena, diff, .all);
+}
+
+fn collectDiffLines(arena: std.mem.Allocator, diff: *c.git_diff, which: Lines) Error![]FileDiff {
     var files: std.ArrayList(FileDiff) = .empty;
 
     const count = c.git_diff_num_deltas(diff);
     files.ensureTotalCapacityPrecise(arena, count) catch return error.Git;
     for (0..count) |i| {
+        // Listed only: its names and what happened to it, from the trees.
+        const wanted = switch (which) {
+            .all => true,
+            .none => false,
+            .one => |name| blk: {
+                const d = c.git_diff_get_delta(diff, i);
+                break :blk sameCPath(d.*.new_file.path, name) or sameCPath(d.*.old_file.path, name);
+            },
+        };
+        if (!wanted) {
+            const d = c.git_diff_get_delta(diff, i);
+            files.append(arena, .{
+                .path = try dupePath(arena, d.*.new_file.path, d.*.old_file.path),
+                .old_path = try dupePath(arena, d.*.old_file.path, d.*.new_file.path),
+                .status = deltaStatus(d.*.status),
+                .mode = if (d.*.new_file.mode != 0) d.*.new_file.mode else d.*.old_file.mode,
+                .lines = &.{},
+                .hunk_count = 0,
+                .binary = d.*.flags & c.GIT_DIFF_FLAG_BINARY != 0,
+            }) catch return error.Git;
+            continue;
+        }
+
         var patch: ?*c.git_patch = null;
         if (c.git_patch_from_diff(&patch, diff, i) < 0) continue;
         defer c.git_patch_free(patch);
@@ -1662,6 +2389,12 @@ fn collectDiff(arena: std.mem.Allocator, diff: *c.git_diff) Error![]FileDiff {
     }
 
     return files.toOwnedSlice(arena) catch return error.Git;
+}
+
+/// Whether libgit2's C path `p` names `name`.
+fn sameCPath(p: [*c]const u8, name: []const u8) bool {
+    if (p == null) return false;
+    return std.mem.eql(u8, std.mem.span(p), name);
 }
 
 /// libgit2 hands back diff lines with their newline attached; the view adds its
@@ -1770,7 +2503,7 @@ test "refs sort by kind, with the checked-out branch first" {
         .{ .name = "main", .kind = .local, .target = undefined, .head = true },
         .{ .name = "aaa", .kind = .local, .target = undefined, .head = false },
     };
-    std.mem.sort(Ref, &refs, {}, refLessThan);
+    std.mem.sortUnstable(Ref, &refs, {}, refLessThan);
 
     try std.testing.expectEqualStrings("main", refs[0].name);
     try std.testing.expectEqualStrings("aaa", refs[1].name);
@@ -2171,6 +2904,41 @@ test "diff3 style keeps the base out of both sides" {
     try std.testing.expectEqualStrings("yours\n", found[0].theirs);
 }
 
+test "a region's base is its own, never the next region's" {
+    const text =
+        "<<<<<<< HEAD\nfirst mine\n=======\nfirst yours\n>>>>>>> other\n" ++
+        "between\n" ++
+        "<<<<<<< HEAD\nsecond mine\n||||||| base\nsecond original\n=======\nsecond yours\n>>>>>>> other\n";
+
+    const found = try parseConflicts(std.testing.allocator, text);
+    defer std.testing.allocator.free(found);
+
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+    try std.testing.expect(!found[0].has_base);
+    try std.testing.expectEqualStrings("first mine\n", found[0].ours);
+    try std.testing.expect(found[1].has_base);
+    try std.testing.expectEqualStrings("second original\n", found[1].base);
+}
+
+test "regions replaced in one pass, the others left as they were" {
+    const a = std.testing.allocator;
+    const text = "a\n<<<<<<< HEAD\n1\n=======\n2\n>>>>>>> o\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\n<<<<<<< HEAD\n5\n=======\n6\n>>>>>>> o\nd\n";
+    const found = try parseConflicts(a, text);
+    defer a.free(found);
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+
+    const out = try replaceRegions(a, text, found, &.{ "one\n", null, "five\n" });
+    defer a.free(out);
+    try std.testing.expectEqualStrings("a\none\nb\n<<<<<<< HEAD\n3\n=======\n4\n>>>>>>> o\nc\nfive\nd\n", out);
+
+    // Each the same as replacing that region alone.
+    const first = try replaceRegion(a, text, found[0], &.{"one\n"});
+    defer a.free(first);
+    const only_first = try replaceRegions(a, text, found, &.{ "one\n", null, null });
+    defer a.free(only_first);
+    try std.testing.expectEqualStrings(first, only_first);
+}
+
 test "a marker in the middle of a line is not a conflict" {
     // The case that would quietly eat half a file on resolve.
     const text =
@@ -2270,4 +3038,34 @@ test "a filter of picked branches walks those, and only those" {
     try std.testing.expect(filter.walks(.{ .name = "a", .kind = .local, .target = z, .head = false }));
     try std.testing.expect(!filter.walks(.{ .name = "b", .kind = .local, .target = z, .head = true }));
     try std.testing.expect(filter.walks(.{ .name = "c", .kind = .remote, .target = z, .head = false }));
+}
+
+
+test "a splice takes a text back to what it was, and only the text it left" {
+    const a = std.testing.allocator;
+    const before = "one\ntwo\n<<<<<<< ours\nmine\n=======\nyours\n>>>>>>> theirs\nthree\n";
+    const after = "one\ntwo\nmine\nthree\n";
+    const step = try spliceBetween(a, before, after);
+    defer step.deinit(a);
+    // Only what changed is kept — the region, markers and all — not the
+    // lines around it.
+    try std.testing.expectEqual(@as(usize, "one\ntwo\n".len), step.start);
+    try std.testing.expect(std.mem.indexOf(u8, step.before, "two") == null);
+    try std.testing.expect(std.mem.indexOf(u8, step.before, "three") == null);
+
+    const back = (try spliceUndo(a, after, step)).?;
+    defer a.free(back);
+    try std.testing.expectEqualStrings(before, back);
+
+    // Not the text it left: nothing to take back.
+    try std.testing.expectEqual(@as(?[]u8, null), try spliceUndo(a, "one\ntwo\nyours\nthree\n", step));
+
+    // Nothing changed, or everything: still the way back.
+    for ([_][2][]const u8{ .{ "same\n", "same\n" }, .{ "a\n", "b\nc\n" }, .{ "", "x" } }) |pair| {
+        const s = try spliceBetween(a, pair[0], pair[1]);
+        defer s.deinit(a);
+        const b = (try spliceUndo(a, pair[1], s)).?;
+        defer a.free(b);
+        try std.testing.expectEqualStrings(pair[0], b);
+    }
 }

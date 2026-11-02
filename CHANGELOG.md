@@ -5,6 +5,289 @@ Every release of Zit, newest first. Downloads are on the
 
 ## Unreleased
 
+### Added
+- Redo beside Undo in the toolbar, as GitKraken has them: lit after an
+  undo, until something else moves the branch — `Ctrl Shift Z` and `Ctrl Y`
+  as before. Each says on hover what it would take back: Undo “commit:
+  Fix login”.
+- A website, [damienmonchaty.github.io/zit](https://damienmonchaty.github.io/zit/):
+  installing, connecting GitHub, every feature, the search syntax and the
+  keyboard shortcuts.
+- A zoom for the whole window, as a browser's: `Ctrl =` and `Ctrl -` (the
+  keypad's too) a tenth at a time from 70 to 200 %, `Ctrl 0` back to 100 %,
+  also in the command palette. It is remembered, and shown in the status bar
+  when it is not 100 % — a click there resets it.
+
+### Changed
+- On Windows, Zit draws through Direct3D 12 where there is one, rather
+  than 11: about 30 MB less memory of its own and half the wake-ups, the
+  same pixels.
+- The downloads are nearly half the size: 7.3 MB for Windows instead of
+  12.5, 3.2 MB for the Linux archive instead of 5.5. Nothing Zit uses is
+  gone — what is left out is code nothing calls: SDL's audio, joysticks and
+  cameras, dvui's debug window, the fonts of the theme Zit replaces as it
+  starts. The text is drawn exactly as before.
+- The author filter filters: the history is read again with the other
+  authors' commits left out, each one kept joined to the nearest kept one
+  before it, so the lanes still say how they follow one another — as
+  `git log --author --graph` draws them — and an author's older commits are
+  found beyond the last 5,000. The AUTHOR header names who it is narrowed
+  to, and a chip over the graph says how many commits are theirs, with
+  "show all authors". Its menu lists each author with their picture,
+  address and how many commits — you first, those picked kept at the top —
+  a click on one shows theirs alone, the box beside it adds or takes them
+  off, and Enter in its field takes the first one shown. A commit's menu
+  has "Only commits by…" and adds its author to the filter, or takes them
+  off. Authors are told apart by name and address together, and read
+  through the repository's `.mailmap`, so one person under two spellings
+  is one author.
+- A merge, rebase, cherry-pick or revert under way is said at the toolbar's
+  right end, as GitComet's action bar says it: REBASING, MERGING… in bold,
+  how far and how many conflicts under it, and the whole of it on hover —
+  "Rebasing feat onto main", the commit it stopped on. Beside it Abort, Skip,
+  and the next thing to do as the one filled button: Resolve the conflicts,
+  Next file, Continue (also `Ctrl Enter` and the palette), or Skip empty for
+  a commit its resolution left empty. Skip now works for cherry-picks and
+  reverts too. The sidebar lists the conflicted files, each a click away.
+- Nothing pushes the window down under the toolbar any more. A name asked
+  for — a new branch or tag, a remote, a stash's message, a rename, a
+  worktree — is asked in a dialog: Enter makes it, Esc lets it be. A yes or
+  no for what cannot be undone is a toast low on the right, its button named
+  for what it does — Discard, Delete, Force push, Abort — with Esc for
+  Cancel. A branch dropped onto another opens a menu where it was let go, as
+  GitKraken's, with the two things it can mean: merge it in, or rebase onto
+  it.
+- The conflict view works from the keys, as GitComet's: one region at a time
+  is the active one, framed, with `↑` `↓` (or `F2` `F3`) to move, `1` `2` `3`
+  to keep the left side, the right one or both, `U` or `Ctrl Z` to take the
+  last pick back, `Enter` to stage a file with nothing left in it and open
+  the next, `F4` for the next conflicted file. A click on an unresolved line
+  of the output goes to its region.
+- Each region shows its base — what the file had before either side
+  changed it — even when git wrote plain markers, its default: Zit merges
+  the file again from the index to find it. Regions that resolve on their
+  own are marked — both sides made the same change, only one side changed
+  it, or each changed different lines next to each other — and one click
+  resolves them all, each line from the side that changed it.
+- "All of main" and "All of feature/x" stage the file in the same click and
+  open the next one; Undo pick and Start over take a file back. A file
+  deleted on one side asks plainly — keep it, or delete it — and a binary
+  file offers one side's version or the other's, instead of a page of noise.
+- A pull request takes the whole pane, with GitHub's sidebar on its right:
+  who reviews and where each stands, who it is assigned to, its labels.
+  Each section's head drops the list to change it — the people who can be
+  asked, the repository's labels with their colours — and each tick is sent
+  at once. The pictures and the icons down its timeline are one size. Its
+  list's filters — open, to review, mine, drafts, merged, closed — are a
+  select beside the search, each with how many it holds. Its comments and reviews fold like an accordion: a click on one's
+  head folds or opens it, a folded one keeps its first line; a long
+  conversation opens on the description and the last three, with Expand all
+  and Collapse all. Its actions are icons on its title's line — check out,
+  open on GitHub, edit, back to draft, read again — and its readiness line
+  ends with the one thing to do next: rebase it onto its base here (or merge
+  the base in) when it conflicts, Update branch when it is behind, the
+  failing checks, Ready for review for a draft, or Merge.
+- A pull request someone asked changes of says who, and how many
+  conversations are left — "ann asked for changes · 2 open conversations" —
+  with what to do about it: Show them, Check out to fix, then Re-request
+  review. Each reviewer who answered can be asked again from the sidebar.
+- A pull request's conversations on lines of the diff sit under the review
+  that opened them, as on GitHub; a resolved one is folded to its first
+  words, and a review with one still open is never folded away. A
+  suggestion reads as the change it is, the lines it replaces and what with,
+  and Apply suggestion writes it into the file here: on the request's
+  branch, and only while those lines still read as the comment saw them.
+  Its button then says Applied here, with See the change. A conversation
+  with a suggestion shows its code once: the lines around in grey, those it
+  replaces in red, what with in green. Under a file in Files changed, a
+  conversation is headed by its line — "Line 3" — not the file's name again.
+- A pull request opens with its head at once — its number, title, author
+  and branches, from the list — the rest loading under it, rather than a
+  blank pane. Read again, after an action or from its refresh icon, it stays
+  on screen, with the loading dots and what is being done — "Resolving",
+  "Reading" — in place of the icon.
+  A reply can resolve its conversation in the same click, and `Ctrl Enter`
+  sends it. The request's head and tabs run from one edge of the pane to
+  the other.
+- Checking out a pull request works as `gh pr checkout`: its branch tracks
+  the remote's, and a branch already here is brought up to date rather than
+  left behind. A fork's request goes on `pr/N`, never onto a branch of yours
+  of the same name. Update branch and Merge name the commit they were shown
+  at, so GitHub refuses rather than act on a branch that moved; the request
+  is read again once GitHub has updated it.
+- In the pull requests, `↑` `↓` (or `K` `J`) walk the list in its order, `1`
+  to `4` open its tabs, `Ctrl Enter` sends the review box as a comment, and
+  the checked-out branch's request is the one open to begin with.
+- The create and edit pull request dialogs keep a form's width, however long
+  the template and the commits filled into the description are.
+- A new pull request is filled in from lists, as on GitHub: the branch it
+  goes into and the one it comes from, the reviewers and the assignees from
+  the people who can be asked on the repository, its labels with their
+  colours, and whether it opens ready for review or as a draft — each list
+  with a field to narrow it. Reviewers, assignees and labels are set on it
+  as soon as GitHub has made it. A branch not on the remote yet is pushed
+  from the dialog. The dialog waits while GitHub makes it, then gives way to
+  the new request, open in the list. The edit dialog is the same form,
+  filled in with the request as it is.
+- A conflict's sides are named: "Keep main", "Keep feature/x", with what each
+  is — during a rebase, where git's "ours" is the base and "theirs" your
+  own commit, the buttons say so instead of the reverse.
+- After a rebase, Push becomes Force push (with lease), which says how many
+  commits on the remote it replaces, and Pull stops counting the old
+  commits it would merge back in.
+- Merging, rebasing, cherry-picking and reverting are not offered while
+  another one is under way; Continue and Skip run without freezing the
+  window when hooks or signing take a while.
+- Zit is roomier, towards GitComet's comfortable density: text a point
+  larger throughout, taller rows in the lists, the history and the sidebar,
+  wider menus with taller items, larger fields, buttons and tabs, and the
+  changed files named in the interface's face rather than a mono one.
+- The repository tabs are browser tabs, as GitComet's: the active one raised
+  and open onto the bar below, the others flat with a rule between them, each
+  with the repository's initials. Menus, dialogs and tooltips have rounder
+  corners; a menu's row under the pointer is tinted with the accent rather
+  than filled with it; the checked-out commit has an accent bar down its edge.
+- The two side panels are one design, roomier: section headers and rows the
+  same height on both, and the changes panel headed by **Changed files** as a
+  title, over its sections. The graph's nodes — avatars, merges and the
+  uncommitted changes' — are all one size, a little larger.
+- The toolbar is taller, its buttons larger with readable captions. Its left
+  end is the branch alone, on a framed button — the repository is the tab's —
+  and the branch menu is as tall as its branches, up to a bound, rather than
+  a fixed height. **Pull requests** has left the tab strip: the sidebar's section and the
+  palette open them. A window too narrow for the captions shows
+  the icons alone, their captions on hover.
+- The history's branch names have a column of their own, **BRANCH / TAG**,
+  before the graph, as in GitKraken: read from its left, joined to their commit
+  by a line of the branch's colour, and cut only where the column ends. Drag
+  its edge to widen it; the width is kept.
+- The Tree view of changed files is a file explorer's tree: folders nested in
+  folders, set in under the one they are in, folders before files, each with
+  how many files it holds; a folder holding only one folder shares its line,
+  `src/components`. A click folds a folder; its + or − stages or unstages all
+  of it. A commit's files show the same tree.
+- Stage all runs off the window's thread, with its pill in the status bar:
+  adding 11,000 new files is 13 s of `git` on Windows, which the window used
+  to wait out frozen.
+
+### Changed
+- The right-hand panel is headed as the sidebar is: Changed files, Unstaged,
+  Staged, Commit and a commit's sections in title case and semi-bold, with
+  the sidebar's icons and hairlines, a count on a pill that reads at a
+  glance. Unstaged and Staged fold under their title, as a sidebar section
+  does.
+
+### Removed
+- Focus mode, `Ctrl+Shift+F`, and its button in the status bar.
+
+### Fixed
+- With an author picked or a search typed, a frame no longer allocates on
+  the heap; and what the newer views keep — the authors' list, a conflicted
+  file's picks, the pull request form — is freed at exit too.
+- Resolving a conflicted file region by region no longer keeps a copy of
+  the whole file for every pick, to undo it: 500 picks in a 1.3 MB lockfile
+  kept 628 MB; what each pick changed, 50 KB. An undo after the file was
+  edited another way says there is nothing to take back, rather than
+  undoing into it. Closing the repository lets the picks go.
+- On Windows, an open repository no longer costs a fifth of a core while
+  nothing happens: its working tree is watched, as on Linux, instead of read
+  again every 0.7 s — 0.5–0.8 % CPU when idle instead of 21–27 %, on a
+  repository of 2,300 files. A fetch that moves nothing is no longer taken
+  for a change.
+- Files touched without being changed — saved as they were, a branch
+  switched to and back, a tool that rewrites what it leaves alone — are
+  read and hashed once to see that nothing changed, not at every refresh:
+  2,300 of them made each read of the working tree 4–5 s on Windows, one
+  core kept busy, and it is 150 ms again after the first. Zit keeps what it
+  learned in a copy of the index of its own; the repository's index is not
+  written.
+- Changing what the graph shows — a branch hidden or shown alone,
+  First-parent, the remotes, an author — and Refresh no longer stop the
+  window while the history is read again: it is read on another thread, as
+  after a fetch, the graph on screen staying until the new one is in. A
+  read still out for the filter as it was is dropped, not shown first.
+- A commit's files, two commits compared and the authors' menu build only
+  the rows on screen, as the history and the changes do: a frame with a
+  commit of 2,000 files picked takes 2 ms of Zit's instead of 20, the menu
+  open on 300 authors 4 ms instead of 12, and only the authors shown ask for
+  their picture. A commit's files are no longer cut at 2,000.
+- Thousands of changes picked with Shift no longer slow every frame: with
+  5,000 picked a frame took 62 ms, it takes 3 as with none.
+- A conflicted lockfile no longer stalls the window as it opens and as its
+  regions are resolved: reading 500 regions in 1.3 MB took 88 ms and
+  "resolve the safe ones" 270 ms; they take 1 ms each.
+- On Windows, Zit asks the system for about 35 MB less memory: its
+  background threads no longer each reserve a 16 MB stack.
+- Picking a commit of thousands of files no longer freezes the window for
+  seconds: its files are listed without reading a line of them — 4 ms
+  instead of 3.7 s for 1,830 files and 210,000 lines — and the file opened
+  is read alone. The same goes for two commits compared.
+- A merged or closed pull request's line says so — "Merged into main" —
+  rather than "Ready to merge", and GitHub is no longer asked about it every
+  few seconds. A description's task list shows its boxes, ticked or not:
+  they came out blank.
+- A pull request merged or closed from Zit leaves the list at once, and
+  shows as merged or closed, rather than after a refresh by hand: it stays
+  out of the lists GitHub sends back before it has caught up. Its branch
+  already deleted by GitHub after the merge is no longer an error that kept
+  the list from being read again.
+- A reply in a review thread, a quote in a comment and a row of a pull
+  request's files no longer sit on a dark band.
+- In the graph, a line meets a commit at its middle, as GitComet draws
+  them: a merge whose parent is the next commit, on its left, comes down its
+  own column and turns into it at its height, where it used to cross just
+  above it and reach it beside its middle; a merge onto a line already on
+  its left leaves across at its own height. The lines are two crisp pixels
+  wide on the screen's grid, rather than a blur across three.
+- A history read again in the background — after a fetch, say — dropped the
+  graph out of First-parent.
+- Merges, rebases and conflicts are harder to break by accident:
+  - Staging a conflicted file that still has its conflict markers — with +,
+    a double-click, Mark resolved, Stage all or the palette — asks first.
+  - Abort and Skip ask first, saying what is lost.
+  - Undo is refused while a merge, rebase, cherry-pick or revert is under
+    way, where it used to reset under it; Amend is hidden then.
+  - A pick in a conflicted file no longer writes over the file when it was
+    edited elsewhere since it was shown.
+  - An operation that stops at a conflict is no longer shown as an error:
+    the first conflicted file opens instead.
+  - An interactive rebase git refuses to start keeps its plan on screen,
+    and its todo file is no longer left in the repository.
+  - A merge stopped on a conflict in a terminal now shows in the toolbar.
+- In the pull requests: ↑ and ↓ no longer move the hidden history, Ctrl+F
+  searches the requests, a review written for one request is not carried to
+  the next, Approve and Request changes are not offered on your own request,
+  and a request GitHub has not yet checked reads "still working out whether
+  it can merge…", asked again every few seconds, rather than "Ready to merge".
+- In the Connect GitHub dialog, the loading dots no longer sit beside the
+  buttons as if part of the last one: they say what is being waited on, on a
+  line of their own — "Waiting for your approval on github.com" — and come
+  with "Asking GitHub for a code…" too.
+- With thousands of changed files, staging no longer stops the window: the
+  status is read again off its thread after every command, as it already was
+  on the timer. With 11,000 files a file's + froze it for half a second and
+  the end of Stage all for 385 ms; now neither for more than 45 ms. While a
+  command changes them, the lists of changes wait under a veil that says so —
+  the three dots and "Staging…", "Committing…" — beside the status bar's pill.
+- The uncommitted changes' node sits on the line of HEAD's commit, in its
+  colour, with a dotted line down to it, rather than ten pixels left of the
+  first line whatever HEAD was on.
+- Hiding a branch from the graph takes it out: its name leaves the branch
+  column, and so do the commits only it reaches — the remote branch it tracks
+  is hidden with it, which kept them up before. A hidden tag's name goes too.
+- The sidebar's sections are headed as GitComet heads them: their name in the
+  text's own colour and case, a line between them, and no count — whose eye,
+  on hover, used to take its place further right. An open section with
+  nothing in it says so: "No stashes". Hiding a whole section from the graph
+  is in its menu, opened by a right click or the ⋯ that shows on hover; a
+  section hidden is faded, a crossed eye after its name.
+- A branch's "Last commit" tooltip in the sidebar opens past the sidebar's
+  edge, rather than over the ⋯ the hover brings up.
+- With thousands of changed files, the lists of unstaged and staged files
+  scroll, and the commit box stays in sight under them. Only the rows on
+  screen are drawn: with 11,000 files the window answers in under a
+  millisecond while scrolling, against 170 ms before.
+
 ## [0.1.2] — 2026-10-29
 
 ### Fixed
@@ -44,5 +327,6 @@ First public release: history graph, staging by line, branches, rebase,
 conflicts, stashes, worktrees, and GitHub pull requests, checks and issues.
 Its downloads were withdrawn: its GitHub sign-in no longer works.
 
+[0.1.2]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.2
 [0.1.1]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DamienMonchaty/zit/releases/tag/v0.1.0

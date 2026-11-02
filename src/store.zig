@@ -18,6 +18,17 @@ pub const Group = struct {
     color: u8 = 0,
     /// Folded to its label in the strip.
     collapsed: bool = false,
+    /// Index into `File.workspaces`: the workspace the group is in.
+    workspace: usize = 0,
+};
+
+/// A set of groups, the strip showing one at a time.
+pub const Workspace = struct {
+    name: []const u8 = "",
+    color: u8 = 0,
+    /// The group and tab it was on, reopened when switched back to.
+    group: usize = 0,
+    tab: usize = 0,
 };
 
 /// The file's whole contents.
@@ -27,6 +38,9 @@ pub const Group = struct {
 /// first, so the empty workspace saved next does not overwrite it.
 pub const File = struct {
     groups: []const Group = &.{},
+    /// None in a file of before them: every group is then in one.
+    workspaces: []const Workspace = &.{},
+    active_workspace: usize = 0,
     active_group: usize = 0,
     active_repo: usize = 0,
     /// Which of the two compiled-in themes to start in.
@@ -39,17 +53,37 @@ pub const File = struct {
     auto_fetch_minutes: u32 = 10,
     /// Remote branches drawn in the graph.
     show_remote_branches: bool = true,
+    /// The graph's history mode: first parents from HEAD, or every branch.
+    first_parent: bool = false,
     /// The graph column's width as dragged; 0 is as wide as the lanes need.
     graph_width: f32 = 0,
+    /// The branch column's width as dragged; 0 is its default.
+    branch_width: f32 = 0,
     /// Open last run's tabs again at start, rather than the start page.
     remember_tabs: bool = true,
     /// The first branch of a repository made from the new-repository dialog.
     default_branch: []const u8 = "main",
     /// Fetches drop the remote branches deleted on the remote.
     prune: bool = true,
+    /// What opens a file from a diff: a command, the file's path after it.
+    /// Empty: the system's own choice for the file.
+    editor: []const u8 = "",
+    /// The terminal Terminal opens, by its command; empty: $TERMINAL, then
+    /// the first of the usual ones found.
+    terminal: []const u8 = "",
+    /// Authors' pictures, from Gravatar or GitHub; off, their initials and
+    /// nothing asked of either.
+    avatars: bool = true,
+    /// The theme by its name; empty, Zit Dark or Light as `dark` says.
+    theme: []const u8 = "",
+    /// The app's text and the editor's, as factors on their sizes.
+    ui_text: f32 = 1,
+    code_text: f32 = 1,
     /// GitHub, through Zit's own sign-in: pull requests, issues, checks, the
     /// account. Off, Zit is a git client and nothing more.
     integrations: bool = true,
+    /// The whole window's zoom, over the system's own scale: 1 is 100 %.
+    zoom: f32 = 1.0,
 };
 
 /// How a commit message is put together. Global rather than per repository:
@@ -199,6 +233,7 @@ test "a workspace survives a round trip through the file" {
         },
         .active_group = 1,
         .active_repo = 0,
+        .zoom = 1.3,
     };
     try std.testing.expect(save(gpa, io, dir, written));
 
@@ -211,6 +246,7 @@ test "a workspace survives a round trip through the file" {
     try std.testing.expectEqualStrings("Odd \"one\"", read.file.groups[1].name);
     try std.testing.expectEqualStrings("/home/me/it's here/", read.file.groups[1].repos[0]);
     try std.testing.expectEqual(@as(usize, 1), read.file.active_group);
+    try std.testing.expectEqual(@as(f32, 1.3), read.file.zoom);
 }
 
 test "a missing or corrupt workspace reads as an empty one" {

@@ -40,82 +40,97 @@ const fonts: []const dvui.Font.Source = &.{
     },
 };
 
-/// Type scale. Kept tight: this is a dense tool, not a document reader.
+/// The app's text and the editor's (a diff's or a blame's code), each as a
+/// factor on the sizes below: set in Appearance, apart from the zoom.
+pub var ui_scale: f32 = 1;
+pub var code_scale: f32 = 1;
+
+/// Type scale, in Inter, whose tall x-height reads larger than most faces at
+/// the same size: one size for what is read — the commit list's message —
+/// titles over it, meta under it.
 pub const size = struct {
-    // Inter has a tall x-height, so the scale sits half a point small.
-    pub const tiny: f32 = 9.5;
-    pub const small: f32 = 10.5;
-    pub const body: f32 = 12;
-    pub const section: f32 = 10;
-    pub const title: f32 = 12.5;
+    pub const tiny: f32 = 10.5;
+    pub const small: f32 = 11.5;
+    /// The commit list's message size, and the app's: one size reads as one.
+    pub const body: f32 = 11.5;
+    pub const section: f32 = 10.5;
+    pub const title: f32 = 13.5;
     pub const mono: f32 = 11;
     /// Tab names: read from across the window, not scanned in a list.
-    pub const tab: f32 = 11;
-    /// The commit list: six things a row, thousands of rows. Its own size so
-    /// it can be dense without shrinking every other panel with it.
-    pub const graph: f32 = 10.75;
+    pub const tab: f32 = 11.5;
+    /// The commit list: a message to read, its author and date under it in
+    /// weight, never in size so far that they cannot be read.
+    pub const graph: f32 = 11.5;
     pub const graph_meta: f32 = 10.5;
     /// Sha and date: a mono face reads larger than Inter at the same size.
-    pub const graph_mono: f32 = 9.5;
+    pub const graph_mono: f32 = 10;
+    /// A diff's code: as the commit list's messages read, a mono face a
+    /// half point under them.
+    pub const code: f32 = 11;
 };
 
 pub fn tab() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tab });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tab });
 }
 
 pub fn tabBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tab, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tab, .weight = .bold });
 }
 
 /// A commit's message in the graph.
 pub fn graphText() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.graph });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.graph });
 }
 
 /// Author and date in the graph: under the message, never competing with it.
 pub fn graphMeta() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.graph_meta });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.graph_meta });
 }
 
 pub fn graphMono() dvui.Font {
-    return .find(.{ .family = MONO_FAMILY, .size = size.graph_mono });
+    return .find(.{ .family = MONO_FAMILY, .size = ui_scale * size.graph_mono });
 }
 
 pub fn body() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.body });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.body });
 }
 
 pub fn bodyBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.body, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.body, .weight = .bold });
 }
 
 pub fn small() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.small, .line_height_factor = 1.15 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.small, .line_height_factor = 1.15 });
 }
 
 pub fn smallBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.small, .weight = .bold, .line_height_factor = 1.15 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.small, .weight = .bold, .line_height_factor = 1.15 });
 }
 
 pub fn tinyBold() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tiny, .weight = .bold, .line_height_factor = 1.1 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tiny, .weight = .bold, .line_height_factor = 1.1 });
 }
 
 pub fn tiny() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.tiny, .line_height_factor = 1.1 });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.tiny, .line_height_factor = 1.1 });
 }
 
 /// Panel headers. Small and bold beats large and light for a sidebar.
 pub fn section() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.section, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.section, .weight = .bold });
 }
 
 pub fn title() dvui.Font {
-    return .find(.{ .family = UI_FAMILY, .size = size.title, .weight = .bold });
+    return .find(.{ .family = UI_FAMILY, .size = ui_scale * size.title, .weight = .bold });
+}
+
+/// Code in a diff or a blame: its lines, signs and numbers.
+pub fn code() dvui.Font {
+    return .find(.{ .family = MONO_FAMILY, .size = code_scale * size.code });
 }
 
 pub fn mono() dvui.Font {
-    return .find(.{ .family = MONO_FAMILY, .size = size.mono });
+    return .find(.{ .family = MONO_FAMILY, .size = ui_scale * size.mono });
 }
 
 // === Spacing / geometry ===
@@ -139,26 +154,31 @@ pub const radius = struct {
     pub const row = dvui.CornerRect.all(6);
     /// Ref tags and file flags: tighter, because they are small and square-ish.
     pub const tag = dvui.CornerRect.all(3);
+    /// What floats over the window: menus, dialogs, tooltips. Rounder than
+    /// what sits in it, as GitComet's popovers are.
+    pub const popover = dvui.CornerRect.all(8);
 };
 
-/// Height of a row in a list — the sidebar, the file lists. Tracks `size.body`
-/// plus the mockup's 6px of padding either side.
-pub const row_height: f32 = 28;
-/// A row in the sidebar's lists: tighter than a list row, many to a screen.
-pub const side_row: f32 = 23;
+/// Height of a row in a list — the file lists, a commit's files. GitComet's
+/// comfortable row.
+pub const row_height: f32 = 32;
+/// A row in the sidebar's lists: as high as the changes panel's, the two
+/// side panels being one design.
+pub const side_row: f32 = row_height;
 
 /// Height of a commit row. Taller than a list row: it carries a lane drawing,
 /// an avatar, a tag, a message, an author, a sha and a date — and those are
-/// what you scan, so it is dense rather than roomy. Fixed, because the commit
-/// list is virtualised.
-pub const graph_row: f32 = 26;
+/// what you scan; GitComet's comfortable history row is 36. Fixed, because
+/// the commit list is virtualised.
+pub const graph_row: f32 = 32;
 
-/// Diameter of the author's initials disc in a commit row.
-pub const avatar: f32 = 21;
+/// Diameter of a node in the graph, its ring included: the author's
+/// initials disc, a merge's, the uncommitted changes' — all one size.
+pub const avatar: f32 = 25;
 
-/// Height of one line of a diff. A mono line at 1.65, which is the density the
-/// mockup reads at. Fixed, for the same reason.
-pub const diff_row: f32 = 21;
+/// Height of one line of a diff: the mono face at about 1.75, GitComet's
+/// line for its code. Fixed, for the same reason.
+pub const diff_row: f32 = 22;
 
 /// Geometry of the commit graph, which is drawn rather than laid out: every
 /// number a lane or a curve is positioned by lives here. The column's width
@@ -167,29 +187,31 @@ pub const graph = struct {
     /// Wider than a line needs: every node is an avatar, and two on
     /// neighbouring lanes must not touch. Closer together only when there are
     /// more lanes than room.
-    pub const lane_w: f32 = 25;
+    pub const lane_w: f32 = 30;
     /// Between the deepest node and the text, so a ring never touches a tag.
     pub const gap: f32 = 14;
     /// Thickness of a lane line.
-    pub const line_w: f32 = 2;
+    pub const line_w: f32 = 1.6;
+    /// Radius of the turn where a line leaves one lane for another.
+    pub const corner: f32 = 6;
     /// Left inset before the first lane.
-    pub const inset: f32 = 14;
+    pub const inset: f32 = 16;
 };
 
-/// The mockup's grid: a 42px title bar over the sidebar and the content,
-/// closed by a 24px status bar.
-pub const titlebar_height: f32 = 42;
-/// The tab strip above it: one line of small text and a close button.
-pub const tab_height: f32 = 30;
-pub const statusbar_height: f32 = 24;
+/// The action bar over the sidebar and the content: GitComet's 44 plus room
+/// for a caption under each icon. The tabs are a strip of their own above.
+pub const titlebar_height: f32 = 56;
+/// The tab strip above it: one line of text and a close button.
+pub const tab_height: f32 = 34;
+pub const statusbar_height: f32 = 28;
 /// Height of a pane's own header strip (diff path, detail title).
-pub const toolbar_cell: f32 = 30;
+pub const toolbar_cell: f32 = 34;
 /// The three fixed right-hand columns of a commit row. Fixed, not
 /// content-sized: a ragged "who" column makes every column after it jump from
 /// row to row, and a header can only name a column that stays put.
 pub const author_column: f32 = 130;
-pub const sha_column: f32 = 80;
-pub const time_column: f32 = 150;
+pub const sha_column: f32 = 84;
+pub const time_column: f32 = 140;
 
 // === Palette ===
 
@@ -345,20 +367,6 @@ pub fn success() dvui.Color {
 
 // === Git-specific colours ===
 
-/// The miniature of a theme on its card in the settings: fixed, not read from
-/// the palette, because both cards show at once and only one theme is loaded.
-pub fn themePreview(dark: bool) struct { background: dvui.Color, panel: dvui.Color, line: dvui.Color } {
-    return if (dark) .{
-        .background = .{ .r = 0x1c, .g = 0x1b, .b = 0x24 },
-        .panel = .{ .r = 0x24, .g = 0x23, .b = 0x2e },
-        .line = .{ .r = 0x3c, .g = 0x3a, .b = 0x4a },
-    } else .{
-        .background = .{ .r = 0xff, .g = 0xff, .b = 0xff },
-        .panel = .{ .r = 0xf3, .g = 0xf2, .b = 0xf8 },
-        .line = .{ .r = 0xd6, .g = 0xd2, .b = 0xe2 },
-    };
-}
-
 /// A lane's colour faint enough to lie under text: the band that joins a
 /// commit's node to its message, and — stronger — the selected row, so the
 /// selection says which branch it is on.
@@ -373,7 +381,7 @@ pub fn laneWash(hue: dvui.Color, selected: bool) dvui.Color {
 /// Colour of a graph lane, by lane index.
 ///
 /// Lanes are identified by hue alone, so the ramp is picked for separability at
-/// 2px stroke width rather than for prettiness, and it wraps: past `len` two
+/// a thin stroke rather than for prettiness, and it wraps: past `len` two
 /// lanes share a colour, which is fine because they are never adjacent in
 /// practice on a real history.
 pub fn laneColor(index: usize) dvui.Color {
@@ -382,7 +390,7 @@ pub fn laneColor(index: usize) dvui.Color {
     const c = ramp[index % ramp.len];
     // Lanes are thin lines on a dark ground: nudge toward text so a saturated
     // hue does not disappear the way raw blue does.
-    return c.lerp(p.text, if (p.dark) 0.10 else 0.20);
+    return c.lerp(p.text, if (p.dark) 0.28 else 0.20);
 }
 
 pub fn fileStatusColor(status: git.Status) dvui.Color {
@@ -435,6 +443,37 @@ fn pick(v: ?ColorValue, fallback: dvui.Color) dvui.Color {
 /// of them, so a broken user theme cannot leave the app unstyled.
 const theme_dark = @embedFile("theme/zit_dark.json");
 const theme_light = @embedFile("theme/zit_light.json");
+
+/// A theme to pick: its name, its file, light or dark, and the three
+/// colours its card shows — ground, panel, line — with its accent.
+pub const Theme = struct {
+    name: []const u8,
+    json: []const u8,
+    dark: bool,
+    preview: [4]u24,
+};
+
+/// Zit's own two, then Catppuccin's four.
+pub const themes = [_]Theme{
+    .{ .name = "Zit Dark", .json = theme_dark, .dark = true, .preview = .{ 0x1c1b24, 0x24232e, 0x3c3a4a, 0xa66cff } },
+    .{ .name = "Zit Light", .json = theme_light, .dark = false, .preview = .{ 0xffffff, 0xf3f2f8, 0xd6d2e2, 0x7c3aed } },
+    .{ .name = "Catppuccin Latte", .json = @embedFile("theme/catppuccin_latte.json"), .dark = false, .preview = .{ 0xeff1f5, 0xe6e9ef, 0xbcc0cc, 0x8839ef } },
+    .{ .name = "Catppuccin Frappé", .json = @embedFile("theme/catppuccin_frappe.json"), .dark = true, .preview = .{ 0x303446, 0x292c3c, 0x51576d, 0xca9ee6 } },
+    .{ .name = "Catppuccin Macchiato", .json = @embedFile("theme/catppuccin_macchiato.json"), .dark = true, .preview = .{ 0x24273a, 0x1e2030, 0x494d64, 0xc6a0f6 } },
+    .{ .name = "Catppuccin Mocha", .json = @embedFile("theme/catppuccin_mocha.json"), .dark = true, .preview = .{ 0x1e1e2e, 0x181825, 0x45475a, 0xcba6f7 } },
+};
+
+pub fn hex(v: u24) dvui.Color {
+    return .{ .r = @intCast(v >> 16), .g = @intCast((v >> 8) & 0xff), .b = @intCast(v & 0xff) };
+}
+
+/// Put theme `index` of `themes` on.
+pub fn applyTheme(allocator: std.mem.Allocator, index: usize) !void {
+    const t = themes[@min(index, themes.len - 1)];
+    var parsed = try std.json.parseFromSlice(ThemeFile, allocator, t.json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    apply(parsed.value, t.name, t.dark);
+}
 
 pub fn applyEmbedded(allocator: std.mem.Allocator, dark: bool) !void {
     const bytes = if (dark) theme_dark else theme_light;
@@ -496,6 +535,11 @@ pub fn apply(file: ThemeFile, theme_name: []const u8, dark: bool) void {
     theme.window.fill_press = palette.press;
     theme.window.text = text_c;
     theme.window.border = palette.border;
+
+    // Tooltips on the raised surface, rounded as the rows are: they float
+    // over the window, as the menus do.
+    dvui.FloatingTooltipWidget.defaults.color_fill = .{ .color = surfaceRaised() };
+    dvui.FloatingTooltipWidget.defaults.corners = radius.row;
 
     theme.control.fill = surfaceInput();
     theme.control.fill_hover = palette.hover;

@@ -56,8 +56,8 @@ repository.
 
 | Download | Size |
 | --- | --- |
-| Linux x86_64 (`.tar.gz`) | 5.5 MB |
-| Windows x86_64 (`.exe`) | 12.5 MB |
+| Linux x86_64 (`.tar.gz`) | 3.2 MB |
+| Windows x86_64 (`.exe`) | 7.3 MB |
 
 Zit draws a frame only when something changes, so an idle window costs
 nothing. Every number here can be measured again with `zig build bench --
@@ -101,16 +101,17 @@ nothing. Every number here can be measured again with `zig build bench --
 **GitHub**
 - Pull requests in full: files, commits, checks, reviews, threads
 - Create, check out, review, comment, approve, merge, auto-merge
+- Changes asked for: reply to and resolve conversations, apply suggestions here, ask for a review again
 - Re-run failed checks; browse issues
 - Sign in with a code on github.com
 
 **Conflicts**
 - Both sides side by side, region by region: ours, theirs, or both
-- Continue, skip or abort from the banner
+- Continue, skip or abort from the toolbar
 
 **Workspace**
 - Tabs and tab groups, restored at start
-- Command palette — `Ctrl+P`; focus mode — `Ctrl+Shift+F`
+- Command palette — `Ctrl+P`
 - Dark and light themes
 
 </td>
@@ -169,7 +170,6 @@ requests, issues and checks everywhere, and Zit sends nothing to GitHub.
 | `Ctrl+T` / `Ctrl+W` | New tab / close tab |
 | `Ctrl+F` | Search the commits |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last commit, checkout, merge… |
-| `Ctrl+Shift+F` | Focus mode |
 | `Ctrl+,` | Settings |
 
 Every shortcut is listed in the app, under the keyboard button in the status bar.
