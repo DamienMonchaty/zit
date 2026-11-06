@@ -14,12 +14,7 @@
 
 const std = @import("std");
 
-pub const c = @cImport({
-    @cInclude("git2.h");
-    // `git_repository_set_index`, and the status's count of files hashed.
-    @cInclude("git2/sys/repository.h");
-    @cInclude("git2/sys/diff.h");
-});
+pub const c = @import("git2");
 
 pub const Error = error{Git};
 
@@ -1104,7 +1099,7 @@ pub const StatusCache = struct {
         defer repo.deinit();
         const owned_path = gpa.dupe(u8, path) catch return error.Git;
         errdefer gpa.free(owned_path);
-        const owned_copy = gpa.dupeZ(u8, copy_path) catch return error.Git;
+        const owned_copy = gpa.dupeSentinel(u8, copy_path, 0) catch return error.Git;
         errdefer gpa.free(owned_copy);
         const source_path = std.fmt.allocPrintSentinel(gpa, "{s}index", .{repo.gitdir()}, 0) catch return error.Git;
         errdefer gpa.free(source_path);
@@ -1278,7 +1273,7 @@ pub const Repo = struct {
     /// state of a branch nobody has pushed, and logging it as a libgit2 error
     /// would be noise on every refresh.
     fn readTracking(self: Repo, arena: std.mem.Allocator, branch: []const u8) Tracking {
-        const name = arena.dupeZ(u8, branch) catch return .{};
+        const name = arena.dupeSentinel(u8, branch, 0) catch return .{};
         var local: ?*c.git_reference = null;
         if (c.git_branch_lookup(&local, self.ptr, name.ptr, c.GIT_BRANCH_LOCAL) != 0) return .{};
         defer c.git_reference_free(local);
@@ -1866,7 +1861,7 @@ pub const Repo = struct {
         defer c.git_index_free(index);
         _ = c.git_index_read(index, 0);
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return .none;
+        const path_z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return .none;
         var ancestor: ?*const c.git_index_entry = null;
         var ours: ?*const c.git_index_entry = null;
         var theirs: ?*const c.git_index_entry = null;
@@ -1887,7 +1882,7 @@ pub const Repo = struct {
         defer c.git_index_free(index);
         _ = c.git_index_read(index, 0);
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return null;
+        const path_z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return null;
         var ancestor: ?*const c.git_index_entry = null;
         var ours: ?*const c.git_index_entry = null;
         var theirs: ?*const c.git_index_entry = null;
@@ -2077,7 +2072,7 @@ pub const Repo = struct {
         errdefer out.arena.deinit();
         const arena = out.arena.allocator();
 
-        const path_z = arena.dupeZ(u8, path) catch return error.Git;
+        const path_z = arena.dupeSentinel(u8, path, 0) catch return error.Git;
         const blob_id = self.entryAt(id, path_z) orelse return error.Git;
         var blob: ?*c.git_blob = null;
         try check(c.git_blob_lookup(&blob, self.ptr, &blob_id));
@@ -2115,7 +2110,7 @@ pub const Repo = struct {
     /// A file's bytes as commit `id` has it, owned by `gpa`; null where the
     /// commit has no such file.
     pub fn blobAt(self: Repo, gpa: std.mem.Allocator, id: Oid, path: []const u8) ?[]u8 {
-        const path_z = gpa.dupeZ(u8, path) catch return null;
+        const path_z = gpa.dupeSentinel(u8, path, 0) catch return null;
         defer gpa.free(path_z);
         const blob_id = self.entryAt(id, path_z) orelse return null;
         var blob: ?*c.git_blob = null;
@@ -2421,7 +2416,7 @@ fn deltaStatus(delta: c.git_delta_t) Status {
 /// them in — and alphabetical within each, except that the checked-out branch
 /// sorts to the top of the locals.
 fn refLessThan(_: void, a: Ref, b: Ref) bool {
-    if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+    if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
     if (a.head != b.head) return a.head;
     return naturalLess(a.name, b.name);
 }
@@ -2714,7 +2709,7 @@ test "a patch of picked lines keeps the rest as the side it applies to" {
     defer std.testing.allocator.free(back);
     try std.testing.expect(std.mem.endsWith(u8, back, "@@ -1,3 +1,3 @@\n a\n-b\n+B\n C\n"));
 
-    const none = [_]bool{false} ** 6;
+    const none: [6]bool = @splat(false);
     try std.testing.expectEqual(@as(?[]u8, null), try patchForLines(std.testing.allocator, file, 0, &none, false));
 
     // "3" lost its newline's absence and gained a "4". Unstaging only the
@@ -3014,7 +3009,7 @@ test "a rebase todo never opens with a squash" {
     try std.testing.expect(std.mem.endsWith(u8, todo, " third\n"));
     // Only the third stays a squash; the second was promoted to pick.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, todo, "squash "));
-    try std.testing.expect(std.mem.startsWith(u8, todo, "drop " ++ "0" ** 40 ++ " gone\n"));
+    try std.testing.expect(std.mem.startsWith(u8, todo, "drop " ++ @as([40]u8, @splat('0')) ++ " gone\n"));
 }
 
 test "an empty rebase todo says noop rather than nothing" {
@@ -3039,7 +3034,6 @@ test "a filter of picked branches walks those, and only those" {
     try std.testing.expect(!filter.walks(.{ .name = "b", .kind = .local, .target = z, .head = true }));
     try std.testing.expect(filter.walks(.{ .name = "c", .kind = .remote, .target = z, .head = false }));
 }
-
 
 test "a splice takes a text back to what it was, and only the text it left" {
     const a = std.testing.allocator;

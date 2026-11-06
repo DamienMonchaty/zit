@@ -80,8 +80,13 @@ fn startOptions() dvui.App.StartOptions {
     return .{
         .size = .{ .w = 1320.0, .h = 840.0 },
         .min_size = .{ .w = 720.0, .h = 480.0 },
+        .org = "zit",
+        .app = "Zit",
         .title = "Zit",
         .icon = @embedFile("brand/zit-icon-256.png"),
+        // Zit keeps its own window size and zoom, in its config.
+        .persist_window_geometry = false,
+        .window_init_options = .{},
         // Shown by `showWindowOnce` once the first frame is drawn: shown at
         // creation, Windows paints it white, with the renderer's black
         // rectangle in it, until Direct3D is up.
@@ -105,7 +110,7 @@ pub const std_options: std.Options = .{
     // the process — SDL's and the GPU driver's too — about 2 MB in all. Kept
     // in Debug, where a trace can be printed; a release build is stripped
     // and could not print one anyway.
-    .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null,
+    .signal_stack_size = if (@import("builtin").mode == .debug) 1 << 18 else null,
 };
 
 /// From `build.zig.zon`, through `build.zig`; printed so that it is
@@ -1894,7 +1899,7 @@ const Section = enum(u8) {
 
 /// All folded to begin with: the headers and their counts are the overview,
 /// and a section is opened for what is in it.
-var section_collapsed = [_]bool{true} ** @typeInfo(Section).@"enum".fields.len;
+var section_collapsed: [@typeInfo(Section).@"enum".field_names.len]bool = @splat(true);
 
 // === Lifecycle ===
 
@@ -2936,7 +2941,7 @@ fn pickFolder(what: FolderFor, title: [:0]const u8, start: ?[]const u8) void {
     _ = sdl.SDL_SetStringProperty(props, sdl.SDL_PROP_FILE_DIALOG_TITLE_STRING, title.ptr);
     var start_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     if (start) |dir| {
-        if (std.fmt.bufPrintZ(&start_buf, "{s}", .{dir})) |z| {
+        if (std.fmt.bufPrintSentinel(&start_buf, "{s}", .{dir}, 0)) |z| {
             _ = sdl.SDL_SetStringProperty(props, sdl.SDL_PROP_FILE_DIALOG_LOCATION_STRING, z.ptr);
         } else |_| {}
     }
@@ -3205,8 +3210,7 @@ fn openTerminal() void {
             \\done
             \\exit 1
             ,
-            "sh",
-            chosen,
+            "sh", chosen,
         };
     const ok = run.launch(app_io, repo_path.items, argv) catch return setCommandError("Could not start a terminal.");
     if (!ok) setCommandError("No terminal found. Set $TERMINAL to the one you use.");
@@ -5349,7 +5353,7 @@ fn requestShown(entry: pr.Request) bool {
     var num: [12]u8 = undefined;
     const number = std.fmt.bufPrint(&num, "{d}", .{entry.number}) catch "";
     for ([_][]const u8{ entry.title, entry.author, entry.branch, number }) |field| {
-        if (std.ascii.indexOfIgnoreCase(field, needle) != null) return true;
+        if (std.ascii.findIgnoreCase(field, needle) != null) return true;
     }
     return false;
 }
@@ -5981,7 +5985,7 @@ var side_list: std.ArrayList(u8) = .empty;
 /// line a button that drops the section's list. Each tick goes to GitHub at
 /// once; the request is read again after.
 fn sideHeading(kind: SideKind, d: pr.Detail) void {
-    const id: usize = 10 + @as(usize, @intFromEnum(kind));
+    const id: usize = 10 + @as(usize, @backingInt(kind));
     const caption: []const u8 = switch (kind) {
         .reviewers => "Reviewers",
         .assignees => "Assignees",
@@ -8699,7 +8703,7 @@ fn branchSwitcher() void {
             if (ref.kind != kind) continue;
             // A remote's branch with a local one of the same name is that one.
             if (kind == .remote and sameOnRemote(h, ref)) continue;
-            if (needle.len > 0 and std.ascii.indexOfIgnoreCase(ref.name, needle) == null) continue;
+            if (needle.len > 0 and std.ascii.findIgnoreCase(ref.name, needle) == null) continue;
             if (shown >= MAX_BRANCH_CHOICES) break;
             if (!header) {
                 dropHeading(@src(), k + 10, if (kind == .local) "LOCAL" else "REMOTE");
@@ -10154,7 +10158,7 @@ fn repoSettings() void {
     }
 
     settingsField(@src(), "Pull", "How Pull joins what it fetched — pull.rebase and pull.ff");
-    if (choiceChips(0, &.{ "As everywhere", "Merge", "Rebase", "Fast-forward only" }, @intFromEnum(repo_pull))) |i| {
+    if (choiceChips(0, &.{ "As everywhere", "Merge", "Rebase", "Fast-forward only" }, @backingInt(repo_pull))) |i| {
         switch (i) {
             0 => {
                 setLocalConfig("pull.rebase", "");
@@ -10176,7 +10180,7 @@ fn repoSettings() void {
     }
 
     settingsField(@src(), "Prune when fetching", "Drop the remote branches deleted on the remote — fetch.prune");
-    if (choiceChips(1, &.{ "As everywhere", "On", "Off" }, @intFromEnum(repo_prune))) |i| {
+    if (choiceChips(1, &.{ "As everywhere", "On", "Off" }, @backingInt(repo_prune))) |i| {
         setLocalConfig("fetch.prune", switch (i) {
             0 => "",
             1 => "true",
@@ -10187,7 +10191,7 @@ fn repoSettings() void {
     }
 
     settingsField(@src(), "Sign commits", "Every commit made here signed with your key — commit.gpgsign");
-    if (choiceChips(2, &.{ "As everywhere", "On", "Off" }, @intFromEnum(repo_sign))) |i| {
+    if (choiceChips(2, &.{ "As everywhere", "On", "Off" }, @backingInt(repo_sign))) |i| {
         setLocalConfig("commit.gpgsign", switch (i) {
             0 => "",
             1 => "true",
@@ -10231,8 +10235,8 @@ const known_terminals = if (@import("builtin").os.tag == .windows) [_]struct { [
     .{ "xterm", "xterm" },
 };
 /// Which of them this machine has, found once the settings open.
-var editors_found = [_]bool{false} ** known_editors.len;
-var terminals_found = [_]bool{false} ** known_terminals.len;
+var editors_found: [known_editors.len]bool = @splat(false);
+var terminals_found: [known_terminals.len]bool = @splat(false);
 var editors_loaded = false;
 var editors_job: ?*run.Capture = null;
 
@@ -11941,7 +11945,7 @@ fn tabDrop(wd: *dvui.WidgetData, slot: [2]usize) void {
         if (me.action == .position) tab_drop_seen = slot;
         if (me.action == .release and me.button.pointer()) {
             e.handle(@src(), wd);
-            dvui.dragEnd();
+            dvui.dragEnd(me.button);
             requestTab(.{ .tab_at = .{ tab_drag[0], tab_drag[1], slot[0], slot[1] } });
         }
     }
@@ -11959,7 +11963,7 @@ fn tabDragStart(wd: *dvui.WidgetData, slot: [2]usize) void {
             dvui.dragPreStart(me.button, me.p, .{ .name = TAB_DRAG_NAME });
             tab_drag = slot;
         } else if (me.action == .motion) {
-            if (dvui.dragging(me.p, TAB_DRAG_NAME) != null) {
+            if (dvui.dragging(me, TAB_DRAG_NAME) != null) {
                 dvui.captureMouse(null, e.num);
                 return;
             }
@@ -12664,7 +12668,7 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
                 for (h.refs, 0..) |ref, i| {
                     if (ref.kind != kind) continue;
                     if (kind == .remote and !graph_show_remote) continue;
-                    if (needle.len > 0 and std.ascii.indexOfIgnoreCase(ref.name, needle) == null) continue;
+                    if (needle.len > 0 and std.ascii.findIgnoreCase(ref.name, needle) == null) continue;
                     // Past this many the filter is the way through, and a
                     // menu taller than the screen is no use to anybody.
                     if (shown >= MAX_BRANCH_CHOICES) break;
@@ -13471,7 +13475,7 @@ fn isDoubleClick(id: dvui.Id) bool {
 fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) ?git.Ref {
     // Only on a host that has them.
     if ((section == .pulls or section == .issues) and pr.host == .none) return null;
-    const collapsed = &section_collapsed[@intFromEnum(section)];
+    const collapsed = &section_collapsed[@backingInt(section)];
 
     const count: usize = blk: {
         const h = history orelse break :blk 0;
@@ -13570,7 +13574,7 @@ fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) 
     // do: a hundred branches do not push the sections under them away. Sized
     // on what it held last frame — a scroll area takes no height from what
     // it holds.
-    const si = &section_scroll[@intFromEnum(section)];
+    const si = &section_scroll[@backingInt(section)];
     const height = @min(SECTION_MAX_H, si.virtual_size.h);
     var list = dvui.scrollArea(@src(), .{ .scroll_info = si }, .{
         .id_extra = id,
@@ -13644,7 +13648,7 @@ const SIDE_GUTTER: f32 = 22 + 2 * style.space.xxs;
 /// Inside a ref line's button, before its name.
 const SIDE_REF_PAD: f32 = style.space.xs;
 const SECTION_ICON_LIFT: f32 = 4;
-var section_scroll: [@typeInfo(Section).@"enum".fields.len]dvui.ScrollInfo = @splat(.{});
+var section_scroll: [@typeInfo(Section).@"enum".field_names.len]dvui.ScrollInfo = @splat(.{});
 
 /// An open section's rows. Returns the ref the user asked to check out.
 fn sectionRows(section: Section, id: usize, h: git.History, si: *const dvui.ScrollInfo) ?git.Ref {
@@ -13746,7 +13750,7 @@ fn sidebarFiltering() bool {
 /// Whether `name` passes the sidebar's filter: case aside, it contains it.
 fn sidebarMatches(name: []const u8) bool {
     const needle = std.mem.trim(u8, sidebar_filter.items, " ");
-    return needle.len == 0 or std.ascii.indexOfIgnoreCase(name, needle) != null;
+    return needle.len == 0 or std.ascii.findIgnoreCase(name, needle) != null;
 }
 
 /// Whether `branch` ("origin/main") belongs to the remote `name`.
@@ -14312,7 +14316,7 @@ fn pickSearch(placeholder: []const u8) void {
 fn pickShown(text: []const u8, also: []const u8) bool {
     const needle = std.mem.trim(u8, pick_filter.items, " ");
     if (needle.len == 0) return true;
-    return std.ascii.indexOfIgnoreCase(text, needle) != null or std.ascii.indexOfIgnoreCase(also, needle) != null;
+    return std.ascii.findIgnoreCase(text, needle) != null or std.ascii.findIgnoreCase(also, needle) != null;
 }
 
 /// The scrolling list under a picker's search: as tall as it needs, up to
@@ -15021,7 +15025,7 @@ fn branchDrop(wd: *dvui.WidgetData, ref: git.Ref) bool {
         if (me.action == .position) over = true;
         if (me.action == .release and me.button.pointer()) {
             e.handle(@src(), wd);
-            dvui.dragEnd();
+            dvui.dragEnd(me.button);
             setDrop(drag_source.items, ref.name);
             drop_at = me.p.toNatural();
             // Its menu is drawn at the top of the next frame.
@@ -15047,7 +15051,7 @@ fn branchDragStart(wd: *dvui.WidgetData, ref: git.Ref) void {
             drag_source.clearRetainingCapacity();
             drag_source.appendSlice(gpa, ref.name) catch {};
         } else if (me.action == .motion) {
-            if (dvui.dragging(me.p, DRAG_NAME) != null) {
+            if (dvui.dragging(me, DRAG_NAME) != null) {
                 dvui.captureMouse(null, e.num);
                 return;
             }
@@ -15904,7 +15908,7 @@ fn authorHeader() void {
 /// name or its address.
 fn authorShownBy(entry: AuthorEntry, needle: []const u8) bool {
     if (needle.len == 0) return true;
-    return std.ascii.indexOfIgnoreCase(entry.name, needle) != null or std.ascii.indexOfIgnoreCase(entry.email, needle) != null;
+    return std.ascii.findIgnoreCase(entry.name, needle) != null or std.ascii.findIgnoreCase(entry.email, needle) != null;
 }
 
 /// One author in the menu: the box that adds or takes them off, then the
@@ -16102,11 +16106,11 @@ fn columnHandleDir(src: std.builtin.SourceLocation, id: usize, x: f32, rs: dvui.
             .release => if (dvui.captured(hid)) {
                 e.handle(@src(), handle.data());
                 dvui.captureMouse(null, e.num);
-                dvui.dragEnd();
+                dvui.dragEnd(me.button);
             },
             .motion => if (dvui.captured(hid)) {
                 e.handle(@src(), handle.data());
-                if (dvui.dragging(me.p, null)) |dp| {
+                if (dvui.dragging(me, null)) |dp| {
                     width.* = std.math.clamp(width.* + dir * dp.x / s, min, max);
                     dvui.refresh(null, @src(), hid);
                 }
@@ -16413,7 +16417,7 @@ fn parseDay(text: []const u8) ?i64 {
     const month = std.fmt.parseInt(u8, it.next() orelse "1", 10) catch return null;
     const day = std.fmt.parseInt(u8, it.next() orelse "1", 10) catch return null;
     if (it.next() != null or year < 1 or month < 1 or month > 12 or day < 1) return null;
-    if (day > std.time.epoch.getDaysInMonth(year, @enumFromInt(month))) return null;
+    if (day > std.time.epoch.getDaysInMonth(year, @fromBackingInt(@intCast(month)))) return null;
     const y: i64 = year;
     const m: i64 = month;
     const d: i64 = day;
@@ -16435,12 +16439,12 @@ fn commitMatches(commit: git.Commit, terms: []const Term) bool {
     const hex = git.oidHex(commit.id, &sha);
     for (terms) |t| {
         const ok = switch (t.kind) {
-            .any => std.ascii.indexOfIgnoreCase(commit.summary, t.text) != null or
-                std.ascii.indexOfIgnoreCase(commit.author, t.text) != null or
+            .any => std.ascii.findIgnoreCase(commit.summary, t.text) != null or
+                std.ascii.findIgnoreCase(commit.author, t.text) != null or
                 std.ascii.startsWithIgnoreCase(hex, t.text),
-            .author => std.ascii.indexOfIgnoreCase(commit.author, t.text) != null or
-                std.ascii.indexOfIgnoreCase(commit.email, t.text) != null,
-            .message => std.ascii.indexOfIgnoreCase(commit.summary, t.text) != null,
+            .author => std.ascii.findIgnoreCase(commit.author, t.text) != null or
+                std.ascii.findIgnoreCase(commit.email, t.text) != null,
+            .message => std.ascii.findIgnoreCase(commit.summary, t.text) != null,
             .sha => std.ascii.startsWithIgnoreCase(hex, t.text),
             .after => commit.time >= t.time,
             .before => commit.time < t.time,
@@ -17468,13 +17472,13 @@ fn tagDrag(wd: *dvui.WidgetData, ref: git.Ref) void {
             },
             // Moved far enough: the mouse goes, so the tags and rows it
             // crosses can take the drop.
-            .motion => if (dvui.captured(wd.id) and dvui.dragging(me.p, DRAG_NAME) != null) {
+            .motion => if (dvui.captured(wd.id) and dvui.dragging(me, DRAG_NAME) != null) {
                 dvui.captureMouse(null, e.num);
             },
             .release => if (me.button.pointer() and dvui.captured(wd.id)) {
                 e.handle(@src(), wd);
                 dvui.captureMouse(null, e.num);
-                dvui.dragEnd();
+                dvui.dragEnd(me.button);
                 selectCommit(ref.target);
             },
             else => {},
@@ -19924,7 +19928,7 @@ fn commitFiles(id: git.Oid) void {
 /// yourself as a co-author would list you twice.
 fn coAuthorOther(t: Trailer, author_email: []const u8) bool {
     if (!std.ascii.eqlIgnoreCase(t.key, "Co-authored-by")) return false;
-    return author_email.len == 0 or std.ascii.indexOfIgnoreCase(t.value, author_email) == null;
+    return author_email.len == 0 or std.ascii.findIgnoreCase(t.value, author_email) == null;
 }
 
 /// One person on the commit: picture, name, and a line under it — the
@@ -20827,7 +20831,7 @@ fn viewToggle(src: std.builtin.SourceLocation, view: ChangesView, caption: []con
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
-        .id_extra = @intFromEnum(view),
+        .id_extra = @backingInt(view),
         .min_size_content = .{ .h = 24 },
         .gravity_y = 0.5,
         .background = false,
@@ -22089,7 +22093,6 @@ const PLATFORM = switch (@import("builtin").os.tag) {
     else => "Linux",
 } ++ " " ++ @tagName(@import("builtin").cpu.arch);
 
-
 /// A panel's fold button in the status bar: lit while the panel is shown.
 fn panelToggle(src: std.builtin.SourceLocation, shown: *bool, icon: []const u8, hint: []const u8, tag: []const u8) void {
     if (iconButtonTagged(src, tag, hint, icon, if (shown.*) style.accent() else style.textFaint(), tag)) shown.* = !shown.*;
@@ -22280,7 +22283,7 @@ var start_filter: std.ArrayList(u8) = .empty;
 var start_pick: usize = 0;
 
 fn startMatches(needle: []const u8, path: []const u8) bool {
-    return needle.len == 0 or std.ascii.indexOfIgnoreCase(path, needle) != null;
+    return needle.len == 0 or std.ascii.findIgnoreCase(path, needle) != null;
 }
 
 /// Over a run of rows: what they are, and how many.
@@ -26763,8 +26766,8 @@ test "a chord with Shift, AltGr or the Windows key is not the chord without" {
     const with = struct {
         fn f(mods: []const Mod) Mod {
             var m: u16 = 0;
-            for (mods) |x| m |= @intFromEnum(x);
-            return @enumFromInt(m);
+            for (mods) |x| m |= @backingInt(x);
+            return @fromBackingInt(@intCast(m));
         }
     }.f;
     const key = struct {
@@ -28360,11 +28363,11 @@ test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the 
 
     // A section header's ⋯ opens its right-click menu too, and the section
     // stays folded or open as it was.
-    const open = section_collapsed[@intFromEnum(Section.local)];
+    const open = section_collapsed[@backingInt(Section.local)];
     try hoverAt(try tagCenter("section:LOCAL"));
     try clickAt(try tagCenter("section-more:LOCAL"));
     _ = try tagCenter("menu:New branch here");
-    try std.testing.expectEqual(open, section_collapsed[@intFromEnum(Section.local)]);
+    try std.testing.expectEqual(open, section_collapsed[@backingInt(Section.local)]);
     try pressFrame(.escape, .none);
 
     // Signing, flipped beside the commit's title.
@@ -28407,7 +28410,7 @@ test "a long section builds the lines it shows, wherever it is scrolled" {
     try std.testing.expect(dvui.tagGet("b00") != null);
     try std.testing.expect(dvui.tagGet("b59") == null);
 
-    const si = &section_scroll[@intFromEnum(Section.local)];
+    const si = &section_scroll[@backingInt(Section.local)];
     si.viewport.y = si.virtual_size.h;
     try dvui.testing.settle(frameArrowCursor);
     try std.testing.expect(dvui.tagGet("b59") != null);
@@ -29208,7 +29211,6 @@ test "a commit's files: only the rows in sight are built, however many" {
     try expectNoTag("file:f000.txt");
 }
 
-
 test "the authors' menu builds the rows in sight, and its search still finds the rest" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -29276,11 +29278,6 @@ test "changes picked: asked by path, taken off again, one side at a time" {
     try std.testing.expectEqual(@as(u32, 0), picked_set.count());
 }
 
-
-
-
-
-
 test "a repository's own settings are written to its config and read back" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
@@ -29312,17 +29309,6 @@ test "a repository's own settings are written to its config and read back" {
     try std.testing.expect(repo_pull == .global);
     try std.testing.expectEqual(@as(?[]u8, null), command_error);
 }
-
-
-
-
-
-
-
-
-
-
-
 
 test "a summary typed past 72 goes on in the description, and says so" {
     gpa = std.testing.allocator;
@@ -29361,8 +29347,6 @@ test "a summary typed past 72 goes on in the description, and says so" {
     try std.testing.expectEqualStrings("Fix the parser", commit_summary.items);
 }
 
-
-
 // The documentation's screenshots, of a made-up repository: run by
 // scripts/screenshots.sh, which makes the repository first and sets
 // ZIT_SHOTS; skipped otherwise, so the suite never writes into the tree.
@@ -29373,7 +29357,7 @@ test "docs screenshots" {
     try git.init();
     defer git.shutdown();
     section_collapsed = @splat(false);
-    section_collapsed[@intFromEnum(Section.tags)] = true;
+    section_collapsed[@backingInt(Section.tags)] = true;
     stillUi();
     try me_name.appendSlice(gpa, "Alice Martin");
     try me_email.appendSlice(gpa, "alice@acme.dev");

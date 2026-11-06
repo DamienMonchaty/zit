@@ -1344,9 +1344,9 @@ test "a host by its remote, and answers for another repository dropped" {
 test "a batch of commits' checks reads back by sha" {
     init(std.testing.allocator, std.testing.io);
     defer deinit();
-    const a: Sha = "a".* ** 40;
-    const b: Sha = "b".* ** 40;
-    const c: Sha = "c".* ** 40;
+    const a: Sha = @splat('a');
+    const b: Sha = @splat('b');
+    const c: Sha = @splat('c');
     try ci_asked.appendSlice(gpa, &.{ a, b, c });
     try readCi(
         \\{"data":{"repository":{"c0":{"statusCheckRollup":{"state":"FAILURE"}},"c1":{"statusCheckRollup":null},"c2":{"statusCheckRollup":{"state":"PENDING"}}}}}

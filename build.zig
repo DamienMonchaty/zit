@@ -5,12 +5,12 @@ pub fn build(b: *std.Build) !void {
 
     // ReleaseSafe by default, not Debug: a revwalk over a large history is the
     // first thing the app does, and in Debug that is a visible stall. All
-    // safety checks are kept. `-Doptimize=Debug` still gives a debug build.
+    // safety checks are kept. `-Doptimize=debug` still gives a debug build.
     const optimize = b.option(
         std.builtin.OptimizeMode,
         "optimize",
-        "Prioritize performance, safety, or binary size (default: ReleaseSafe)",
-    ) orelse .ReleaseSafe;
+        "Prioritize performance, safety, or binary size (default: safe)",
+    ) orelse .safe;
 
     // Stripped unless debugging: the symbols are three quarters of the
     // binary (46 MB against 11). A stripped build says "Unable to dump stack
@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) !void {
     // build leaves out too, Zit's and its C libraries'. `-Dstrip=false` alone
     // keeps both as well.
     const trace = b.option(bool, "trace", "Keep symbols and unwind tables for stack traces (default: only in Debug)") orelse
-        (optimize == .Debug);
+        (optimize == .debug);
     const strip = b.option(bool, "strip", "Drop debug symbols (default: yes, unless -Dtrace)") orelse !trace;
     const unwind_tables = trace or !strip;
     const system_libgit2 = b.option(bool, "system-libgit2", "Link the system's libgit2 instead of building it") orelse false;
@@ -39,7 +39,7 @@ pub fn build(b: *std.Build) !void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) !void {
     });
     linkLibgit2(b, bench, target, optimize, system_libgit2);
     const bench_run = b.addRunArtifact(bench);
-    if (b.args) |args| bench_run.addArgs(args);
+    bench_run.addPassthruArgs();
     b.step("bench", "Time the hot paths on a repository").dependOn(&bench_run.step);
 
     // Every release executable at once, from any machine with GNU tar and rm
@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) !void {
     for (dists) |d| {
         const query = try std.Target.Query.parse(.{ .arch_os_abi = d.query });
         const resolved = b.resolveTargetQuery(query);
-        const dist_exe = addZit(b, resolved, .ReleaseSafe, true, false, false);
+        const dist_exe = addZit(b, resolved, .safe, true, false, false);
 
         if (resolved.result.os.tag == .windows) {
             const install = b.addInstallArtifact(dist_exe, .{
@@ -127,18 +127,24 @@ pub fn build(b: *std.Build) !void {
         // install.sh keeps its execute bit through the install step only if
         // the source has it; set it in the archive regardless.
         const tar = b.addSystemCommand(&.{ "tar", "--mode=u+rwX,go+rX", "-czf" });
-        tar.addArg(b.getInstallPath(.{ .custom = "dist" }, b.fmt("{s}.tar.gz", .{d.name})));
-        tar.addArgs(&.{ "-C", b.getInstallPath(.{ .custom = "dist" }, "") });
+        tar.addFileArg(installed(b, b.fmt("dist/{s}.tar.gz", .{d.name})));
+        tar.addArg("-C");
+        tar.addDirectoryArg(installed(b, "dist"));
         tar.addArg(d.name);
         for (parts.items) |part| tar.step.dependOn(part);
 
         // The folder was only the archive's staging: shipping both doubles
         // what dist/ weighs for nothing.
         const tidy = b.addSystemCommand(&.{ "rm", "-rf" });
-        tidy.addArg(b.getInstallPath(.{ .custom = "dist" }, d.name));
+        tidy.addDirectoryArg(installed(b, folder));
         tidy.step.dependOn(&tar.step);
         dist_step.dependOn(&tidy.step);
     }
+}
+
+/// A path under the install prefix, `zig-out` by default.
+fn installed(b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
+    return .{ .relative = .{ .base = .install_prefix, .sub_path = b.dupe(sub_path) } };
 }
 
 /// The icon sizes the desktop's icon theme looks for, as hicolor names them.
@@ -187,7 +193,7 @@ fn addZit(
     version_options.addOption([]const u8, "version", @import("build.zig.zon").version);
     exe.root_module.addOptions("build_options", version_options);
 
-    // Zig 0.16's translate-c chokes on MinGW's fortified string functions —
+    // Zig's translate-c chokes on MinGW's fortified string functions —
     // the `wcscat_s` wrappers `_FORTIFY_SOURCE` switches on in optimised
     // builds come out as Zig that does not compile. They are never called
     // from Zig, so turn the fortification off for dvui's C headers alone.
@@ -213,13 +219,13 @@ fn addZit(
 
     // No console window behind a release build. A PE header field: nothing
     // to set on the other systems.
-    if (optimize != .Debug and target.result.os.tag == .windows) exe.subsystem = .Windows;
+    if (optimize != .debug and target.result.os.tag == .windows) exe.subsystem = .windows;
 
     // Each function and each constant of the C libraries in a section of
     // its own, so that the linker, which already drops the sections nothing
     // refers to, drops them one by one instead of whole files at a time.
     // Nothing changes in the code that stays.
-    if (optimize != .Debug) {
+    if (optimize != .debug) {
         const linked = Linked.of(b, exe);
         for (linked.libs.items) |lib| {
             lib.link_function_sections = true;
@@ -238,10 +244,10 @@ fn addZit(
     // behaviour in those three no longer traps. libgit2, its zlib and Zit
     // keep the app's mode: the history, the diffs and the status are read
     // through them.
-    if (optimize == .ReleaseSafe or optimize == .ReleaseFast) {
+    if (optimize == .safe or optimize == .fast) {
         const linked = Linked.of(b, exe);
         for ([_][]const u8{ "SDL3", "freetype", "mbedtls" }) |name| {
-            if (linked.named(name)) |lib| lib.root_module.optimize = .ReleaseSmall;
+            if (linked.named(name)) |lib| lib.root_module.optimize = .small;
         }
     }
 
@@ -280,7 +286,7 @@ fn slimDvui(b: *std.Build, dvui_dep: *std.Build.Dependency) void {
     // and that theme embeds ten Bitstream Vera faces: 578 KB of fonts Zit
     // never draws with. Kept: Vera Sans, dvui's fallback face.
     {
-        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.path("src/themes/Adwaita.zig").getPath(b), b.allocator, .limited(1 << 20)) catch
+        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.builder.root.joinString(b.allocator, "src/themes/Adwaita.zig") catch @panic("OOM"), b.allocator, .limited(1 << 20)) catch
             @panic("dvui: cannot read src/themes/Adwaita.zig");
         const from = std.mem.indexOf(u8, text, "const fonts: []const Font.Source = &.{") orelse
             @panic("dvui: Adwaita's font list has moved, see slimDvui");
@@ -299,7 +305,7 @@ fn slimDvui(b: *std.Build, dvui_dep: *std.Build.Dependency) void {
     // which Zit never calls; but every frame's end asks for it, so all of it
     // is linked.
     {
-        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.path("src/Debug.zig").getPath(b), b.allocator, .limited(1 << 22)) catch
+        const text = std.Io.Dir.cwd().readFileAlloc(io, dvui_dep.builder.root.joinString(b.allocator, "src/Debug.zig") catch @panic("OOM"), b.allocator, .limited(1 << 22)) catch
             @panic("dvui: cannot read src/Debug.zig");
         const show = "pub fn show(self: *Debug) void {";
         const at = (std.mem.indexOf(u8, text, show) orelse @panic("dvui: Debug.show has moved, see slimDvui")) + show.len;
@@ -332,7 +338,8 @@ fn leanSdl(sdl: *std.Build.Step.Compile) void {
     // With joysticks and sensors compiled out SDL falls back on its dummy
     // drivers, which its build leaves out on Windows (both) and Linux (the
     // joystick's).
-    const sdl_src = sdl.step.owner.path("src");
+    // The package building SDL takes SDL's own sources as its `sdl`.
+    const sdl_src = sdl.step.owner.dependency("sdl", .{}).path("src");
     sdl.root_module.addCSourceFiles(.{ .root = sdl_src, .files = &.{"joystick/dummy/SDL_sysjoystick.c"} });
     if (sdl.rootModuleTarget().os.tag == .windows) {
         sdl.root_module.addCSourceFiles(.{ .root = sdl_src, .files = &.{"sensor/dummy/SDL_dummysensor.c"} });
@@ -375,13 +382,19 @@ const Linked = struct {
     }
 };
 
+/// libgit2 linked, and its headers translated into the `git2` module that
+/// src/git.zig imports.
 fn linkLibgit2(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system_libgit2: bool) void {
+    const headers = b.addTranslateC(.{ .root_source_file = b.path("src/git2.h"), .target = target, .optimize = optimize });
     if (system_libgit2) {
         exe.root_module.linkSystemLibrary("git2", .{});
+        headers.linkSystemLibrary("git2", .{});
     } else {
-        const libgit2 = b.dependency("libgit2", .{ .target = target, .optimize = optimize });
-        exe.root_module.linkLibrary(libgit2.artifact("git2"));
+        const libgit2 = b.dependency("libgit2", .{ .target = target, .optimize = optimize }).artifact("git2");
+        exe.root_module.linkLibrary(libgit2);
+        headers.addIncludePath(libgit2.getEmittedIncludeTree());
     }
+    exe.root_module.addImport("git2", headers.createModule());
 }
 
 /// Every translate-c step reachable from `module`'s imports, told not to
@@ -396,7 +409,7 @@ fn unfortifyFrom(b: *std.Build, module: *std.Build.Module, seen: *std.AutoHashMa
     if ((seen.getOrPut(b.allocator, module) catch @panic("OOM")).found_existing) return;
     for (module.import_table.values()) |imported| {
         if (imported.root_source_file) |root| switch (root) {
-            .generated => |g| if (g.file.step.cast(std.Build.Step.TranslateC)) |tc| {
+            .generated => |g| if (b.graph.generated_files.items[@backingInt(g.index)].cast(std.Build.Step.TranslateC)) |tc| {
                 tc.defineCMacro("_FORTIFY_SOURCE", "0");
             },
             else => {},

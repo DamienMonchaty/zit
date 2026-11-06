@@ -24,14 +24,14 @@ in.
 ## Build
 
 ```sh
-zig build                          # needs Zig 0.16.0; libgit2 is built from source
+zig build                          # needs Zig 0.17.0; libgit2 is built from source
 zig build run -- /path/to/repo
 zig build dist                     # release executables in zig-out/dist/
 ```
 
 | Option | Does |
 | --- | --- |
-| `-Doptimize=Debug` | A debug build: stack traces, leak checks |
+| `-Doptimize=debug` | A debug build: stack traces, leak checks |
 | `-Dtrace` | Keep the symbols and the unwind tables, for a readable stack trace |
 | `-Dsystem-libgit2=true` | Link the machine's libgit2, for a quicker local build |
 
