@@ -10,6 +10,7 @@ const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
 const commit_view = @import("commit_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === Tabs and groups ===
@@ -559,7 +560,7 @@ pub fn selectAnyTab() void {
         active_tab = 0;
         break;
     };
-    app.closeRepo();
+    dialog_views.closeRepo();
     app.new_tab_open = true;
 }
 
@@ -579,7 +580,7 @@ pub fn closeTab(index: usize) void {
     if (active_tab >= group.tabs.items.len) active_tab = group.tabs.items.len -| 1;
 
     if (group.tabs.items.len == 0) {
-        app.closeRepo();
+        dialog_views.closeRepo();
         dropEmptyGroups();
         selectAnyTab();
     } else if (was_active) {
@@ -594,7 +595,7 @@ pub fn selectGroup(index: usize) void {
     if (groups.items[index].tabs.items.len == 0) {
         active_group = index;
         active_tab = 0;
-        app.closeRepo();
+        dialog_views.closeRepo();
         return saveWorkspace();
     }
     selectTabIn(index, 0);

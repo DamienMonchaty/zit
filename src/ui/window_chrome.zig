@@ -8,6 +8,7 @@ const tab_strip = @import("tab_strip.zig");
 const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -45,8 +46,8 @@ pub fn titlebar() void {
         // Undo and Redo at the very start, as GitKraken has them: icons alone,
         // so the branch beside them keeps its name, each saying on hover what
         // it would take back; Redo lit only when there is one.
-        if (app.toolButton(@src(), "Undo", dvui.entypo.reply, .{ .icon_only = true, .hint = app.undoHint() })) app.requestUndo();
-        if (app.toolButton(@src(), "Redo", dvui.entypo.forward, .{ .icon_only = true, .usable = app.canRedo(), .hint = app.redoHint() })) app.requestRedo();
+        if (dialog_views.toolButton(@src(), "Undo", dvui.entypo.reply, .{ .icon_only = true, .hint = app.undoHint() })) app.requestUndo();
+        if (dialog_views.toolButton(@src(), "Redo", dvui.entypo.forward, .{ .icon_only = true, .usable = app.canRedo(), .hint = app.redoHint() })) app.requestRedo();
         toolbarDivider(@src(), 0);
         // The branch every button acts on; the repository is the tab's.
         if (app.repo != null) branchSwitcher();
@@ -81,7 +82,7 @@ pub fn titlebar() void {
         const arena = dvui.currentWindow().arena();
         const on_branch = if (app.history) |h| h.head != null else false;
 
-        if (app.toolButton(@src(), "Fetch", dvui.entypo.cw, .{ .busy = std.mem.eql(u8, running, "Fetching"), .usable = idle, .hint = "Fetch every remote, nothing merged" })) {
+        if (dialog_views.toolButton(@src(), "Fetch", dvui.entypo.cw, .{ .busy = std.mem.eql(u8, running, "Fetching"), .usable = idle, .hint = "Fetch every remote, nothing merged" })) {
             app.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
         }
         // After a rebase the branch and its upstream have parted: a plain
@@ -103,7 +104,7 @@ pub fn titlebar() void {
             // as the other buttons are, a rule between.
             var split = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
             defer split.deinit();
-            if (app.toolButton(@src(), "Pull", dvui.entypo.download, .{ .badge = if (rebased) 0 else tracking.behind, .busy = std.mem.eql(u8, running, "Pulling"), .usable = pullable, .hint = pull_hint })) {
+            if (dialog_views.toolButton(@src(), "Pull", dvui.entypo.download, .{ .badge = if (rebased) 0 else tracking.behind, .busy = std.mem.eql(u8, running, "Pulling"), .usable = pullable, .hint = pull_hint })) {
                 app.requestNetwork("Pulling", &.{"pull"});
             }
             pullMenu(pullable);
@@ -120,7 +121,7 @@ pub fn titlebar() void {
         else
             "Push this branch, and track it on the remote";
         const pushable = idle and on_branch and (tracking.upstream == null or tracking.ahead > 0);
-        if (app.toolButton(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, .{ .badge = tracking.ahead, .tag = "toolbar:Push", .busy = std.mem.eql(u8, running, "Pushing") or std.mem.eql(u8, running, "Force pushing"), .usable = pushable, .hint = push_hint })) {
+        if (dialog_views.toolButton(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, .{ .badge = tracking.ahead, .tag = "toolbar:Push", .busy = std.mem.eql(u8, running, "Pushing") or std.mem.eql(u8, running, "Force pushing"), .usable = pushable, .hint = push_hint })) {
             if (rebased) {
                 app.ask(.force_push, "");
             } else {
@@ -130,15 +131,15 @@ pub fn titlebar() void {
             }
         }
         toolbarDivider(@src(), 1);
-        if (app.toolButton(@src(), "Branch", dvui.entypo.flow_branch, .{ .hint = "A new branch at what is checked out" })) app.askName(.new_branch, "");
+        if (dialog_views.toolButton(@src(), "Branch", dvui.entypo.flow_branch, .{ .hint = "A new branch at what is checked out" })) app.askName(.new_branch, "");
         const changes = search_view.changeCount();
-        if (app.toolButton(@src(), "Stash", dvui.entypo.save, .{
+        if (dialog_views.toolButton(@src(), "Stash", dvui.entypo.save, .{
             .busy = std.mem.eql(u8, running, "Stashing"),
             .usable = idle and changes > 0,
             .hint = if (changes == 0) "No changes to stash" else std.fmt.allocPrint(arena, "Set {d} change{s} aside, new files too", .{ changes, plural(changes) }) catch "Stash",
         })) app.requestLocal("Stashing", &.{ "stash", "push", "-u" });
         const stashes = if (app.history) |h| h.stashes.len else 0;
-        if (app.toolButton(@src(), "Pop", dvui.entypo.archive, .{
+        if (dialog_views.toolButton(@src(), "Pop", dvui.entypo.archive, .{
             .busy = std.mem.eql(u8, running, "Popping the stash"),
             .usable = idle and stashes > 0,
             .hint = if (stashes == 0) "No stash to pop" else "Bring the last stash back, and drop it",
@@ -149,7 +150,7 @@ pub fn titlebar() void {
         // that comes up in ordinary work.
         if (tab_strip.uses_lfs) {
             toolbarDivider(@src(), 2);
-            if (app.toolButton(@src(), "LFS", dvui.entypo.cloud, .{ .busy = std.mem.eql(u8, running, "Fetching LFS files"), .usable = idle, .hint = "Fetch the LFS files this checkout points to" })) {
+            if (dialog_views.toolButton(@src(), "LFS", dvui.entypo.cloud, .{ .busy = std.mem.eql(u8, running, "Fetching LFS files"), .usable = idle, .hint = "Fetch the LFS files this checkout points to" })) {
                 app.requestNetwork("Fetching LFS files", &.{ "lfs", "pull" });
             }
         }
@@ -171,7 +172,7 @@ pub fn titlebar() void {
         app.operationControls();
         // Finding a commit: not an action on the repository, so apart from
         // them, an icon on this side.
-        if (app.toolButton(@src(), "Search", dvui.entypo.magnifying_glass, .{ .icon_only = true, .on = graph_view.search_open, .hint = "Search the commits — Ctrl+F" })) {
+        if (dialog_views.toolButton(@src(), "Search", dvui.entypo.magnifying_glass, .{ .icon_only = true, .on = graph_view.search_open, .hint = "Search the commits — Ctrl+F" })) {
             if (graph_view.search_open) graph_view.closeSearch() else {
                 graph_view.search_open = true;
                 app.active_view = .graph;
@@ -179,7 +180,7 @@ pub fn titlebar() void {
         }
         // At the very end: the rest of git — and everything else — is a
         // terminal away.
-        if (app.toolButton(@src(), "Terminal", dvui.entypo.code, .{ .hint = "A terminal in this repository's folder — Ctrl+Shift+T" })) app.openTerminal();
+        if (dialog_views.toolButton(@src(), "Terminal", dvui.entypo.code, .{ .hint = "A terminal in this repository's folder — Ctrl+Shift+T" })) app.openTerminal();
     }
 }
 
@@ -390,7 +391,7 @@ fn branchSwitcher() void {
     };
     const h = app.history orelse return;
 
-    app.focusOnce(app.searchField(@src(), &switch_filter, "Switch to a branch…", "switch_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
+    dialog_views.focusOnce(dialog_views.searchField(@src(), &switch_filter, "Switch to a branch…", "switch_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
     const needle = std.mem.trim(u8, switch_filter.items, " ");
 
     // As tall as its branches, up to a bound — and less where the window is
@@ -409,9 +410,9 @@ fn branchSwitcher() void {
             // A remote's branch with a local one of the same name is that one.
             if (kind == .remote and search_view.sameOnRemote(h, ref)) continue;
             if (needle.len > 0 and std.ascii.findIgnoreCase(ref.name, needle) == null) continue;
-            if (shown >= app.MAX_BRANCH_CHOICES) break;
+            if (shown >= dialog_views.MAX_BRANCH_CHOICES) break;
             if (!header) {
-                app.dropHeading(@src(), k + 10, if (kind == .local) "LOCAL" else "REMOTE");
+                dialog_views.dropHeading(@src(), k + 10, if (kind == .local) "LOCAL" else "REMOTE");
                 header = true;
             }
             shown += 1;
@@ -421,7 +422,7 @@ fn branchSwitcher() void {
             }
         }
     }
-    if (shown == 0) app.dropHeading(@src(), 20, "NO BRANCH BY THAT NAME");
+    if (shown == 0) dialog_views.dropHeading(@src(), 20, "NO BRANCH BY THAT NAME");
 }
 
 /// One branch in the switcher: a tick on the one checked out, its distance
@@ -429,7 +430,7 @@ fn branchSwitcher() void {
 fn branchChoice(id: usize, ref: git.Ref) bool {
     var mi = dvui.menuItem(@src(), .{}, .{
         .id_extra = id,
-        .tag = app.frameTag("switch", ref.name),
+        .tag = dialog_views.frameTag("switch", ref.name),
         .expand = .horizontal,
         .corners = style.radius.input,
         .color_fill_hover = .{ .color = style.accentDim() },
@@ -542,14 +543,14 @@ pub fn windowControls() void {
         .margin = .{ .x = style.space.sm },
         .color_fill = .{ .color = style.border() },
     });
-    if (app.iconButtonTagged(@src(), "window_min", "Minimise", dvui.entypo.minus, style.textMuted(), "window:minimise")) {
+    if (dialog_views.iconButtonTagged(@src(), "window_min", "Minimise", dvui.entypo.minus, style.textMuted(), "window:minimise")) {
         _ = dvui.backend.c.SDL_MinimizeWindow(sdlWindow());
     }
     const maxed = windowMaximized();
-    if (app.iconButtonTagged(@src(), "window_max", if (maxed) "Restore" else "Maximise", if (maxed) dvui.entypo.resize_100 else dvui.entypo.resize_full_screen, style.textMuted(), "window:maximise")) {
+    if (dialog_views.iconButtonTagged(@src(), "window_max", if (maxed) "Restore" else "Maximise", if (maxed) dvui.entypo.resize_100 else dvui.entypo.resize_full_screen, style.textMuted(), "window:maximise")) {
         _ = if (maxed) dvui.backend.c.SDL_RestoreWindow(sdlWindow()) else dvui.backend.c.SDL_MaximizeWindow(sdlWindow());
     }
-    if (app.iconButtonTagged(@src(), "window_close", "Close", dvui.entypo.cross, style.textMuted(), "window:close")) {
+    if (dialog_views.iconButtonTagged(@src(), "window_close", "Close", dvui.entypo.cross, style.textMuted(), "window:close")) {
         close_requested = true;
         dvui.refresh(null, @src(), null);
     }
@@ -660,7 +661,7 @@ pub fn tabList() void {
         revealTab(flat, rect);
     }
 
-    if (app.iconButton(@src(), "tab_add", "New tab — Ctrl+T", dvui.entypo.plus, style.textMuted())) {
+    if (dialog_views.iconButton(@src(), "tab_add", "New tab — Ctrl+T", dvui.entypo.plus, style.textMuted())) {
         app.new_tab_open = true;
     }
 

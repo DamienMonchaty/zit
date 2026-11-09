@@ -10,6 +10,7 @@ const search_view = @import("search_view.zig");
 const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -471,7 +472,7 @@ pub var drop_action: DropAction = .merge;
 /// rebase onto it. A click anywhere else, or Esc, lets it be.
 pub fn dropMenu() void {
     const d = drop orelse return;
-    if (app.escapePressed()) return clearDrop();
+    if (dialog_views.escapePressed()) return clearDrop();
 
     // The menu says when it closes — another window taking the keys —
     // through the root of its chain, which no context widget is here to be.
@@ -784,7 +785,7 @@ pub fn menuIconAt(src: std.builtin.SourceLocation, id: usize, icon: []const u8, 
 fn menuIconId(src: std.builtin.SourceLocation, id: usize, icon: []const u8, caption: []const u8, danger: bool) bool {
     var mi = dvui.menuItem(src, .{}, .{
         .id_extra = id,
-        .tag = app.menuTag(caption),
+        .tag = dialog_views.menuTag(caption),
         .expand = .horizontal,
         .corners = style.radius.input,
         // Lit with a tint of the accent, not filled with it: the row
@@ -883,7 +884,7 @@ pub fn graphPanel() void {
     defer if (search_open or app.commit_filter.items.len > 0) floatingSearch();
 
     if (commits.len == 0) {
-        app.emptyState(@src(), tab_strip.open_error orelse if (author_only.items.len > 0) "No commit by the authors picked." else "No commits yet.");
+        dialog_views.emptyState(@src(), tab_strip.open_error orelse if (author_only.items.len > 0) "No commit by the authors picked." else "No commits yet.");
         return;
     }
 
@@ -897,7 +898,7 @@ pub fn graphPanel() void {
     // A `path:` or `code:` search git refused says why, in place of the list.
     if (filtering and matches == 0 and (narrowed or search_view.search_hits.err.items.len > 0)) {
         // `path:` and `code:` still running have found nothing yet, not nothing.
-        app.emptyState(@src(), if (search_view.search_hits.err.items.len > 0)
+        dialog_views.emptyState(@src(), if (search_view.search_hits.err.items.len > 0)
             search_view.search_hits.err.items
         else if (search_view.search_hits.running != null and !search_view.search_hits.ready)
             "Loading the commits that match…"
@@ -1027,7 +1028,7 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
                     .padding = .{ .x = HEADER_INSET },
                 });
                 _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-                app.graphBranchMenu(@src());
+                dialog_views.graphBranchMenu(@src());
             }
             // The graph's own head: its width, nothing in it.
             var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = lane_w - search_view.branchColumn() }, .max_size_content = .width(lane_w - search_view.branchColumn()), .gravity_y = 0.5, .background = false });
@@ -1195,8 +1196,8 @@ fn authorHeader() void {
         return;
     };
 
-    const field = app.searchField(@src(), &author_filter, "Find an author…", "author_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm });
-    app.focusOnce(field);
+    const field = dialog_views.searchField(@src(), &author_filter, "Find an author…", "author_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm });
+    dialog_views.focusOnce(field);
     if (app.pickRow(9000, "All authors", "", picked == 0, null)) {
         clearAuthors();
         m.close();
@@ -1232,7 +1233,7 @@ fn authorHeader() void {
             listed.append(arena, .{ .entry = entry, .picked = false, .has_commit = true }) catch break;
         }
     }
-    if (listed.items.len == 0) app.dropHeading(@src(), 0, "NO AUTHOR BY THAT NAME");
+    if (listed.items.len == 0) dialog_views.dropHeading(@src(), 0, "NO AUTHOR BY THAT NAME");
 
     // Only the rows in sight are built.
     {
@@ -1246,8 +1247,8 @@ fn authorHeader() void {
         commit_view.rowsSpacer(@src(), 1, listed.items.len - in_sight.last, AUTHOR_ROW_H);
     }
 
-    if (app.search_entered == field) {
-        app.search_entered = null;
+    if (dialog_views.search_entered == field) {
+        dialog_views.search_entered = null;
         if (listed.items.len > 0) change = .{ .key = listed.items[0].entry.key, .only = true };
     }
     if (change) |c| {
@@ -1287,7 +1288,7 @@ fn authorRow(id: usize, entry: AuthorEntry, picked: bool, has_commit: bool) ?boo
     const toggled = dvui.checkbox(@src(), &on, null, .{ .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = 2 } });
 
     var mi = dvui.menuItem(@src(), .{}, .{
-        .tag = app.frameTag("author", entry.name),
+        .tag = dialog_views.frameTag("author", entry.name),
         .expand = .horizontal,
         .corners = style.radius.input,
         .color_fill_hover = .{ .color = style.accentDim() },
@@ -1596,7 +1597,7 @@ fn floatingSearch() void {
         .padding = .{ .x = style.space.xs, .w = style.space.xs },
     });
     defer card.deinit();
-    app.focusOnce(app.searchFieldIn(@src(), &app.commit_filter, "Search commits — author:, msg:, path:, code:, after:", "commit_filter", dvui.Rect.all(0), false));
+    dialog_views.focusOnce(dialog_views.searchFieldIn(@src(), &app.commit_filter, "Search commits — author:, msg:, path:, code:, after:", "commit_filter", dvui.Rect.all(0), false));
     if (search_view.search_hits.running != null) rebase_view.loadingSpinner(@src());
     if (list_filtering) {
         dvui.label(@src(), "{d} of {d}", .{ list_matches, list_total }, .{
@@ -1607,7 +1608,7 @@ fn floatingSearch() void {
             .padding = dvui.Rect.all(0),
         });
     }
-    if (app.iconButtonTagged(@src(), "search_close", "Close the search — Esc", dvui.entypo.cross, style.textMuted(), "search:close")) closeSearch();
+    if (dialog_views.iconButtonTagged(@src(), "search_close", "Close the search — Esc", dvui.entypo.cross, style.textMuted(), "search:close")) closeSearch();
 }
 
 pub fn closeSearch() void {
@@ -1637,7 +1638,7 @@ fn graphNotes() void {
     // Hidden ones: say so, and bring them back in one click.
     if (hidden) {
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "{d} hidden — show all", .{graph_hidden.items.len}) catch "Show all";
-        if (app.chipButton(@src(), app.eyeIcon(true), caption, false)) unhideAll();
+        if (dialog_views.chipButton(@src(), app.eyeIcon(true), caption, false)) unhideAll();
     }
     // Narrowed to authors: who, how many of the commits shown are theirs,
     // and back to everyone in one click — or, with none of theirs here,
@@ -1650,7 +1651,7 @@ fn graphNotes() void {
             std.fmt.allocPrint(dvui.currentWindow().arena(), "No commit by {s} — show all authors", .{who}) catch "Show all authors"
         else
             std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} · {d} commit{s} — show all authors", .{ who, n, window_chrome.plural(n) }) catch "Show all authors";
-        if (app.chipButton(@src(), dvui.entypo.users, caption, true)) clearAuthors();
+        if (dialog_views.chipButton(@src(), dvui.entypo.users, caption, true)) clearAuthors();
     }
     if (file_history.items.len > 0) {
         dvui.label(@src(), "history of {s}", .{file_history.items}, .{

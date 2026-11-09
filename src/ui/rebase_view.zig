@@ -12,6 +12,7 @@ const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
 const diff_view = @import("diff_view.zig");
 const commit_view = @import("commit_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -189,7 +190,7 @@ pub fn sidebarSection(src: std.builtin.SourceLocation, section: diff_view.Sectio
     // from the section above — no count, nothing that comes and goes on hover
     // but the ⋯ at the end, for the right-click menu. Hiding a whole section
     // from the graph is in that menu.
-    var head = dvui.box(src, .{ .dir = .horizontal }, .{ .id_extra = id, .tag = app.frameTag("section", section.label()), .expand = .horizontal, .background = false });
+    var head = dvui.box(src, .{ .dir = .horizontal }, .{ .id_extra = id, .tag = dialog_views.frameTag("section", section.label()), .expand = .horizontal, .background = false });
     const header_rect = head.data().borderRectScale().r;
     const head_hover = header_rect.contains(dvui.currentWindow().mouse_pt);
     const eye_kind: ?git.Ref.Kind = section.refKind() orelse (if (section == .remotes) git.Ref.Kind.remote else null);
@@ -240,7 +241,7 @@ pub fn sidebarSection(src: std.builtin.SourceLocation, section: diff_view.Sectio
             .padding = .{ .w = SIDE_RIGHT - style.space.xs },
         });
         defer tail.deinit();
-        if (app.iconButtonTagged(@src(), "section_more", "More…", dvui.entypo.dots_three_horizontal, if (head_hover) style.textMuted() else dvui.Color.transparent, app.frameTag("section-more", section.label()))) {
+        if (dialog_views.iconButtonTagged(@src(), "section_more", "More…", dvui.entypo.dots_three_horizontal, if (head_hover) style.textMuted() else dvui.Color.transparent, dialog_views.frameTag("section-more", section.label()))) {
             more_at = dvui.currentWindow().mouse_pt;
         }
         if (dvui.clicked(tail.data(), .{})) clicked = true;
@@ -622,17 +623,17 @@ fn remoteRow(src: std.builtin.SourceLocation, entry: git.Remote, id: usize) void
     // Its four actions on hover only, as a branch's eye and ⋯ are: the
     // line reads as a heading the rest of the time.
     if (hover) {
-        if (app.iconButton(@src(), "remote_fetch", "Fetch from this remote", dvui.entypo.cw, style.textMuted())) {
+        if (dialog_views.iconButton(@src(), "remote_fetch", "Fetch from this remote", dvui.entypo.cw, style.textMuted())) {
             app.requestNetwork("Fetching", if (tab_strip.prune_on_fetch) &.{ "fetch", "--prune", entry.name } else &.{ "fetch", entry.name });
         }
-        if (app.iconButton(@src(), "remote_rename", "Rename this remote", dvui.entypo.pencil, style.textFaint())) {
+        if (dialog_views.iconButton(@src(), "remote_rename", "Rename this remote", dvui.entypo.pencil, style.textFaint())) {
             app.askNameWith(.rename_remote, entry.name, entry.name);
         }
-        if (app.iconButton(@src(), "remote_url", "Change its URL", dvui.entypo.link, style.textFaint())) {
+        if (dialog_views.iconButton(@src(), "remote_url", "Change its URL", dvui.entypo.link, style.textFaint())) {
             app.askNameWith(.remote_url, entry.name, entry.url);
         }
         // Removing a remote drops config, never commits, so it does not ask.
-        if (app.iconButton(@src(), "remote_remove", "Remove this remote", dvui.entypo.cross, style.textFaint())) {
+        if (dialog_views.iconButton(@src(), "remote_remove", "Remove this remote", dvui.entypo.cross, style.textFaint())) {
             app.request(&.{ "remote", "remove", entry.name });
         }
     }
@@ -649,14 +650,14 @@ pub fn requestsError() void {
     // Not connected yet: the one thing to do.
     if (!github.signedIn()) {
         dvui.label(@src(), "Not connected to GitHub.", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
-        if (app.linkButton(@src(), "Connect", style.accent())) app.openConnect();
+        if (dialog_views.linkButton(@src(), "Connect", style.accent())) app.openConnect();
         return;
     }
     // GitHub's answer for a private repository Zit has not been let into:
     // its organisation restricts apps until an owner approves this one.
     if (std.mem.indexOf(u8, pr.last_error.items, "Could not resolve to a Repository") != null) {
         dvui.label(@src(), "Private, and its organisation has not approved Zit yet.", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
-        if (app.linkButton(@src(), "Ask for access", style.accent())) app.openUrl("https://github.com/settings/connections/applications/" ++ github.CLIENT_ID);
+        if (dialog_views.linkButton(@src(), "Ask for access", style.accent())) app.openUrl("https://github.com/settings/connections/applications/" ++ github.CLIENT_ID);
         return;
     }
     dvui.label(@src(), "{s}", .{if (pr.last_error.items.len > 0) pr.last_error.items else "Could not list them."}, .{
@@ -669,10 +670,10 @@ pub fn requestsError() void {
     });
     // The token turned down: only connecting again mends that.
     if (std.mem.startsWith(u8, pr.last_error.items, "GitHub no longer accepts")) {
-        if (app.linkButton(@src(), "Connect", style.accent())) app.openConnect();
+        if (dialog_views.linkButton(@src(), "Connect", style.accent())) app.openConnect();
         return;
     }
-    if (app.linkButton(@src(), "Try again", style.accent())) app.refreshRequests();
+    if (dialog_views.linkButton(@src(), "Try again", style.accent())) app.refreshRequests();
 }
 
 pub fn sidebarNote(src: std.builtin.SourceLocation, text: []const u8) void {
@@ -748,7 +749,7 @@ pub fn rebasePanel() void {
         });
         defer head.deinit();
 
-        if (app.iconButton(@src(), "rebase_close", "Back to the graph — Esc", dvui.entypo.chevron_small_left, style.textMuted())) {
+        if (dialog_views.iconButton(@src(), "rebase_close", "Back to the graph — Esc", dvui.entypo.chevron_small_left, style.textMuted())) {
             app.clearSelection();
         }
 
@@ -774,7 +775,7 @@ pub fn rebasePanel() void {
             .padding = dvui.Rect.all(0),
         });
 
-        if (app.linkButton(@src(), "Start rebase", style.accent())) app.requestAction(.rebase);
+        if (dialog_views.linkButton(@src(), "Start rebase", style.accent())) app.requestAction(.rebase);
     }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{
@@ -859,7 +860,7 @@ fn rebaseRow(src: std.builtin.SourceLocation, index: usize) ?Move {
         .padding = dvui.Rect.all(0),
     });
 
-    if (app.linkButton(@src(), step.action.verb(), rebaseActionColor(step.action))) {
+    if (dialog_views.linkButton(@src(), step.action.verb(), rebaseActionColor(step.action))) {
         app.rebase_steps.items[index].action = nextRebaseAction(step.action);
     }
 
@@ -868,12 +869,12 @@ fn rebaseRow(src: std.builtin.SourceLocation, index: usize) ?Move {
     // person looking at the graph means.
     var move: ?Move = null;
     if (index > 0) {
-        if (app.iconButton(@src(), "rebase_up", "Move up", dvui.entypo.chevron_small_up, style.textMuted())) {
+        if (dialog_views.iconButton(@src(), "rebase_up", "Move up", dvui.entypo.chevron_small_up, style.textMuted())) {
             move = .{ .from = index, .to = index - 1 };
         }
     }
     if (index + 1 < app.rebase_steps.items.len) {
-        if (app.iconButton(@src(), "rebase_down", "Move down", dvui.entypo.chevron_small_down, style.textMuted())) {
+        if (dialog_views.iconButton(@src(), "rebase_down", "Move down", dvui.entypo.chevron_small_down, style.textMuted())) {
             move = .{ .from = index, .to = index + 1 };
         }
     }
@@ -947,7 +948,7 @@ fn conflictOutput() void {
             .padding = dvui.Rect.all(0),
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (app.linkButton(@src(), "Open this file", style.textMuted())) commit_view.openPath(app.selected_path.items);
+        if (dialog_views.linkButton(@src(), "Open this file", style.textMuted())) commit_view.openPath(app.selected_path.items);
     }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
@@ -1062,13 +1063,13 @@ fn conflictRegions() void {
 /// "2 of 3 conflicts can be resolved safely": one click for every region
 /// where one side alone changed things, line by line at the finest.
 fn safeBar(safe: usize) void {
-    var bar = app.alertBox(@src(), 0, style.success(), dvui.entypo.check, .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm });
+    var bar = dialog_views.alertBox(@src(), 0, style.success(), dvui.entypo.check, .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm });
     defer bar.deinit();
     var text_buf: [160]u8 = undefined;
-    app.alertText(@src(), std.fmt.bufPrint(&text_buf, "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, app.conflicts.len, window_chrome.plural(app.conflicts.len) }) catch "", style.success());
+    dialog_views.alertText(@src(), std.fmt.bufPrint(&text_buf, "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, app.conflicts.len, window_chrome.plural(app.conflicts.len) }) catch "", style.success());
     var buf: [48]u8 = undefined;
     const caption = if (safe == 1) "Resolve it" else std.fmt.bufPrint(&buf, "Resolve these {d}", .{safe}) catch "Resolve them";
-    if (app.alertButton(@src(), caption, style.success(), "conflict:resolve_safe")) app.requestAction(.resolve_safe);
+    if (dialog_views.alertButton(@src(), caption, style.success(), "conflict:resolve_safe")) app.requestAction(.resolve_safe);
 }
 
 /// A file one side deleted and the other changed: keep it, or let it go.
@@ -1087,8 +1088,8 @@ fn deletedConflict() void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
     defer row.deinit();
     // The side that still has it, and the side that deleted it.
-    if (app.dialogButton(@src(), "Keep the file", true)) takeFile(if (by_us) .theirs else .ours);
-    if (app.dialogButton(@src(), "Delete it", false)) takeFile(if (by_us) .ours else .theirs);
+    if (dialog_views.dialogButton(@src(), "Keep the file", true)) takeFile(if (by_us) .theirs else .ours);
+    if (dialog_views.dialogButton(@src(), "Delete it", false)) takeFile(if (by_us) .ours else .theirs);
 }
 
 /// A binary file: no lines to pick between, one version or the other.
@@ -1107,8 +1108,8 @@ fn binaryConflict() void {
     defer row.deinit();
     var ours_buf: [96]u8 = undefined;
     var theirs_buf: [96]u8 = undefined;
-    if (app.dialogButton(@src(), keepCaption(&ours_buf, names.ours), false)) takeFile(.ours);
-    if (app.dialogButton(@src(), keepCaption(&theirs_buf, names.theirs), false)) takeFile(.theirs);
+    if (dialog_views.dialogButton(@src(), keepCaption(&ours_buf, names.ours), false)) takeFile(.ours);
+    if (dialog_views.dialogButton(@src(), keepCaption(&theirs_buf, names.theirs), false)) takeFile(.theirs);
 }
 
 fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: usize) void {
@@ -1391,11 +1392,11 @@ pub fn diffFileRow(
 
     switch (app.selection) {
         .commit => |commit_id| {
-            if (file.status != .deleted and app.chipButton(@src(), dvui.entypo.edit, "Open in editor", false)) app.openInEditor(file.path);
-            if (app.chipButton(@src(), dvui.entypo.clock, "History", false)) graph_view.showFileHistory(file.path);
+            if (file.status != .deleted and dialog_views.chipButton(@src(), dvui.entypo.edit, "Open in editor", false)) app.openInEditor(file.path);
+            if (dialog_views.chipButton(@src(), dvui.entypo.clock, "History", false)) graph_view.showFileHistory(file.path);
             // Nothing to restore of a file this commit deleted.
             if (file.status != .deleted) {
-                if (app.chipButton(@src(), dvui.entypo.ccw, "Restore this version", true)) {
+                if (dialog_views.chipButton(@src(), dvui.entypo.ccw, "Restore this version", true)) {
                     var buf: [std.fs.max_path_bytes + 16]u8 = undefined;
                     var sha_buf: [41]u8 = undefined;
                     const arg = std.fmt.bufPrint(&buf, "{s} {s}", .{ git.oidHex(commit_id, &sha_buf), file.path }) catch return;
@@ -1456,11 +1457,11 @@ pub fn diffLineRow(
             if (n > 0) {
                 if (s == .unstaged) {
                     const discard = std.fmt.bufPrint(&buf, "Discard {d} line{s}", .{ n, window_chrome.plural(n) }) catch "Discard lines";
-                    if (app.linkButton(@src(), discard, style.danger())) requestLines(file, line.hunk, s, true);
+                    if (dialog_views.linkButton(@src(), discard, style.danger())) requestLines(file, line.hunk, s, true);
                 }
                 const verb = if (s == .unstaged) "Stage" else "Unstage";
                 const caption = std.fmt.bufPrint(&buf, "{s} {d} line{s}", .{ verb, n, window_chrome.plural(n) }) catch verb;
-                if (app.linkButton(@src(), caption, style.accent())) requestLines(file, line.hunk, s, false);
+                if (dialog_views.linkButton(@src(), caption, style.accent())) requestLines(file, line.hunk, s, false);
                 return;
             }
             // Said where it is done: a click on a line picks it.
@@ -1472,10 +1473,10 @@ pub fn diffLineRow(
                 .padding = dvui.Rect.all(0),
             });
             if (s == .unstaged) {
-                if (app.linkButton(@src(), "Discard hunk", style.danger())) askDiscardHunk(file, line.hunk);
+                if (dialog_views.linkButton(@src(), "Discard hunk", style.danger())) askDiscardHunk(file, line.hunk);
             }
             const caption = if (s == .unstaged) "Stage hunk" else "Unstage hunk";
-            if (app.linkButton(@src(), caption, style.accent())) requestHunk(file, line.hunk, s);
+            if (dialog_views.linkButton(@src(), caption, style.accent())) requestHunk(file, line.hunk, s);
         }
         return;
     }

@@ -6,6 +6,7 @@ const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
 const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === Left: refs ===
@@ -67,7 +68,7 @@ fn sidebarLabel(src: std.builtin.SourceLocation, caption: []const u8, count: ?us
 fn refsSidebar() void {
     // A filter over the branches and tags: in a repository with a hundred of
     // them it is how anything is found, as in the "Branches:" menu.
-    _ = app.searchField(@src(), &rebase_view.sidebar_filter, "Filter branches and tags…", "sidebar_filter", .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm });
+    _ = dialog_views.searchField(@src(), &rebase_view.sidebar_filter, "Filter branches and tags…", "sidebar_filter", .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm });
 
     var scroll = dvui.scrollArea(@src(), .{}, .{
         .expand = .both,
@@ -94,7 +95,7 @@ fn refsSidebar() void {
 /// left, and the way on — continue, skip, or abort.
 fn mergeSidebar() void {
     const w = app.work orelse return;
-    const pending = app.conflictCount();
+    const pending = dialog_views.conflictCount();
 
     var card = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
@@ -140,7 +141,7 @@ fn conflictFileRow(id: usize, path: []const u8) void {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .id_extra = id,
-        .tag = app.frameTag("conflict_file", path),
+        .tag = dialog_views.frameTag("conflict_file", path),
         .expand = .horizontal,
         .background = true,
         .color_fill = .{ .color = if (open) style.accentDim() else style.surfaceRaised() },

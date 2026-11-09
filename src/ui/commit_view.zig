@@ -11,6 +11,7 @@ const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
 const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -47,7 +48,7 @@ fn summaryNotes() void {
     if (summary[summary.len - 1] == '.') {
         var line = summaryNote(1, dvui.entypo.warning, style.get().orange, "A summary ends without a full stop.");
         defer line.deinit();
-        if (app.linkButtonTagged(@src(), "Remove it", style.get().orange, "commit:drop_stop")) {
+        if (dialog_views.linkButtonTagged(@src(), "Remove it", style.get().orange, "commit:drop_stop")) {
             app.commit_summary.shrinkRetainingCapacity(std.mem.trimEnd(u8, app.commit_summary.items, ". ").len);
         }
     } else if (line_len > SUMMARY_SOFT and !summary_moved) {
@@ -456,7 +457,7 @@ fn commitDetail(id: git.Oid) void {
             defer line.deinit();
             dvui.label(@src(), "{s}", .{if (i == 0) "Parent" else "Merged"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .min_size_content = .{ .w = 64 }, .padding = dvui.Rect.all(0) });
             var p: [8]u8 = undefined;
-            if (app.linkButton(@src(), git.oidShort(parent, &p), style.accent())) app.selectCommit(parent);
+            if (dialog_views.linkButton(@src(), git.oidShort(parent, &p), style.accent())) app.selectCommit(parent);
             dvui.label(@src(), "{s}", .{diff_view.commitSummary(parent)}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
         }
     };
@@ -967,7 +968,7 @@ fn fileFilters() void {
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = i,
-            .tag = app.frameTag("files", @tagName(f)),
+            .tag = dialog_views.frameTag("files", @tagName(f)),
             .background = true,
             .color_fill = .{ .color = if (on) style.accentDim() else dvui.Color.transparent },
             .color_fill_hover = .{ .color = if (on) style.accentDim() else if (usable) style.rowHover() else dvui.Color.transparent },
@@ -1481,9 +1482,9 @@ fn folderLine(src: std.builtin.SourceLocation, id: usize, row: TreeRow, folded: 
 
     if (side) |s| {
         if (s == .staged) {
-            if (app.iconButton(@src(), "unstage_folder", "Unstage this folder", dvui.entypo.minus, style.textMuted())) app.request(&.{ "reset", "-q", "--", row.path });
+            if (dialog_views.iconButton(@src(), "unstage_folder", "Unstage this folder", dvui.entypo.minus, style.textMuted())) app.request(&.{ "reset", "-q", "--", row.path });
         } else {
-            if (app.iconButton(@src(), "stage_folder", "Stage this folder", dvui.entypo.plus, style.textMuted())) app.requestLocal("Staging", &.{ "add", "-A", "--", row.path });
+            if (dialog_views.iconButton(@src(), "stage_folder", "Stage this folder", dvui.entypo.plus, style.textMuted())) app.requestLocal("Staging", &.{ "add", "-A", "--", row.path });
         }
     }
     return hit;
@@ -1495,7 +1496,7 @@ fn fileRow(src: std.builtin.SourceLocation, commit_id: git.Oid, path: []const u8
     var row = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
         // By its path, for a test to find which rows were built.
-        .tag = app.frameTag("file", path),
+        .tag = dialog_views.frameTag("file", path),
         .expand = .horizontal,
         .min_size_content = .{ .h = style.row_height },
         // Selected as a row of the commit list is: its colour, and a bar.
@@ -1676,17 +1677,17 @@ fn changesSection(
         if (n > 0) {
             // Files picked with Ctrl or Shift: what to do with those alone.
             var buf: [32]u8 = undefined;
-            if (app.linkButtonTagged(@src(), std.fmt.bufPrint(&buf, "Stash {d}", .{n}) catch "Stash", style.textMuted(), "link:stash_picked")) requestPicked(.stash, side, changes);
+            if (dialog_views.linkButtonTagged(@src(), std.fmt.bufPrint(&buf, "Stash {d}", .{n}) catch "Stash", style.textMuted(), "link:stash_picked")) requestPicked(.stash, side, changes);
             var buf2: [32]u8 = undefined;
-            if (app.linkButtonTagged(@src(), std.fmt.bufPrint(&buf2, "{s} {d}", .{ if (staged) "Unstage" else "Stage", n }) catch "Stage", style.accent(), "link:stage_picked")) requestPicked(if (staged) .unstage else .stage, side, changes);
-            if (app.iconButtonTagged(@src(), "picked_clear", "Clear the selection — Esc", dvui.entypo.cross, style.textFaint(), "link:picked_clear")) clearPickedChanges();
+            if (dialog_views.linkButtonTagged(@src(), std.fmt.bufPrint(&buf2, "{s} {d}", .{ if (staged) "Unstage" else "Stage", n }) catch "Stage", style.accent(), "link:stage_picked")) requestPicked(if (staged) .unstage else .stage, side, changes);
+            if (dialog_views.iconButtonTagged(@src(), "picked_clear", "Clear the selection — Esc", dvui.entypo.cross, style.textFaint(), "link:picked_clear")) clearPickedChanges();
         } else if (changes.len > 0) {
             if (staged) {
-                if (app.linkButtonTagged(@src(), "Unstage all", style.accent(), "link:unstage_all")) app.request(&.{ "reset", "-q", "--", "." });
+                if (dialog_views.linkButtonTagged(@src(), "Unstage all", style.accent(), "link:unstage_all")) app.request(&.{ "reset", "-q", "--", "." });
             } else {
                 // A job: adding 11,000 new files is 13 s of git on Windows,
                 // which the window would otherwise wait out frozen.
-                if (app.linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) requestStageAll();
+                if (dialog_views.linkButtonTagged(@src(), "Stage all", style.accent(), "link:stage_all")) requestStageAll();
             }
         }
         changes_head_h = head.data().rect.h;
@@ -1828,14 +1829,14 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
     bw.deinit();
 
     if (staged) {
-        if (app.iconButton(@src(), "unstage", "Unstage this file", dvui.entypo.minus, style.textMuted())) {
+        if (dialog_views.iconButton(@src(), "unstage", "Unstage this file", dvui.entypo.minus, style.textMuted())) {
             requestStage(change.path, change.old_path, false);
         }
     } else {
-        if (app.iconButton(@src(), "discard", "Discard changes to this file", dvui.entypo.trash, style.textFaint())) {
+        if (dialog_views.iconButton(@src(), "discard", "Discard changes to this file", dvui.entypo.trash, style.textFaint())) {
             app.ask(.discard, change.path);
         }
-        if (app.iconButton(@src(), "stage", "Stage this file", dvui.entypo.plus, style.textMuted())) {
+        if (dialog_views.iconButton(@src(), "stage", "Stage this file", dvui.entypo.plus, style.textMuted())) {
             requestStage(change.path, change.old_path, true);
         }
     }
@@ -2154,11 +2155,11 @@ fn commitBox() void {
         if (currentTicket()) |ticket| signalChip(@src(), 1, dvui.entypo.tag, ticket, style.get().blue);
         recentMessages(@src());
         coAuthorMenu(@src());
-        if (app.iconButtonTagged(@src(), "commit_sign", if (app.commit_prefs.sign) "Signed (-S) — click to stop signing" else "Not signed — click to sign with -S", dvui.entypo.lock, if (app.commit_prefs.sign) style.success() else style.textFaint(), "commit:sign")) {
+        if (dialog_views.iconButtonTagged(@src(), "commit_sign", if (app.commit_prefs.sign) "Signed (-S) — click to stop signing" else "Not signed — click to sign with -S", dvui.entypo.lock, if (app.commit_prefs.sign) style.success() else style.textFaint(), "commit:sign")) {
             app.commit_prefs.sign = !app.commit_prefs.sign;
             tab_strip.saveWorkspace();
         }
-        if (app.iconButtonTagged(@src(), "commit_signoff", if (app.commit_prefs.signoff) "Signed-off-by — click to drop it" else "No Signed-off-by — click to add one", dvui.entypo.check, if (app.commit_prefs.signoff) style.accent() else style.textFaint(), "commit:signoff")) {
+        if (dialog_views.iconButtonTagged(@src(), "commit_signoff", if (app.commit_prefs.signoff) "Signed-off-by — click to drop it" else "No Signed-off-by — click to add one", dvui.entypo.check, if (app.commit_prefs.signoff) style.accent() else style.textFaint(), "commit:signoff")) {
             app.commit_prefs.signoff = !app.commit_prefs.signoff;
             tab_strip.saveWorkspace();
         }
@@ -2296,7 +2297,7 @@ fn commitField(
     });
     defer field.deinit();
 
-    const te = app.textField(@src(), .{
+    const te = dialog_views.textField(@src(), .{
         .text = .{ .array_list = .{ .backing = backing, .allocator = app.gpa, .limit = 8192 } },
         .placeholder = placeholder,
         .multiline = multiline,
@@ -2364,9 +2365,9 @@ fn commitTypeMenu(src: std.builtin.SourceLocation) void {
     pillInit(&dd, src, "commit_type", .{ .w = style.space.sm, .h = style.space.sm });
     pillFace(&dd, dvui.entypo.tag, if (app.commit_type) |t| COMMIT_TYPES[t] else "type");
     if (dd.dropped()) {
-        if (app.dropChoice(&dd, dvui.entypo.cross, "none", "")) app.commit_type = null;
+        if (dialog_views.dropChoice(&dd, dvui.entypo.cross, "none", "")) app.commit_type = null;
         for (COMMIT_TYPES, 0..) |name, i| {
-            if (app.dropChoice(&dd, if (app.commit_type == i) dvui.entypo.check else dvui.entypo.dot_single, name, "")) app.commit_type = i;
+            if (dialog_views.dropChoice(&dd, if (app.commit_type == i) dvui.entypo.check else dvui.entypo.dot_single, name, "")) app.commit_type = i;
         }
     }
     dd.deinit();
@@ -2389,13 +2390,13 @@ fn scopeMenu(src: std.builtin.SourceLocation) void {
             if (had) continue;
             seen[n] = scope;
             n += 1;
-            if (app.dropChoice(&dd, dvui.entypo.dot_single, scope, "")) {
+            if (dialog_views.dropChoice(&dd, dvui.entypo.dot_single, scope, "")) {
                 app.commit_scope.clearRetainingCapacity();
                 app.commit_scope.appendSlice(app.gpa, scope) catch {};
             }
             if (n == seen.len) break;
         }
-        if (n == 0) app.dropHeading(@src(), 0, "No scopes in the history yet");
+        if (n == 0) dialog_views.dropHeading(@src(), 0, "No scopes in the history yet");
     }
     dd.deinit();
 }
@@ -2407,7 +2408,7 @@ fn recentMessages(src: std.builtin.SourceLocation) void {
     const p = pillMenu(src, "recent_messages", dvui.entypo.clock, .{ .w = style.space.md }, "Recent messages");
     defer p.end();
     const m = p.menu orelse return;
-    app.dropHeading(@src(), 0, "RECENT MESSAGES");
+    dialog_views.dropHeading(@src(), 0, "RECENT MESSAGES");
     var list = app.pickList();
     defer list.deinit();
     var seen: [12][]const u8 = undefined;
@@ -2437,7 +2438,7 @@ fn coAuthorMenu(src: std.builtin.SourceLocation) void {
     const p = pillMenu(src, "co_authors", dvui.entypo.add_user, .{ .w = style.space.xs }, "Add a co-author");
     defer p.end();
     const m = p.menu orelse return;
-    app.dropHeading(@src(), 0, "ADD A CO-AUTHOR");
+    dialog_views.dropHeading(@src(), 0, "ADD A CO-AUTHOR");
     var list = app.pickList();
     defer list.deinit();
     var seen: [30][]const u8 = undefined;
@@ -2559,7 +2560,7 @@ fn coAuthorChips() void {
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
-        if (app.iconButton(@src(), "co_author_remove", who, dvui.entypo.cross, style.accent())) removed = i;
+        if (dialog_views.iconButton(@src(), "co_author_remove", who, dvui.entypo.cross, style.accent())) removed = i;
     }
     if (removed) |i| app.gpa.free(app.co_authors.orderedRemove(i));
 }

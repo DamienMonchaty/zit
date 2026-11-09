@@ -10,6 +10,7 @@ const tab_strip = @import("tab_strip.zig");
 const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
 const rebase_view = @import("rebase_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === Search through git ===
@@ -333,7 +334,7 @@ pub fn commitRow(
     var short: [8]u8 = undefined;
     var row = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = row_index,
-        .tag = app.frameTag("commit", git.oidShort(commit.id, &short)),
+        .tag = dialog_views.frameTag("commit", git.oidShort(commit.id, &short)),
         .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row_index)) * rh, .w = width, .h = rh },
         // No rule between rows: the hover keeps them apart.
         .background = true,
@@ -611,7 +612,7 @@ fn commitMenu(
     }
     // The three resets, one row: they differ only in what happens to the
     // changes, which is the choice the submenu asks for.
-    if (app.menuSubRow(@src(), dvui.entypo.back_in_time, "Reset branch here")) |r| {
+    if (dialog_views.menuSubRow(@src(), dvui.entypo.back_in_time, "Reset branch here")) |r| {
         var sub = dvui.floatingMenu(@src(), .{ .from = r }, .{
             .background = true,
             .color_fill = .{ .color = style.surfaceRaised() },
@@ -867,7 +868,7 @@ fn moreRefs(src: std.builtin.SourceLocation, commit: git.Commit, hidden: usize, 
                 .remote => "check out",
                 .tag => "tag",
             };
-            if (app.dropChoice(&dd, icon, ref.name, hint) and ref.kind != .tag) chosen = ref;
+            if (dialog_views.dropChoice(&dd, icon, ref.name, hint) and ref.kind != .tag) chosen = ref;
         }
     }
     dd.deinit();
@@ -940,7 +941,7 @@ fn stashTag(entry: git.Stash, i: usize, room: ?f32) void {
     const color = style.get().purple;
     var pill = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .id_extra = i,
-        .tag = app.frameTag("stash_tag", entry.message),
+        .tag = dialog_views.frameTag("stash_tag", entry.message),
         .background = true,
         .color_fill = .{ .color = style.tint(color) },
         .border = dvui.Rect.all(1),
@@ -1011,7 +1012,7 @@ pub fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: 
     var pill = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
         // The graph's, by name, so a test can find one to drag.
-        .tag = if (draggable) app.frameTag("ref", ref.name) else null,
+        .tag = if (draggable) dialog_views.frameTag("ref", ref.name) else null,
         .background = true,
         .color_fill = .{ .color = if (ref.head) color else style.tint(color) },
         .border = dvui.Rect.all(if (picked and !ref.head) 1 else 0),

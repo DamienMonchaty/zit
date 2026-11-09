@@ -7,6 +7,7 @@ const run = @import("../core/run.zig");
 const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
+const dialog_views = @import("dialog_views.zig");
 const app = @import("../main.zig");
 
 // === Split diff ===
@@ -142,18 +143,18 @@ fn splitHalf(
 /// around each change. Either one reads it again.
 fn diffReadControls() void {
     const o = &git.diff_options;
-    if (app.chipButton(@src(), if (o.ignore_whitespace) dvui.entypo.check else dvui.entypo.erase, "Ignore whitespace", o.ignore_whitespace)) {
+    if (dialog_views.chipButton(@src(), if (o.ignore_whitespace) dvui.entypo.check else dvui.entypo.erase, "Ignore whitespace", o.ignore_whitespace)) {
         o.ignore_whitespace = !o.ignore_whitespace;
         app.diff_stale = true;
     }
     var box = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.sm, .w = style.space.md } });
     defer box.deinit();
-    if (app.iconButton(@src(), "context_less", "Less context", dvui.entypo.minus, style.textMuted()) and o.context > 1) {
+    if (dialog_views.iconButton(@src(), "context_less", "Less context", dvui.entypo.minus, style.textMuted()) and o.context > 1) {
         o.context = if (o.context > 10) 10 else if (o.context > 3) 3 else o.context - 1;
         app.diff_stale = true;
     }
     dvui.label(@src(), "{d} lines", .{o.context}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-    if (app.iconButton(@src(), "context_more", "More context", dvui.entypo.plus, style.textMuted()) and o.context < 25) {
+    if (dialog_views.iconButton(@src(), "context_more", "More context", dvui.entypo.plus, style.textMuted()) and o.context < 25) {
         o.context = if (o.context < 3) o.context + 1 else if (o.context < 10) 10 else 25;
         app.diff_stale = true;
     }
@@ -298,11 +299,11 @@ pub fn diffPanel() void {
     if (rebase_view.isConflictView()) return rebase_view.conflictBody();
 
     const d = app.diff orelse {
-        app.emptyState(@src(), "Nothing to show.");
+        dialog_views.emptyState(@src(), "Nothing to show.");
         return;
     };
     if (d.files.len == 0) {
-        app.emptyState(@src(), "This commit changed no files.");
+        dialog_views.emptyState(@src(), "This commit changed no files.");
         return;
     }
     // A picture is shown, not said to be binary.
@@ -471,7 +472,7 @@ fn imagePreview(file: git.FileDiff) void {
             .label = .{ .text = file.path },
         });
     }
-    if (shown == 0) app.emptyState(@src(), "This picture could not be read.");
+    if (shown == 0) dialog_views.emptyState(@src(), "This picture could not be read.");
 }
 
 /// Where the diff changes, along the right edge of its scroll area: a red
@@ -666,8 +667,8 @@ fn diffHeader() void {
                 // Taking back a pick, and starting the file over, while there
                 // is something to take back.
                 if (app.resolve_undo.items.len > 0) {
-                    if (app.linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) app.requestAction(.undo_resolve);
-                    if (app.linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) app.ask(.restart_file, app.selected_path.items);
+                    if (dialog_views.linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) app.requestAction(.undo_resolve);
+                    if (dialog_views.linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) app.ask(.restart_file, app.selected_path.items);
                 }
                 // The whole file as one side has it, staged in the same click.
                 // Not for one deleted on a side: its panel asks that plainly.
@@ -675,24 +676,24 @@ fn diffHeader() void {
                     const names = rebase_view.sideNames();
                     var ours_buf: [96]u8 = undefined;
                     var theirs_buf: [96]u8 = undefined;
-                    if (app.linkButtonTagged(@src(), rebase_view.allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) rebase_view.takeFile(.ours);
-                    if (app.linkButtonTagged(@src(), rebase_view.allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) rebase_view.takeFile(.theirs);
+                    if (dialog_views.linkButtonTagged(@src(), rebase_view.allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) rebase_view.takeFile(.ours);
+                    if (dialog_views.linkButtonTagged(@src(), rebase_view.allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) rebase_view.takeFile(.theirs);
                 }
-                if (app.linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) app.requestAction(.stage_next);
+                if (dialog_views.linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) app.requestAction(.stage_next);
                 return;
             }
 
-            if (app.linkButton(@src(), "Open in editor", style.textMuted())) app.openInEditor(app.selected_path.items);
-            if (app.linkButton(@src(), "Blame", style.textMuted())) app.selectBlame(app.selected_path.items);
+            if (dialog_views.linkButton(@src(), "Open in editor", style.textMuted())) app.openInEditor(app.selected_path.items);
+            if (dialog_views.linkButton(@src(), "Blame", style.textMuted())) app.selectBlame(app.selected_path.items);
 
             // The whole-file counterpart of the per-hunk buttons below, and the
             // only thing on offer for a binary file or a mode change.
             if (side == .unstaged) {
-                if (app.linkButton(@src(), "Stage file", style.accent())) {
+                if (dialog_views.linkButton(@src(), "Stage file", style.accent())) {
                     commit_view.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), true);
                 }
             } else {
-                if (app.linkButton(@src(), "Unstage file", style.accent())) {
+                if (dialog_views.linkButton(@src(), "Unstage file", style.accent())) {
                     commit_view.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), false);
                 }
             }
@@ -754,7 +755,7 @@ pub fn blamePanel() void {
         });
         defer head.deinit();
 
-        if (app.iconButton(@src(), "blame_close", "Back to the graph — Esc", dvui.entypo.chevron_small_left, style.textMuted())) {
+        if (dialog_views.iconButton(@src(), "blame_close", "Back to the graph — Esc", dvui.entypo.chevron_small_left, style.textMuted())) {
             app.clearSelection();
         }
 
@@ -777,7 +778,7 @@ pub fn blamePanel() void {
     }
 
     const b = app.blame_view orelse {
-        app.emptyState(@src(), "Nothing to blame.");
+        dialog_views.emptyState(@src(), "Nothing to blame.");
         return;
     };
 
