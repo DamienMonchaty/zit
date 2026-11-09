@@ -14,6 +14,7 @@ const dialog_views = @import("dialog_views.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_list = @import("pr_list.zig");
 const app = @import("../main.zig");
 
 // === Search through git ===
@@ -1172,15 +1173,15 @@ pub fn requestBadge(ref: git.Ref, ink: dvui.Color) void {
     bw.deinit();
     if (clicked) {
         app.active_view = .pulls;
-        app.pr_filter = .open;
-        app.selectRequest(req.number);
+        pr_list.pr_filter = .open;
+        pr_list.selectRequest(req.number);
     }
 }
 
 /// Whether `id` is one of the commits of the request picked, as last read.
 fn inPickedRequest(id: git.Oid) bool {
     const d = pr.detail orelse return false;
-    if (app.pr_selected == null or d.commits.len == 0) return false;
+    if (pr_list.pr_selected == null or d.commits.len == 0) return false;
     var hex: [41]u8 = undefined;
     const sha = git.oidHex(id, &hex);
     for (d.commits) |c| if (std.mem.eql(u8, c.oid, sha)) return true;

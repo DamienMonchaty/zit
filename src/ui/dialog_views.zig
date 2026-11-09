@@ -16,6 +16,7 @@ const identity_view = @import("identity_view.zig");
 const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const pr_list = @import("pr_list.zig");
 const app = @import("../main.zig");
 
 // === Folder picker ===
@@ -110,7 +111,7 @@ pub fn closeRepo() void {
     graph_view.clearFileHistory();
     // What belonged to the repository that was open: its pull request, the
     // commits its `path:`/`code:` search found, the order its list sorted to.
-    app.pr_selected = null;
+    pr_list.pr_selected = null;
     pr.clearDetail();
     search_view.clearSearchHits();
     // Left ticked, the next repository's commit would rewrite its own HEAD.

@@ -13,6 +13,7 @@ const commit_view = @import("../ui/commit_view.zig");
 const identity_view = @import("../ui/identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_connect = @import("github_connect.zig");
+const pr_list = @import("../ui/pr_list.zig");
 const app = @import("../main.zig");
 
 // === GitHub, acted on ===
@@ -146,7 +147,7 @@ pub fn collectApi() void {
     if (failed != null and api_then == .branch_after_merge) {
         if (api_queue.items.len > 0) return startNextApi();
         repo_io.refreshRequests();
-        if (app.pr_selected) |n| pr.loadDetail(app.repo_path.items, n);
+        if (pr_list.pr_selected) |n| pr.loadDetail(app.repo_path.items, n);
         return;
     }
     if (failed) |why| {
@@ -159,10 +160,10 @@ pub fn collectApi() void {
     }
     switch (api_then) {
         .none => {},
-        .clear_comment => app.pr_comment.clearRetainingCapacity(),
+        .clear_comment => pr_list.pr_comment.clearRetainingCapacity(),
         .clear_reply => {
-            app.pr_reply.clearRetainingCapacity();
-            app.pr_reply_id.clearRetainingCapacity();
+            pr_list.pr_reply.clearRetainingCapacity();
+            pr_list.pr_reply_id.clearRetainingCapacity();
         },
         .ask_reviewers => askReviewers(github.split(w.out).body),
         .gone => {
@@ -182,13 +183,13 @@ pub fn collectApi() void {
         app.pr_creating = false;
         app.pr_new_open = false;
         app.new_tab_open = false;
-        app.pr_filter = .open;
+        pr_list.pr_filter = .open;
         app.active_view = .pulls;
         repo_io.refreshRequests();
-        return app.selectRequest(n);
+        return pr_list.selectRequest(n);
     }
     repo_io.refreshRequests();
-    if (app.pr_selected) |n| pr.loadDetail(app.repo_path.items, n);
+    if (pr_list.pr_selected) |n| pr.loadDetail(app.repo_path.items, n);
     if (api_fetch_after) {
         api_fetch_after = false;
         repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(true));
@@ -518,7 +519,7 @@ pub fn collectJob() void {
     }
     // Whatever went to the remote may have opened, merged or closed one.
     repo_io.refreshRequests();
-    if (app.pr_selected) |n| pr.loadDetail(app.repo_path.items, n);
+    if (pr_list.pr_selected) |n| pr.loadDetail(app.repo_path.items, n);
 }
 
 /// Fold the result of a command back into the UI. Shared by the synchronous
@@ -1050,7 +1051,7 @@ pub fn runConfirmed() void {
             var path: [512]u8 = undefined;
             const number = std.fmt.parseInt(u32, c.arg, 10) catch return clearConfirm();
             // In the dropdown's order: a merge commit, squash, rebase.
-            const method = ([_][]const u8{ "merge", "squash", "rebase" })[@min(app.pr_merge_method, 2)];
+            const method = ([_][]const u8{ "merge", "squash", "rebase" })[@min(pr_list.pr_merge_method, 2)];
             // With the commit it was shown at: GitHub refuses if the branch
             // moved since, rather than merge what nobody looked at.
             const sha = if (pr.detail) |d| (if (d.number == number) d.head_sha else "") else "";
@@ -1063,7 +1064,7 @@ pub fn runConfirmed() void {
             requestApi("Merging", "PUT", apiPath(&path, "/pulls/{d}/merge", .{number}), body, .gone);
             // Its branch after it, as the toggle asked: GitHub's ref, by name —
             // unless it lives in a fork, which is not this repository's to delete.
-            if (app.pr_delete_branch) if (pr.detail) |d| if (d.number == number and d.head.len > 0 and !d.fork) {
+            if (pr_list.pr_delete_branch) if (pr.detail) |d| if (d.number == number and d.head.len > 0 and !d.fork) {
                 var ref_path: [512]u8 = undefined;
                 requestApi("Deleting the branch", "DELETE", apiPath(&ref_path, "/git/refs/heads/{s}", .{d.head}), null, .branch_after_merge);
             };

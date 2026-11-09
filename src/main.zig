@@ -32,6 +32,7 @@ const home_page = @import("ui/home_page.zig");
 const repo_io = @import("core/repo_io.zig");
 const github_actions = @import("github/github_actions.zig");
 const github_connect = @import("github/github_connect.zig");
+const pr_list = @import("ui/pr_list.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -1105,14 +1106,14 @@ fn appDeinit(win: *dvui.Window) void {
     graph_view.clearDrop();
     graph_view.drag_source.deinit(gpa);
     picked_lines.deinit(gpa);
-    pr_comment.deinit(gpa);
+    pr_list.pr_comment.deinit(gpa);
     clearPrEdit();
     clearPrCreate();
-    pr_search.deinit(gpa);
-    pr_search = .empty;
-    pr_filter = .open;
-    pr_reply.deinit(gpa);
-    pr_reply_id.deinit(gpa);
+    pr_list.pr_search.deinit(gpa);
+    pr_list.pr_search = .empty;
+    pr_list.pr_filter = .open;
+    pr_list.pr_reply.deinit(gpa);
+    pr_list.pr_reply_id.deinit(gpa);
     diff_view.split_rows.deinit(gpa);
     for ([_]*std.ArrayList(u8){ &dialog_views.dialog_url, &dialog_views.dialog_parent, &dialog_views.dialog_name, &dialog_views.dialog_branch }) |list| list.deinit(gpa);
     freeViews();
@@ -1424,546 +1425,8 @@ fn contentPane() void {
 
     switch (active_view) {
         .graph => if (repo_io.historyLoading()) repo_io.loadingScreen() else graphView(),
-        .pulls => pullsView(),
+        .pulls => pr_list.pullsView(),
     }
-}
-
-// === Pull requests ===
-//
-// The list on the left, the one picked on the right in full — what it
-// changes, whether its checks pass, the conversation so far — and every
-// answer to it from here: comment, approve, ask for changes, merge, close.
-// Each answer is a call to GitHub's API (`requestApi`), after which the list
-// and the request are read again.
-
-var pr_split: f32 = 0.36;
-pub var pr_selected: ?u32 = null;
-pub var pr_comment: std.ArrayList(u8) = .empty;
-/// The merge settings' dropdown: merge commit, squash, rebase. A `usize`
-/// because that is what a dvui dropdown writes.
-pub var pr_merge_method: usize = 1;
-pub var pr_delete_branch: bool = true;
-
-/// Resolved threads shown too, not only the open ones.
-var pr_threads_all: bool = false;
-/// The thread whose reply box is open — its node id — and what is in it.
-pub var pr_reply_id: std.ArrayList(u8) = .empty;
-pub var pr_reply: std.ArrayList(u8) = .empty;
-
-pub fn selectRequest(number: u32) void {
-    // A review written for one request is never sent to another.
-    if (pr_selected != number) pr_comment.clearRetainingCapacity();
-    pr_selected = number;
-    pr_reply_id.clearRetainingCapacity();
-    pr_reply.clearRetainingCapacity();
-    pr.clearDetail();
-    pr.loadDetail(repo_path.items, number);
-}
-
-fn requestNumber(buf: *[12]u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{d}", .{pr_selected orelse 0}) catch "0";
-}
-
-fn pullsView() void {
-    if (pr.host == .none) {
-        dialog_views.emptyState(@src(), "Pull requests show up for a repository on GitHub, once Zit is connected to it (Settings › GitHub).");
-        return;
-    }
-    var split = dvui.paned(@src(), .{
-        .direction = .horizontal,
-        .collapsed_size = 700,
-        .split_ratio = &pr_split,
-        .handle_size = 1,
-        .draw_in_deinit = false,
-    }, .{ .expand = .both, .background = false });
-    defer split.deinit();
-
-    if (split.showFirst()) requestList();
-    if (split.showSecond()) requestDetail();
-}
-
-/// Which requests the list shows.
-const PrFilter = enum { open, review, mine, drafts, merged, closed };
-pub var pr_filter: PrFilter = .open;
-const PrSort = enum { updated, created, size };
-var pr_sort: PrSort = .updated;
-var pr_search: std.ArrayList(u8) = .empty;
-
-/// Asked to review by the person signed in to the host, and not answered.
-fn waitsOnMe(entry: pr.Request) bool {
-    if (window_chrome.me_gh.items.len == 0) return false;
-    for (entry.reviewers) |r| if (std.ascii.eqlIgnoreCase(r, window_chrome.me_gh.items)) return true;
-    return false;
-}
-
-fn requestsToReview() usize {
-    var n: usize = 0;
-    for (pr.list) |entry| n += @intFromBool(waitsOnMe(entry));
-    return n;
-}
-
-/// Whether the list's tab and search let `entry` through.
-fn requestShown(entry: pr.Request) bool {
-    switch (pr_filter) {
-        .open, .merged, .closed => {},
-        .review => if (!waitsOnMe(entry)) return false,
-        .mine => if (window_chrome.me_gh.items.len == 0 or !std.ascii.eqlIgnoreCase(entry.author, window_chrome.me_gh.items)) return false,
-        .drafts => if (!entry.draft) return false,
-    }
-    const needle = std.mem.trim(u8, pr_search.items, " #");
-    if (needle.len == 0) return true;
-    var num: [12]u8 = undefined;
-    const number = std.fmt.bufPrint(&num, "{d}", .{entry.number}) catch "";
-    for ([_][]const u8{ entry.title, entry.author, entry.branch, number }) |field| {
-        if (std.ascii.findIgnoreCase(field, needle) != null) return true;
-    }
-    return false;
-}
-
-fn requestList() void {
-    var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = true,
-        .color_fill = .{ .color = style.background() },
-    });
-    defer panel.deinit();
-    window_chrome.loadMe();
-    if (pr.pumpPast()) dvui.refresh(null, @src(), null);
-
-    const source = requestSource();
-    {
-        var head = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surface() },
-            .border = .{ .h = 1 },
-            .color_border = .{ .color = style.border() },
-            .padding = .{ .x = style.space.sm, .y = style.space.sm, .w = style.space.sm, .h = style.space.xs },
-        });
-        defer head.deinit();
-        // The way back, said where the eye is, not only on the tab. On a row of
-        // its own: a chip centres itself, and in this column it would sit
-        // under the filters.
-        {
-            var top = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
-            defer top.deinit();
-            if (dialog_views.chipButton(@src(), dvui.entypo.chevron_left, "History — Esc", false)) closePulls();
-            dvui.label(@src(), "Pull requests", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
-        }
-        // The search, the order, and the two buttons.
-        {
-            var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.xs } });
-            defer line.deinit();
-            {
-                var cell = dvui.box(@src(), .{}, .{ .expand = .horizontal, .background = false });
-                defer cell.deinit();
-                _ = dialog_views.searchField(@src(), &pr_search, "Search title, #, author, branch…", "pr_search", dvui.Rect.all(0));
-            }
-            prFilterMenu();
-            prSortMenu();
-            if (dialog_views.iconButton(@src(), "pr_new", "Create one for this branch", dvui.entypo.plus, style.textMuted())) rebase_view.requestCreateRequest();
-            if (dialog_views.iconButton(@src(), "pr_refresh", "Refresh", dvui.entypo.ccw, style.textMuted())) {
-                repo_io.refreshRequests();
-                if (pr_filter == .merged or pr_filter == .closed) pr.refreshPast(repo_path.items, if (pr_filter == .merged) .merged else .closed);
-            }
-        }
-    }
-
-    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
-    defer scroll.deinit();
-
-    const status = if (pr_filter == .merged or pr_filter == .closed) pr.past_status else pr.status;
-    switch (status) {
-        .loading => if (source.len == 0) rebase_view.sidebarNote(@src(), "Loading…"),
-        .failed => if (pr_filter == .merged or pr_filter == .closed) rebase_view.sidebarNote(@src(), "Could not list them.") else rebase_view.requestsError(),
-        .ready, .idle => {},
-    }
-    // From the same list as `source`, read once: a filter clicked further
-    // up this function switches `requestSource()` to the merged or closed
-    // ones, and indexes from one list read out of the other ran past its end.
-    const order = shownRequests(dvui.currentWindow().arena(), source);
-    // None picked yet: the checked-out branch's own, else the first.
-    if (pr_selected == null and order.len > 0) {
-        const head = if (history) |h| h.head orelse "" else "";
-        var pick = source[order[0]].number;
-        for (order) |i| if (head.len > 0 and std.mem.eql(u8, source[i].branch, head)) {
-            pick = source[i].number;
-            break;
-        };
-        selectRequest(pick);
-    }
-    if (order.len == 0 and status == .ready) rebase_view.sidebarNote(@src(), switch (pr_filter) {
-        .review => "Nothing waits on your review.",
-        .mine => "None of yours open.",
-        .drafts => "No drafts.",
-        else => "None.",
-    });
-    for (order, 0..) |i, n| requestListRow(@src(), source[i], n);
-}
-
-/// The list the filter, the search and the sort leave, as indexes into
-/// `source`, in `a`: what is drawn, and what ↑ and ↓ walk.
-fn shownRequests(a: std.mem.Allocator, source: []const pr.Request) []u32 {
-    var order: std.ArrayList(u32) = .empty;
-    for (source, 0..) |entry, i| if (requestShown(entry)) order.append(a, @intCast(i)) catch break;
-    const Cmp = struct {
-        list: []const pr.Request,
-        fn lt(ctx: @This(), x: u32, y: u32) bool {
-            const l = ctx.list[x];
-            const r = ctx.list[y];
-            return switch (pr_sort) {
-                .updated => l.updated > r.updated,
-                .created => l.created > r.created,
-                .size => l.additions + l.deletions > r.additions + r.deletions,
-            };
-        }
-    };
-    std.sort.pdq(u32, order.items, Cmp{ .list = source }, Cmp.lt);
-    return order.items;
-}
-
-/// The open requests, or the merged and closed ones, as the filter says.
-fn requestSource() []const pr.Request {
-    return switch (pr_filter) {
-        .merged, .closed => pr.past,
-        else => pr.list,
-    };
-}
-
-/// The request `delta` along the list from the one picked: ↑ and ↓.
-fn stepRequest(delta: i2) void {
-    const source = requestSource();
-    const order = shownRequests(dvui.currentWindow().arena(), source);
-    if (order.len == 0) return;
-    var at: ?usize = null;
-    if (pr_selected) |n| for (order, 0..) |i, k| if (source[i].number == n) {
-        at = k;
-        break;
-    };
-    const next = if (at) |k|
-        (if (delta > 0) @min(k + 1, order.len - 1) else k -| 1)
-    else
-        0;
-    selectRequest(source[order[next]].number);
-}
-
-/// Which requests the list shows, as a select beside the search: open,
-/// waiting on your review, yours, drafts, merged, closed — each with how
-/// many it holds, where that is known without asking.
-fn prFilterMenu() void {
-    var drafts: usize = 0;
-    var mine: usize = 0;
-    for (pr.list) |e| {
-        drafts += @intFromBool(e.draft);
-        mine += @intFromBool(window_chrome.me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(e.author, window_chrome.me_gh.items));
-    }
-    const items = [_]struct { PrFilter, []const u8, ?usize }{
-        .{ .open, "Open", pr.list.len },
-        .{ .review, "To review", requestsToReview() },
-        .{ .mine, "Mine", mine },
-        .{ .drafts, "Drafts", drafts },
-        .{ .merged, "Merged", null },
-        .{ .closed, "Closed", null },
-    };
-    const current = for (items) |it| {
-        if (it[0] == pr_filter) break it;
-    } else items[0];
-
-    const button = window_chrome.DropButton.begin(@src(), .{
-        .tag = "pr:filter",
-        .gravity_y = 0.5,
-        .background = false,
-        .color_fill_hover = .{ .color = style.rowHover() },
-        .corners = style.radius.input,
-        .margin = .{ .x = style.space.xs },
-        .padding = dvui.Rect.all(0),
-    });
-    {
-        const lit = button.item.show_active or button.item.mouse_over;
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .background = true,
-            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
-            .border = dvui.Rect.all(1),
-            .color_border = .{ .color = style.border() },
-            .corners = style.radius.input,
-            .padding = .{ .x = style.space.md, .y = 5, .w = style.space.sm, .h = 5 },
-        });
-        defer face.deinit();
-        dvui.label(@src(), "{s}", .{current[1]}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        if (current[2]) |n| commit_view.countPill(n);
-        dvui.icon(@src(), "filter_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs } });
-    }
-    const menu = button.open();
-    defer button.end(menu);
-    const m = menu orelse return;
-    for (items, 0..) |it, i| {
-        var count_buf: [16]u8 = undefined;
-        const count = if (it[2]) |n| std.fmt.bufPrint(&count_buf, "{d}", .{n}) catch "" else "";
-        if (pickRow(i, it[1], count, pr_filter == it[0], null)) {
-            pr_filter = it[0];
-            if (it[0] == .merged or it[0] == .closed) pr.refreshPast(repo_path.items, if (it[0] == .merged) .merged else .closed);
-            m.close();
-            // The keys back to the list: the closed menu would keep ↑ and ↓.
-            dvui.focusWidget(null, dvui.currentWindow().data().id, null);
-        }
-    }
-}
-
-/// The list's order, as a menu.
-fn prSortMenu() void {
-    const button = window_chrome.DropButton.begin(@src(), .{
-        .tag = "pr_sort",
-        .gravity_y = 0.5,
-        .background = false,
-        .corners = style.radius.input,
-        .padding = .{ .x = 4, .y = 2, .w = 2, .h = 2 },
-        .margin = .{ .x = style.space.xs },
-    });
-    {
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-        defer face.deinit();
-        dvui.icon(@src(), "sort_icon", dvui.entypo.list, .{ .fill_color = .{ .color = style.textMuted() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5 });
-        dvui.icon(@src(), "sort_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textFaint() } }, .{ .min_size_content = .{ .w = 11, .h = 11 }, .gravity_y = 0.5 });
-    }
-    const menu = button.open();
-    defer button.end(menu);
-    const m = menu orelse return;
-    dialog_views.dropHeading(@src(), 0, "SORT BY");
-    for ([_]struct { PrSort, []const u8 }{ .{ .updated, "Recently updated" }, .{ .created, "Newest" }, .{ .size, "Largest change" } }, 0..) |it, i| {
-        if (graph_view.menuIconAt(@src(), i, if (pr_sort == it[0]) dvui.entypo.check else dvui.entypo.dot_single, it[1])) {
-            pr_sort = it[0];
-            m.close();
-        }
-    }
-}
-
-/// A review verdict as a coloured word, or nothing where there is none.
-fn reviewBadge(src: std.builtin.SourceLocation, id: usize, review: []const u8, draft: bool) void {
-    const word: []const u8, const hue: dvui.Color = if (draft)
-        .{ "Draft", style.textFaint() }
-    else if (std.mem.eql(u8, review, "APPROVED"))
-        .{ "Approved", style.success() }
-    else if (std.mem.eql(u8, review, "CHANGES_REQUESTED"))
-        .{ "Changes requested", style.danger() }
-    else if (std.mem.eql(u8, review, "REVIEW_REQUIRED"))
-        .{ "Review required", style.get().orange }
-    else
-        return;
-    dvui.label(src, "{s}", .{word}, .{
-        .id_extra = id,
-        .font = style.tiny(),
-        .color_text = .{ .color = hue },
-        .background = true,
-        .color_fill = .{ .color = style.tint(hue) },
-        .corners = style.radius.tag,
-        .gravity_y = 0.5,
-        .padding = .{ .x = style.space.xs, .w = style.space.xs },
-        .margin = .{ .w = style.space.sm },
-    });
-}
-
-fn requestListRow(src: std.builtin.SourceLocation, entry: pr.Request, id: usize) void {
-    var tag_buf: [12]u8 = undefined;
-    const selected = pr_selected != null and pr_selected.? == entry.number;
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(src, .{ .draw_focus = false }, .{
-        .id_extra = id,
-        .tag = dialog_views.frameTag("pr", std.fmt.bufPrint(&tag_buf, "{d}", .{entry.number}) catch ""),
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = if (selected) style.rowSelected() else style.background() },
-        .color_fill_hover = .{ .color = if (selected) style.rowSelected() else style.rowHover() },
-        .border = .{ .h = 1 },
-        .color_border = .{ .color = style.borderSubtle() },
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
-        .margin = dvui.Rect.all(0),
-    });
-    defer bw.deinit();
-    bw.processEvents();
-    bw.drawBackground();
-
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-    defer row.deinit();
-    search_view.avatarSized(@src(), 0, requestAuthor(entry.author), null, null, 26);
-
-    var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .x = style.space.xs } });
-    defer col.deinit();
-    {
-        // The number, the title, and what CI made of its head.
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-        defer line.deinit();
-        dvui.label(@src(), "#{d}", .{entry.number}, .{
-            .font = style.smallBold(),
-            .color_text = .{ .color = if (entry.draft) style.textFaint() else style.accent() },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.sm },
-            .padding = dvui.Rect.all(0),
-        });
-        var cell = dvui.box(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .min_size_content = .{ .h = style.small().textHeight() }, .background = false });
-        var fit_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
-        dvui.label(@src(), "{s}", .{graph_view.fitText(&fit_buf, entry.title, style.smallBold(), cell.data().contentRect().w)}, .{
-            .font = style.smallBold(),
-            .color_text = .{ .color = if (entry.draft) style.textMuted() else style.text() },
-            .padding = dvui.Rect.all(0),
-        });
-        cell.deinit();
-        if (entry.sha.len == 40) if (pr.ciOf(entry.sha[0..40].*)) |ci| {
-            const icon, const color = switch (ci) {
-                .success => .{ dvui.entypo.check, style.success() },
-                .failure => .{ dvui.entypo.cross, style.danger() },
-                .pending => .{ dvui.entypo.dot_single, style.get().orange },
-            };
-            dvui.icon(@src(), "pr_ci", icon, .{ .fill_color = .{ .color = color } }, .{
-                .min_size_content = .{ .w = 12, .h = 12 },
-                .gravity_y = 0.5,
-                .margin = .{ .x = style.space.xs },
-            });
-        };
-    }
-    {
-        // Where review stands, where it goes, its labels; its size and age
-        // at the end.
-        var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = 3 } });
-        defer line.deinit();
-        reviewBadge(@src(), 0, entry.review, entry.draft);
-        if (entry.conflict) tinyBadge(@src(), 1, "conflict", style.danger());
-        for (entry.labels[0..@min(entry.labels.len, 2)], 0..) |label, i| tinyBadge(@src(), 10 + i, label.name, labelColor(label.color));
-        if (entry.labels.len > 2) dvui.label(@src(), "+{d}", .{entry.labels.len - 2}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .w = style.space.xs }, .padding = dvui.Rect.all(0) });
-        dvui.label(@src(), "{s} → {s}", .{ entry.branch, entry.base }, .{
-            .font = style.tiny(),
-            .color_text = .{ .color = style.textFaint() },
-            .gravity_y = 0.5,
-            .expand = .horizontal,
-            .max_size_content = .width(0),
-            .margin = .{ .x = style.space.xs },
-            .padding = dvui.Rect.all(0),
-        });
-        if (entry.additions + entry.deletions > 0) sizeMarks(entry.additions, entry.deletions);
-        if (entry.updated > 0) {
-            var when: [32]u8 = undefined;
-            dvui.label(@src(), "{s}", .{search_view.relativeTime(&when, entry.updated)}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
-        }
-    }
-
-    if (bw.clicked()) selectRequest(entry.number);
-}
-
-/// A request's author as a commit, for the avatar: on GitHub the login's own
-/// noreply address, which is the account's picture without a commit to ask about.
-fn requestAuthor(login: []const u8) git.Commit {
-    const email = if (pr.host == .github)
-        std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}@users.noreply.github.com", .{login}) catch ""
-    else
-        "";
-    return .{ .id = std.mem.zeroes(git.Oid), .summary = "", .author = login, .email = email, .time = 0 };
-}
-
-/// A label's colour, from the host's hex; the accent where there is none.
-fn labelColor(hex: []const u8) dvui.Color {
-    if (hex.len != 6) return style.accent();
-    const v = std.fmt.parseInt(u24, hex, 16) catch return style.accent();
-    const c: dvui.Color = .{ .r = @intCast(v >> 16), .g = @intCast((v >> 8) & 0xff), .b = @intCast(v & 0xff) };
-    // Labels are picked for GitHub's own pages: a pale one vanishes as text
-    // on paper, a dark one on the dark ground. Pulled toward contrast.
-    const lum = (0.299 * @as(f32, @floatFromInt(c.r)) + 0.587 * @as(f32, @floatFromInt(c.g)) + 0.114 * @as(f32, @floatFromInt(c.b))) / 255;
-    if (!style.get().dark and lum > 0.55) return c.lerp(.black, 0.5);
-    if (style.get().dark and lum < 0.35) return c.lerp(.white, 0.45);
-    return c;
-}
-
-/// "+12 −3" in green and red, and a five-block bar of their proportion, as
-/// GitHub draws a change's size.
-fn sizeMarks(added: u32, removed: u32) void {
-    var buf: [16]u8 = undefined;
-    dvui.label(@src(), "+{d}", .{added}, .{ .font = style.tinyBold(), .color_text = .{ .color = style.success() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
-    dvui.label(@src(), "{s}", .{std.fmt.bufPrint(&buf, "−{d}", .{removed}) catch ""}, .{ .font = style.tinyBold(), .color_text = .{ .color = style.danger() }, .gravity_y = 0.5, .margin = .{ .x = 3 }, .padding = dvui.Rect.all(0) });
-    const total: f32 = @floatFromInt(added + removed);
-    const green: usize = @intFromFloat(@round(5 * @as(f32, @floatFromInt(added)) / total));
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.xs } });
-    defer bar.deinit();
-    for (0..5) |i| {
-        var block = dvui.box(@src(), .{}, .{
-            .id_extra = i,
-            .background = true,
-            .color_fill = .{ .color = if (i < green) style.success() else style.danger() },
-            .corners = .all(1),
-            .min_size_content = .{ .w = 6, .h = 6 },
-            .max_size_content = .size(.{ .w = 6, .h = 6 }),
-            .margin = .{ .w = 1 },
-            .padding = dvui.Rect.all(0),
-        });
-        block.deinit();
-    }
-}
-
-fn requestDetail() void {
-    var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .border = .{ .x = 1 },
-        .color_border = .{ .color = style.border() },
-    });
-    defer panel.deinit();
-
-    const number = pr_selected orelse return dialog_views.emptyState(@src(), "Pick one on the left.");
-    const d = pr.detail orelse {
-        // Being read: its head at once, from the list it was picked in, and
-        // the rest to come under it.
-        if (pr.detail_status != .failed) if (listedRequest(number)) |r| loadingHeader(r);
-        return dialog_views.emptyState(@src(), if (pr.detail_status == .failed) "Could not read it." else "Loading…");
-    };
-    // Read again where it is — the page stays up until the answer replaces
-    // it, which frees what `d` points into: asked once the pane is drawn.
-    var reload = false;
-    defer if (reload) pr.loadDetail(repo_path.items, d.number);
-    if (pr_reread_at != 0) {
-        if (frame_now_s >= pr_reread_at) {
-            pr_reread_at = 0;
-            pr.loadDetail(repo_path.items, d.number);
-        } else dvui.timer(panel.data().id, PR_REREAD_S * std.time.us_per_s);
-    }
-
-    // The whole pane, and where there is the room GitHub's sidebar on its
-    // right: who reviews, who it is assigned to, its labels.
-    const pane_w = panel.data().contentRect().w;
-    const total = @max(320, pane_w - 2 * style.space.xl);
-    const side = total >= PR_SIDE_FROM;
-    const main_w = if (side) total - PR_SIDE_W - style.space.xl else total;
-    // The head and its tabs a banner from one edge of the pane to the other,
-    // what they hold set in as far as the page under them is.
-    const inset = @max(style.space.sm, (pane_w - total) / 2);
-    requestHeader(d, &reload, !side, inset);
-    requestTabs(d, inset);
-
-    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .gravity_x = 0.5,
-            .min_size_content = .{ .w = total },
-            .max_size_content = .width(total),
-            .background = false,
-            .padding = .{ .y = style.space.xl, .h = style.space.xl },
-        });
-        defer row.deinit();
-        {
-            var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .min_size_content = .{ .w = main_w },
-                .max_size_content = .width(main_w),
-                .background = false,
-            });
-            defer body.deinit();
-
-            switch (pr_tab) {
-                .conversation => requestConversation(d),
-                .commits => requestCommits(d),
-                .files => requestFiles(d),
-                .checks => requestChecks(d),
-            }
-        }
-        if (side) requestSidebar(d);
-    }
-    scroll.deinit();
 }
 
 // === A request's conversation ===
@@ -1981,7 +1444,7 @@ var pr_runs_for: u32 = 0;
 /// One step of a conversation: a comment, or a review.
 const Event = struct { note: pr.Note, review: bool };
 
-fn requestConversation(d: pr.Detail) void {
+pub fn requestConversation(d: pr.Detail) void {
     if (pr_runs_for != d.number) {
         pr_runs_for = d.number;
         pr_runs_open = 0;
@@ -2007,7 +1470,7 @@ fn requestConversation(d: pr.Detail) void {
             const settled = d.threads.len - open_threads;
             if (settled > 0) {
                 dvui.label(@src(), "· {d} resolved", .{settled}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
-                if (dialog_views.linkButtonTagged(@src(), if (pr_threads_all) "Fold them" else "Open them", style.textMuted(), "pr:threads_all")) pr_threads_all = !pr_threads_all;
+                if (dialog_views.linkButtonTagged(@src(), if (pr_list.pr_threads_all) "Fold them" else "Open them", style.textMuted(), "pr:threads_all")) pr_list.pr_threads_all = !pr_list.pr_threads_all;
             }
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -2096,12 +1559,12 @@ var pr_cards: std.AutoHashMapUnmanaged(usize, bool) = .empty;
 var pr_cards_all: ?bool = null;
 const CARDS_OPEN_AT_END = 3;
 /// The sidebar beside it, and the width of pane it needs to be there.
-const PR_SIDE_W: f32 = 220;
-const PR_SIDE_FROM: f32 = 700;
+pub const PR_SIDE_W: f32 = 220;
+pub const PR_SIDE_FROM: f32 = 700;
 
 /// GitHub's sidebar: who is asked to review and where each stands, who it
 /// is assigned to, its labels — each head dropping the list to change it.
-fn requestSidebar(d: pr.Detail) void {
+pub fn requestSidebar(d: pr.Detail) void {
     var col = dvui.box(@src(), .{ .dir = .vertical }, .{
         .min_size_content = .{ .w = PR_SIDE_W },
         .max_size_content = .width(PR_SIDE_W),
@@ -2132,7 +1595,7 @@ fn requestSidebar(d: pr.Detail) void {
         for (d.labels, 0..) |l, i| {
             var cell = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false, .margin = .{ .y = 2, .h = 2 } });
             defer cell.deinit();
-            tinyBadge(@src(), 0, l.name, labelColor(l.color));
+            tinyBadge(@src(), 0, l.name, pr_list.labelColor(l.color));
         }
     }
 }
@@ -2261,7 +1724,7 @@ fn sideReviewer(id: usize, r: pr.Reviewer, number: u32) void {
 /// is left open for what follows on it.
 fn sidePerson(id: usize, login: []const u8) *dvui.BoxWidget {
     const line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .expand = .horizontal, .background = false, .margin = .{ .y = 3, .h = 3 } });
-    search_view.avatarSized(@src(), 0, requestAuthor(login), null, null, 20);
+    search_view.avatarSized(@src(), 0, pr_list.requestAuthor(login), null, null, 20);
     dvui.label(@src(), "{s}", .{login}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     return line;
 }
@@ -2313,7 +1776,7 @@ const TimelineRow = struct {
 };
 
 fn railAvatar(login: []const u8) void {
-    search_view.avatarSized(@src(), 0, requestAuthor(login), null, null, RAIL_DOT);
+    search_view.avatarSized(@src(), 0, pr_list.requestAuthor(login), null, null, RAIL_DOT);
 }
 
 /// What sits on the timeline's rail — a picture, an icon on a disc — all
@@ -2437,7 +1900,7 @@ fn reviewEvent(id: usize, r: pr.Note, open: bool, has_threads: bool) void {
     defer row.end();
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = 4 } });
     defer line.deinit();
-    search_view.avatarSized(@src(), 0, requestAuthor(r.author), null, null, 18);
+    search_view.avatarSized(@src(), 0, pr_list.requestAuthor(r.author), null, null, 18);
     dvui.label(@src(), "{s}", .{r.author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     dvui.label(@src(), "{s}", .{v.words}, .{ .font = style.small(), .color_text = .{ .color = v.hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
     if (when > 0) {
@@ -2603,7 +2066,7 @@ fn requestComposer() void {
     dvui.label(@src(), "Your review", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .margin = .{ .h = style.space.sm }, .padding = dvui.Rect.all(0) });
     {
         const te = dialog_views.textField(@src(), .{
-            .text = .{ .array_list = .{ .backing = &pr_comment, .allocator = gpa, .limit = 16384 } },
+            .text = .{ .array_list = .{ .backing = &pr_list.pr_comment, .allocator = gpa, .limit = 16384 } },
             .placeholder = "Leave a comment — Markdown reads as on the host",
             .multiline = true,
             .break_lines = true,
@@ -2612,7 +2075,7 @@ fn requestComposer() void {
     }
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
     defer line.deinit();
-    const text = std.mem.trim(u8, pr_comment.items, " \n\t");
+    const text = std.mem.trim(u8, pr_list.pr_comment.items, " \n\t");
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialog_views.dialogButton(@src(), "Comment", false) and text.len > 0) prAnswer(.comment);
     // GitHub refuses a review of your own request: only a comment there.
@@ -2642,13 +2105,13 @@ fn requestMergeCard(d: pr.Detail) void {
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
     defer line.deinit();
     var methods = [_][]const u8{ "Merge commit", "Squash and merge", "Rebase and merge" };
-    _ = dvui.dropdown(@src(), &methods, .{ .choice = &pr_merge_method }, .{}, .{
+    _ = dvui.dropdown(@src(), &methods, .{ .choice = &pr_list.pr_merge_method }, .{}, .{
         .min_size_content = .{ .w = 150 },
         .gravity_y = 0.5,
         .font = style.small(),
         .corners = style.radius.input,
     });
-    if (repo_settings.toggle(@src(), pr_delete_branch)) pr_delete_branch = !pr_delete_branch;
+    if (repo_settings.toggle(@src(), pr_list.pr_delete_branch)) pr_list.pr_delete_branch = !pr_list.pr_delete_branch;
     dvui.label(@src(), "Delete the branch after", .{}, .{
         .font = style.small(),
         .color_text = .{ .color = style.textMuted() },
@@ -2657,22 +2120,22 @@ fn requestMergeCard(d: pr.Detail) void {
         .padding = dvui.Rect.all(0),
     });
     var num: [12]u8 = undefined;
-    if (dialog_views.dialogButton(@src(), "Close…", false)) github_actions.ask(.close_request, requestNumber(&num));
+    if (dialog_views.dialogButton(@src(), "Close…", false)) github_actions.ask(.close_request, pr_list.requestNumber(&num));
     // Merged by the host itself once its checks and reviews allow.
     if (d.auto_merge) {
         if (dialog_views.dialogButton(@src(), "Cancel auto-merge", false)) requestOnRequest("Cancelling auto-merge", "disablePullRequestAutoMerge", d.id);
     } else if (dialog_views.dialogButton(@src(), "Auto-merge", false)) autoMerge(d);
-    if (dialog_views.dialogButton(@src(), "Merge…", true)) github_actions.ask(.merge_request, requestNumber(&num));
+    if (dialog_views.dialogButton(@src(), "Merge…", true)) github_actions.ask(.merge_request, pr_list.requestNumber(&num));
 }
 
 /// Which part of a request the pane shows under its head.
 const PrTab = enum { conversation, commits, files, checks };
-var pr_tab: PrTab = .conversation;
+pub var pr_tab: PrTab = .conversation;
 
 /// The request's head, above its tabs: where it stands as a pill, its title,
 /// who wants what merged where, who reviews it, its labels, and a line on
 /// what still stands between it and a merge.
-fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) void {
+pub fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) void {
     // On the page's own ground: the title is what stands out, not its box.
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
@@ -2718,7 +2181,7 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
         defer line.deinit();
-        search_view.avatarSized(@src(), 0, requestAuthor(d.author), null, null, 20);
+        search_view.avatarSized(@src(), 0, pr_list.requestAuthor(d.author), null, null, 20);
         dvui.label(@src(), "{s}", .{d.author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         dvui.label(@src(), "wants to merge", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         branchChip(0, d.head);
@@ -2729,7 +2192,7 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
             dvui.label(@src(), "· opened {s}", .{search_view.relativeTime(&when, d.created)}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        sizeMarks(d.additions, d.deletions);
+        pr_list.sizeMarks(d.additions, d.deletions);
         dvui.label(@src(), "{d} file{s}", .{ d.files, window_chrome.plural(d.files) }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
     }
     // Reviewers, assignees, labels — here only where the sidebar has no room.
@@ -2741,7 +2204,7 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
         for (d.labels, 0..) |l, i| {
             var cell = dvui.box(@src(), .{}, .{ .id_extra = 200 + i, .background = false, .margin = .{ .y = 2, .h = 2 } });
             defer cell.deinit();
-            tinyBadge(@src(), 0, l.name, labelColor(l.color));
+            tinyBadge(@src(), 0, l.name, pr_list.labelColor(l.color));
         }
     }
     mergeReadiness(d);
@@ -2751,7 +2214,7 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
 const PR_TITLE_SIZE: f32 = 18;
 
 /// The request `number` as the list it was picked in has it.
-fn listedRequest(number: u32) ?pr.Request {
+pub fn listedRequest(number: u32) ?pr.Request {
     for (pr.list) |r| if (r.number == number) return r;
     for (pr.past) |r| if (r.number == number) return r;
     return null;
@@ -2759,7 +2222,7 @@ fn listedRequest(number: u32) ?pr.Request {
 
 /// A request's head while the rest of it is read: what the list knew — its
 /// state, number and title, who wants it merged from where into where.
-fn loadingHeader(r: pr.Request) void {
+pub fn loadingHeader(r: pr.Request) void {
     var head = dvui.box(@src(), .{ .dir = .vertical }, .{
         .tag = "pr:loading",
         .expand = .horizontal,
@@ -2780,7 +2243,7 @@ fn loadingHeader(r: pr.Request) void {
     }
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
     defer line.deinit();
-    search_view.avatarSized(@src(), 0, requestAuthor(r.author), null, null, 20);
+    search_view.avatarSized(@src(), 0, pr_list.requestAuthor(r.author), null, null, 20);
     dvui.label(@src(), "{s}", .{r.author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     dvui.label(@src(), "wants to merge", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
     branchChip(0, r.branch);
@@ -2792,7 +2255,7 @@ fn loadingHeader(r: pr.Request) void {
 /// branch after is the repository's own setting on GitHub, not the call's.
 fn autoMerge(d: pr.Detail) void {
     if (!safeNodeId(d.id)) return;
-    const method = ([_][]const u8{ "MERGE", "SQUASH", "REBASE" })[@min(pr_merge_method, 2)];
+    const method = ([_][]const u8{ "MERGE", "SQUASH", "REBASE" })[@min(pr_list.pr_merge_method, 2)];
     const v = std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"id\":\"{s}\",\"method\":\"{s}\"}}", .{ d.id, method }) catch return;
     github_actions.requestGraphql("Setting auto-merge", "mutation($id:ID!,$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:$method}){clientMutationId}}", v, .none);
 }
@@ -2857,7 +2320,7 @@ fn prEditDialog() void {
     dialog_views.centerModal(fw.data(), win, null);
     var num: [12]u8 = undefined;
     var title_buf: [48]u8 = undefined;
-    identity_view.dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
+    identity_view.dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{pr_list.requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
 
     var body = identity_view.dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
 
@@ -3012,7 +2475,7 @@ fn personChip(id: usize, login: []const u8, what: []const u8) void {
         .padding = .{ .x = 2, .y = 2, .w = style.space.md, .h = 2 },
     });
     defer chip.deinit();
-    search_view.avatarSized(@src(), 0, requestAuthor(login), null, null, 18);
+    search_view.avatarSized(@src(), 0, pr_list.requestAuthor(login), null, null, 18);
     dvui.label(@src(), "{s}", .{login}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     dvui.label(@src(), "{s}", .{what}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs }, .padding = dvui.Rect.all(0) });
 }
@@ -3038,7 +2501,7 @@ fn reviewerChip(id: usize, r: pr.Reviewer) void {
         .padding = .{ .x = 2, .y = 2, .w = style.space.md, .h = 2 },
     });
     defer chip.deinit();
-    search_view.avatarSized(@src(), 0, requestAuthor(r.login), null, null, 18);
+    search_view.avatarSized(@src(), 0, pr_list.requestAuthor(r.login), null, null, 18);
     dvui.label(@src(), "{s}", .{r.login}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     dvui.icon(@src(), "review_state", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 11, .h = 11 }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm } });
     dvui.label(@src(), "{s}", .{word}, .{ .font = style.tiny(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = 2 }, .padding = dvui.Rect.all(0) });
@@ -3189,8 +2652,8 @@ fn updateRequestBranch(d: pr.Detail) void {
 
 /// When to read the open request again: GitHub answers "update branch"
 /// before it has done it. 0 for never.
-var pr_reread_at: i64 = 0;
-const PR_REREAD_S = 4;
+pub var pr_reread_at: i64 = 0;
+pub const PR_REREAD_S = 4;
 
 /// Whether GitHub has yet to say if the request can merge.
 fn mergeUnknown(d: pr.Detail) bool {
@@ -3203,7 +2666,7 @@ const PR_RECHECK_S = 3;
 
 /// The tabs under the head: the conversation, the commits, the files, the
 /// checks, each with how many.
-fn requestTabs(d: pr.Detail, inset: f32) void {
+pub fn requestTabs(d: pr.Detail, inset: f32) void {
     // Sideways when the pane is narrower than the four of them.
     var scroll = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto, .horizontal_bar = .auto_overlay }, .{
         .expand = .horizontal,
@@ -3265,7 +2728,7 @@ fn requestTabs(d: pr.Detail, inset: f32) void {
 
 /// The commits of the request, newest last as the host lists them; a click
 /// shows one in the graph, where it is there.
-fn requestCommits(d: pr.Detail) void {
+pub fn requestCommits(d: pr.Detail) void {
     if (d.commits.len == 0) return emptyNote("No commits.");
     var card = listCard(@src());
     defer card.deinit();
@@ -3286,7 +2749,7 @@ fn requestCommits(d: pr.Detail) void {
         {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
             defer row.deinit();
-            search_view.avatarSized(@src(), 0, requestAuthor(c.author), null, null, 20);
+            search_view.avatarSized(@src(), 0, pr_list.requestAuthor(c.author), null, null, 20);
             var fit: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
             dvui.label(@src(), "{s}", .{graph_view.fitText(&fit, c.headline, style.small(), 420)}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
             dvui.label(@src(), "{s}", .{c.oid[0..@min(c.oid.len, 7)]}, .{ .font = style.mono(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md }, .padding = dvui.Rect.all(0) });
@@ -3334,7 +2797,7 @@ fn revealInGraph(id: git.Oid) void {
 
 /// The files the request changes, each with its size and the review threads
 /// left on it; a button opens the whole change in the diff pane.
-fn requestFiles(d: pr.Detail) void {
+pub fn requestFiles(d: pr.Detail) void {
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.md } });
         defer line.deinit();
@@ -3362,7 +2825,7 @@ fn requestFiles(d: pr.Detail) void {
             const base = std.fs.path.basename(f.path);
             dvui.label(@src(), "{s}", .{base}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
             dvui.label(@src(), "{s}", .{std.fs.path.dirname(f.path) orelse ""}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
-            sizeMarks(f.additions, f.deletions);
+            pr_list.sizeMarks(f.additions, f.deletions);
         }
         // The threads on this file, under it, where they belong.
         var n: usize = 0;
@@ -3404,7 +2867,7 @@ fn remoteTip(h: git.History, remote: []const u8, branch: []const u8) ?git.Oid {
 
 /// The checks, by workflow: each with its result, how long it took, and its
 /// log; the failed ones run again with one button.
-fn requestChecks(d: pr.Detail) void {
+pub fn requestChecks(d: pr.Detail) void {
     const t = tallyChecks(d.checks);
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.md } });
@@ -3540,7 +3003,7 @@ var pr_scroll_thread = false;
 /// leaves out: "Line 3", not "login.ts:3" twice over.
 fn threadCard(id: usize, ti: usize, t: pr.Thread, d: pr.Detail, under_file: bool) void {
     const fold_key = 70_000 + ti;
-    const open = cardOpen(fold_key, !t.resolved or pr_threads_all);
+    const open = cardOpen(fold_key, !t.resolved or pr_list.pr_threads_all);
     var card = dvui.box(@src(), .{ .dir = .vertical }, .{
         .id_extra = id,
         .expand = .horizontal,
@@ -3639,7 +3102,7 @@ fn threadCard(id: usize, ti: usize, t: pr.Thread, d: pr.Detail, under_file: bool
 
     for (t.comments, 0..) |c, ci| threadComment(ci, c, t, d);
 
-    const replying = pr_reply_id.items.len > 0 and std.mem.eql(u8, pr_reply_id.items, t.id);
+    const replying = pr_list.pr_reply_id.items.len > 0 and std.mem.eql(u8, pr_list.pr_reply_id.items, t.id);
     if (replying) {
         var field = dvui.box(@src(), .{}, .{
             .expand = .horizontal,
@@ -3653,7 +3116,7 @@ fn threadCard(id: usize, ti: usize, t: pr.Thread, d: pr.Detail, under_file: bool
         });
         defer field.deinit();
         const te = dialog_views.textField(@src(), .{
-            .text = .{ .array_list = .{ .backing = &pr_reply, .allocator = gpa, .limit = 16384 } },
+            .text = .{ .array_list = .{ .backing = &pr_list.pr_reply, .allocator = gpa, .limit = 16384 } },
             .placeholder = "Reply — Ctrl+Enter sends it",
             .multiline = true,
             .break_lines = true,
@@ -3683,14 +3146,14 @@ fn threadCard(id: usize, ti: usize, t: pr.Thread, d: pr.Detail, under_file: bool
                 }
             }
             if (dialog_views.dialogButton(@src(), "Cancel", false)) {
-                pr_reply_id.clearRetainingCapacity();
-                pr_reply.clearRetainingCapacity();
+                pr_list.pr_reply_id.clearRetainingCapacity();
+                pr_list.pr_reply.clearRetainingCapacity();
             }
         } else if (t.can_reply) {
             if (dialog_views.chipButtonTagged(@src(), dvui.entypo.reply, "Reply", false, dialog_views.frameTag("pr:reply_to", t.id))) {
-                pr_reply_id.clearRetainingCapacity();
-                pr_reply_id.appendSlice(gpa, t.id) catch {};
-                pr_reply.clearRetainingCapacity();
+                pr_list.pr_reply_id.clearRetainingCapacity();
+                pr_list.pr_reply_id.appendSlice(gpa, t.id) catch {};
+                pr_list.pr_reply.clearRetainingCapacity();
             }
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -3720,7 +3183,7 @@ fn threadComment(id: usize, c: pr.Note, t: pr.Thread, d: pr.Detail) void {
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.xs } });
         defer line.deinit();
-        search_view.avatarSized(@src(), 0, requestAuthor(c.author), null, null, 20);
+        search_view.avatarSized(@src(), 0, pr_list.requestAuthor(c.author), null, null, 20);
         dvui.label(@src(), "{s}", .{c.author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         const when = pr.isoSeconds(c.when);
         if (when > 0) {
@@ -3951,7 +3414,7 @@ fn applySuggestionTo(a: std.mem.Allocator, root: []const u8, t: pr.Thread, code:
 }
 
 /// A word on a tint of its colour: Resolved, Outdated.
-fn tinyBadge(src: std.builtin.SourceLocation, id: usize, text: []const u8, hue: dvui.Color) void {
+pub fn tinyBadge(src: std.builtin.SourceLocation, id: usize, text: []const u8, hue: dvui.Color) void {
     var b = dvui.box(src, .{}, .{
         .id_extra = id,
         .background = true,
@@ -3985,10 +3448,10 @@ fn setThreadResolved(id: []const u8, resolved: bool) void {
 /// The reply goes in as a variable, never spliced into the query; the box
 /// empties once GitHub has it.
 fn replyToThread() void {
-    const text = std.mem.trim(u8, pr_reply.items, " \n\t");
-    if (text.len == 0 or !safeNodeId(pr_reply_id.items)) return;
+    const text = std.mem.trim(u8, pr_list.pr_reply.items, " \n\t");
+    if (text.len == 0 or !safeNodeId(pr_list.pr_reply_id.items)) return;
     const a = dvui.currentWindow().arena();
-    github_actions.requestGraphql("Replying", "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}", github_actions.jsonFields(a, &.{ .{ "id", pr_reply_id.items }, .{ "body", text } }), .clear_reply);
+    github_actions.requestGraphql("Replying", "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}", github_actions.jsonFields(a, &.{ .{ "id", pr_list.pr_reply_id.items }, .{ "body", text } }), .clear_reply);
 }
 
 const PrAnswer = enum { comment, approve, request_changes };
@@ -3996,8 +3459,8 @@ const PrAnswer = enum { comment, approve, request_changes };
 /// The review box's three buttons: a comment on the conversation, or a
 /// review with its verdict. The box empties once GitHub has it.
 fn prAnswer(kind: PrAnswer) void {
-    const text = std.mem.trim(u8, pr_comment.items, " \n\t");
-    const number = pr_selected orelse return;
+    const text = std.mem.trim(u8, pr_list.pr_comment.items, " \n\t");
+    const number = pr_list.pr_selected orelse return;
     const a = dvui.currentWindow().arena();
     var path: [512]u8 = undefined;
     switch (kind) {
@@ -4163,8 +3626,8 @@ fn shortcuts() void {
                     // A reply being written goes to its thread; otherwise
                     // the review box's text, as a comment: the button that
                     // needs nothing more.
-                    if (pr_reply_id.items.len > 0 and std.mem.trim(u8, pr_reply.items, " \n\t").len > 0) return replyToThread();
-                    if (std.mem.trim(u8, pr_comment.items, " \n\t").len > 0) prAnswer(.comment);
+                    if (pr_list.pr_reply_id.items.len > 0 and std.mem.trim(u8, pr_list.pr_reply.items, " \n\t").len > 0) return replyToThread();
+                    if (std.mem.trim(u8, pr_list.pr_comment.items, " \n\t").len > 0) prAnswer(.comment);
                 }
             }.f;
             if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and canCommit()) break :blk struct {
@@ -4262,11 +3725,11 @@ fn shortcuts() void {
 /// for the conversation, the commits, the files and the checks.
 fn pullsKey(ke: dvui.Event.Key) bool {
     if (pressed(ke, .down, false) or pressed(ke, .j, false)) {
-        stepRequest(1);
+        pr_list.stepRequest(1);
         return true;
     }
     if (pressed(ke, .up, false) or pressed(ke, .k, false)) {
-        stepRequest(-1);
+        pr_list.stepRequest(-1);
         return true;
     }
     if (ke.action != .down) return false;
@@ -4940,7 +4403,7 @@ fn labelRows(list: *std.ArrayList(u8)) ?[]const u8 {
     for (pr.meta.labels, 0..) |label, i| {
         if (!pickShown(label.name, label.description)) continue;
         shown += 1;
-        if (pickRow(i, label.name, label.description, listHas(list.items, label.name), labelColor(label.color))) {
+        if (pickRow(i, label.name, label.description, listHas(list.items, label.name), pr_list.labelColor(label.color))) {
             listToggle(list, label.name);
             toggled = label.name;
         }
@@ -5096,7 +4559,7 @@ pub fn requestRow(src: std.builtin.SourceLocation, entry: pr.Request, id: usize)
     // The row itself opens the request in the pull-request tab.
     if (dvui.clicked(row.data(), .{})) {
         openPulls();
-        selectRequest(entry.number);
+        pr_list.selectRequest(entry.number);
     }
 
     if (dialog_views.iconButton(@src(), "request_checkout", "Check it out", dvui.entypo.download, style.textMuted())) github_actions.checkoutRequest(entry.number, entry.branch, false);
@@ -5851,22 +5314,22 @@ fn resetUiGlobals() void {
     dialog_views.repo_dialog = .none;
     picked_lines.deinit(gpa);
     picked_lines = .empty;
-    pr_comment.deinit(gpa);
+    pr_list.pr_comment.deinit(gpa);
     clearPrEdit();
     clearPrCreate();
-    pr_search.deinit(gpa);
-    pr_search = .empty;
-    pr_filter = .open;
-    pr_comment = .empty;
-    pr_reply.deinit(gpa);
-    pr_reply = .empty;
-    pr_reply_id.deinit(gpa);
-    pr_reply_id = .empty;
-    pr_threads_all = false;
+    pr_list.pr_search.deinit(gpa);
+    pr_list.pr_search = .empty;
+    pr_list.pr_filter = .open;
+    pr_list.pr_comment = .empty;
+    pr_list.pr_reply.deinit(gpa);
+    pr_list.pr_reply = .empty;
+    pr_list.pr_reply_id.deinit(gpa);
+    pr_list.pr_reply_id = .empty;
+    pr_list.pr_threads_all = false;
     pr_applied_n = 0;
     pr_applied_for = 0;
     pr_scroll_thread = false;
-    pr_selected = null;
+    pr_list.pr_selected = null;
     diff_view.split_rows.deinit(gpa);
     diff_view.split_rows = .empty;
     command_palette.palette_open = false;
@@ -7071,14 +6534,14 @@ test "a file deleted on one side is kept or deleted in one click" {
 
 test "a review written for one pull request is not carried to another" {
     gpa = std.testing.allocator;
-    defer pr_comment.clearAndFree(gpa);
-    defer pr_selected = null;
-    pr_selected = 5;
-    try pr_comment.appendSlice(gpa, "looks good");
-    selectRequest(5);
-    try std.testing.expectEqualStrings("looks good", pr_comment.items);
-    selectRequest(7);
-    try std.testing.expectEqual(@as(usize, 0), pr_comment.items.len);
+    defer pr_list.pr_comment.clearAndFree(gpa);
+    defer pr_list.pr_selected = null;
+    pr_list.pr_selected = 5;
+    try pr_list.pr_comment.appendSlice(gpa, "looks good");
+    pr_list.selectRequest(5);
+    try std.testing.expectEqualStrings("looks good", pr_list.pr_comment.items);
+    pr_list.selectRequest(7);
+    try std.testing.expectEqual(@as(usize, 0), pr_list.pr_comment.items.len);
 }
 
 // The parser is unit-tested in `git.zig`; what this covers is the rest of the
@@ -9109,23 +8572,23 @@ test "the request list's tabs and search let the right ones through" {
     pr.list = &list;
     defer pr.list = &.{};
 
-    try std.testing.expectEqual(@as(usize, 1), requestsToReview());
-    pr_filter = .review;
-    try std.testing.expect(requestShown(asks) and !requestShown(mine) and !requestShown(other));
-    pr_filter = .mine;
-    try std.testing.expect(requestShown(mine) and !requestShown(asks));
-    pr_filter = .drafts;
-    try std.testing.expect(requestShown(mine) and !requestShown(other));
+    try std.testing.expectEqual(@as(usize, 1), pr_list.requestsToReview());
+    pr_list.pr_filter = .review;
+    try std.testing.expect(pr_list.requestShown(asks) and !pr_list.requestShown(mine) and !pr_list.requestShown(other));
+    pr_list.pr_filter = .mine;
+    try std.testing.expect(pr_list.requestShown(mine) and !pr_list.requestShown(asks));
+    pr_list.pr_filter = .drafts;
+    try std.testing.expect(pr_list.requestShown(mine) and !pr_list.requestShown(other));
 
-    pr_filter = .open;
-    try pr_search.appendSlice(gpa, "api");
-    try std.testing.expect(requestShown(asks) and !requestShown(other));
-    pr_search.clearRetainingCapacity();
-    try pr_search.appendSlice(gpa, "#30");
-    try std.testing.expect(requestShown(other) and !requestShown(asks));
-    pr_search.clearRetainingCapacity();
-    try pr_search.appendSlice(gpa, "proj-25");
-    try std.testing.expect(requestShown(mine) and !requestShown(other));
+    pr_list.pr_filter = .open;
+    try pr_list.pr_search.appendSlice(gpa, "api");
+    try std.testing.expect(pr_list.requestShown(asks) and !pr_list.requestShown(other));
+    pr_list.pr_search.clearRetainingCapacity();
+    try pr_list.pr_search.appendSlice(gpa, "#30");
+    try std.testing.expect(pr_list.requestShown(other) and !pr_list.requestShown(asks));
+    pr_list.pr_search.clearRetainingCapacity();
+    try pr_list.pr_search.appendSlice(gpa, "proj-25");
+    try std.testing.expect(pr_list.requestShown(mine) and !pr_list.requestShown(other));
 }
 
 test "a new request's title comes from its branch's name" {
@@ -9256,7 +8719,7 @@ test "the request's sidebar picks its labels from a list, sent at once" {
         pr.meta = .{};
         pr.meta_status = .idle;
     }
-    pr_selected = 42;
+    pr_list.pr_selected = 42;
     active_view = .pulls;
     pr.host = .github;
     defer pr.host = .none;
@@ -9343,7 +8806,7 @@ test "a request being read shows its head from the list, the rest loading" {
     pr.list = &listed;
     defer pr.list = &.{};
     pr.detail = null;
-    pr_selected = 9;
+    pr_list.pr_selected = 9;
     active_view = .pulls;
     pr.host = .github;
     defer pr.host = .none;
@@ -9354,7 +8817,7 @@ test "a request being read shows its head from the list, the rest loading" {
     try dvui.testing.settle(frameArrowCursor);
     _ = try tagRect("pr:loading");
     // Not one the list has: the pane loading, with no head to guess at.
-    pr_selected = 10;
+    pr_list.pr_selected = 10;
     try dvui.testing.settle(frameArrowCursor);
     try expectNoTag("pr:loading");
 }
@@ -9396,7 +8859,7 @@ test "changes asked for: threads under their review, a suggestion applied from i
         },
     };
     defer pr.detail = null;
-    pr_selected = 16;
+    pr_list.pr_selected = 16;
     active_view = .pulls;
     pr.host = .github;
     defer pr.host = .none;
@@ -9473,7 +8936,7 @@ test "a request's pane draws every tab" {
         .threads = &.{.{ .id = "T1", .path = "src/a.zig", .line = 2, .comments = &.{.{ .author = "ann", .body = "why?", .when = "2026-10-20T10:30:00Z" }} }},
     };
     defer pr.detail = null;
-    pr_selected = 7;
+    pr_list.pr_selected = 7;
     active_view = .pulls;
     // The pane is drawn only on a host; nothing is asked of it here.
     pr.host = .github;
@@ -9530,21 +8993,21 @@ test "the requests are walked from the keys, starting at the checked-out branch'
     defer pr.host = .none;
     window_chrome.me_loaded = true;
     active_view = .pulls;
-    defer pr_selected = null;
+    defer pr_list.pr_selected = null;
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
     try style.applyEmbedded(gpa, true);
     try dvui.testing.settle(frameArrowCursor);
-    try std.testing.expectEqual(@as(?u32, 2), pr_selected);
+    try std.testing.expectEqual(@as(?u32, 2), pr_list.pr_selected);
 
     try pressFrame(.down, .none);
-    try std.testing.expectEqual(@as(?u32, 3), pr_selected);
+    try std.testing.expectEqual(@as(?u32, 3), pr_list.pr_selected);
     try pressFrame(.down, .none);
-    try std.testing.expectEqual(@as(?u32, 3), pr_selected);
+    try std.testing.expectEqual(@as(?u32, 3), pr_list.pr_selected);
     try pressFrame(.up, .none);
     try pressFrame(.k, .none);
-    try std.testing.expectEqual(@as(?u32, 1), pr_selected);
+    try std.testing.expectEqual(@as(?u32, 1), pr_list.pr_selected);
     try pressFrame(.four, .none);
     try std.testing.expect(pr_tab == .checks);
 
@@ -9556,13 +9019,13 @@ test "the requests are walked from the keys, starting at the checked-out branch'
     try clickAt(try tagCenter("pr:filter"));
     try clickAt(try tagCenter("pick:Merged"));
     try dvui.testing.settle(frameArrowCursor);
-    try std.testing.expect(pr_filter == .merged);
+    try std.testing.expect(pr_list.pr_filter == .merged);
     try pressFrame(.down, .none);
-    try std.testing.expectEqual(@as(?u32, 9), pr_selected);
+    try std.testing.expectEqual(@as(?u32, 9), pr_list.pr_selected);
     try clickAt(try tagCenter("pr:filter"));
     try clickAt(try tagCenter("pick:Open"));
     try dvui.testing.settle(frameArrowCursor);
-    try std.testing.expect(pr_filter == .open);
+    try std.testing.expect(pr_list.pr_filter == .open);
 }
 
 // A clone starts with no repository at all, and opens the one it makes. (A new
