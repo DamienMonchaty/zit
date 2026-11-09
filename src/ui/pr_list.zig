@@ -10,6 +10,7 @@ const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_io = @import("../core/repo_io.zig");
+const pr_conversation = @import("pr_conversation.zig");
 const app = @import("../main.zig");
 
 // === Pull requests ===
@@ -494,7 +495,7 @@ fn requestDetail() void {
     const d = pr.detail orelse {
         // Being read: its head at once, from the list it was picked in, and
         // the rest to come under it.
-        if (pr.detail_status != .failed) if (app.listedRequest(number)) |r| app.loadingHeader(r);
+        if (pr.detail_status != .failed) if (pr_conversation.listedRequest(number)) |r| pr_conversation.loadingHeader(r);
         return dialog_views.emptyState(@src(), if (pr.detail_status == .failed) "Could not read it." else "Loading…");
     };
     // Read again where it is — the page stays up until the answer replaces
@@ -512,12 +513,12 @@ fn requestDetail() void {
     // right: who reviews, who it is assigned to, its labels.
     const pane_w = panel.data().contentRect().w;
     const total = @max(320, pane_w - 2 * style.space.xl);
-    const side = total >= app.PR_SIDE_FROM;
-    const main_w = if (side) total - app.PR_SIDE_W - style.space.xl else total;
+    const side = total >= pr_conversation.PR_SIDE_FROM;
+    const main_w = if (side) total - pr_conversation.PR_SIDE_W - style.space.xl else total;
     // The head and its tabs a banner from one edge of the pane to the other,
     // what they hold set in as far as the page under them is.
     const inset = @max(style.space.sm, (pane_w - total) / 2);
-    app.requestHeader(d, &reload, !side, inset);
+    pr_conversation.requestHeader(d, &reload, !side, inset);
     app.requestTabs(d, inset);
 
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
@@ -538,14 +539,14 @@ fn requestDetail() void {
             });
             defer body.deinit();
 
-            switch (app.pr_tab) {
-                .conversation => app.requestConversation(d),
+            switch (pr_conversation.pr_tab) {
+                .conversation => pr_conversation.requestConversation(d),
                 .commits => app.requestCommits(d),
                 .files => app.requestFiles(d),
                 .checks => app.requestChecks(d),
             }
         }
-        if (side) app.requestSidebar(d);
+        if (side) pr_conversation.requestSidebar(d);
     }
     scroll.deinit();
 }

@@ -16,6 +16,7 @@ const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_conversation = @import("pr_conversation.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -405,7 +406,7 @@ fn commitDetail(id: git.Oid) void {
         if (split.text.len > 0) {
             var body = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md } });
             defer body.deinit();
-            app.markdownText(unwrapMessage(dvui.currentWindow().arena(), split.text), style.small());
+            pr_conversation.markdownText(unwrapMessage(dvui.currentWindow().arena(), split.text), style.small());
         }
 
         // The trailers apart, in the mono face git wrote them in;
