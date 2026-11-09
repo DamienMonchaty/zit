@@ -16,6 +16,7 @@ const pr = @import("github/pr.zig");
 const syntax = @import("ui/syntax.zig");
 const watch = @import("git/watch.zig");
 const github = @import("github/github.zig");
+const refs_panel = @import("ui/refs_panel.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -201,11 +202,11 @@ var repo_path: std.ArrayList(u8) = .empty;
 var repo_name: []const u8 = "";
 
 /// Refs and commits. Rebuilt when HEAD moves or after Zit writes.
-var history: ?git.History = null;
+pub var history: ?git.History = null;
 /// Lanes and curves derived from `history.commits`.
 var lanes: ?graph.Layout = null;
 /// Staged and unstaged changes. Re-read on the poll timer.
-var work: ?git.Work = null;
+pub var work: ?git.Work = null;
 
 // === Tabs and groups ===
 
@@ -1253,7 +1254,7 @@ fn startCompare(from: git.Oid, to: git.Oid, from_name: []const u8, to_name: []co
 }
 
 var selection: Selection = .none;
-var selected_path: std.ArrayList(u8) = .empty;
+pub var selected_path: std.ArrayList(u8) = .empty;
 
 /// The diff for `selection`, read lazily. `diff_stale` is set by whatever
 /// invalidates it rather than re-reading on the spot: a burst of staging then
@@ -1395,7 +1396,7 @@ fn selectBlame(path: []const u8) void {
 /// Show a file. The view follows, because opening a file is the whole reason
 /// the diff view exists — unless the merge view is up, where the file being
 /// picked is a conflict and belongs in the pane already on screen.
-fn selectChange(path: []const u8, side: git.DiffSide) void {
+pub fn selectChange(path: []const u8, side: git.DiffSide) void {
     selected_path.clearRetainingCapacity();
     selected_path.appendSlice(gpa, path) catch return clearSelection();
     selection = .{ .change = side };
@@ -1868,7 +1869,7 @@ fn diffModeToggle(src: std.builtin.SourceLocation) void {
 /// The sidebar's sections, in the order it shows them: what is on disk
 /// first — the branches, the worktrees, the stashes — then the host's pull
 /// requests and issues, the tags last.
-const Section = enum(u8) {
+pub const Section = enum(u8) {
     local,
     /// Each remote with its branches under it, the way GitKraken nests them.
     remotes,
@@ -4390,7 +4391,7 @@ fn isLocalBranch(name: []const u8) bool {
     return false;
 }
 
-fn checkout(ref: git.Ref) void {
+pub fn checkout(ref: git.Ref) void {
     // `switch`, not `checkout`: `checkout` also takes paths, so a branch whose
     // name matches a file is ambiguous, and `checkout -- <name>` means the
     // opposite of what it looks like — restore that *path* from the index.
@@ -5232,7 +5233,7 @@ fn appFrame() !dvui.App.Result {
         defer split.deinit();
         body_width = split.data().contentRect().w;
 
-        if (leftShown() and split.showFirst()) sidebarPane();
+        if (leftShown() and split.showFirst()) refs_panel.sidebarPane();
         if (split.showSecond()) contentPane();
     }
 
@@ -5280,7 +5281,7 @@ fn showWindowOnce() void {
 /// changes, as GitKraken has it: nothing to click across to before staging.
 const View = enum { graph, pulls };
 
-var active_view: View = .graph;
+pub var active_view: View = .graph;
 
 /// The content area, right of the sidebar.
 ///
@@ -8791,7 +8792,7 @@ const BRANCH_BUTTON_H: f32 = 30;
 const BRANCH_LIST_MAX_H: f32 = 360;
 
 /// The "s" a count past one takes: "1 file", "2 files".
-fn plural(n: anytype) []const u8 {
+pub fn plural(n: anytype) []const u8 {
     return if (n == 1) "" else "s";
 }
 
@@ -12422,7 +12423,7 @@ fn midOperation() bool {
 
 /// Continue, once every conflict is answered and there is something to go
 /// on with: the filled button, Ctrl+Enter and the palette.
-fn canContinue() bool {
+pub fn canContinue() bool {
     return midOperation() and opNext() == .proceed;
 }
 
@@ -12435,7 +12436,7 @@ fn requestContinue() void {
 }
 
 /// Whether the file open is one of the conflicted ones.
-fn viewingConflict() bool {
+pub fn viewingConflict() bool {
     return switch (selection) {
         .change => |side| side == .unstaged and selectedStatus(.unstaged) == .conflicted,
         else => false,
@@ -12710,7 +12711,7 @@ fn promptDialog() void {
 var prompt_rect: dvui.Rect = .{};
 const PROMPT_W: f32 = 420;
 
-fn conflictCount() usize {
+pub fn conflictCount() usize {
     const w = work orelse return 0;
     var n: usize = 0;
     for (w.unstaged) |change| {
@@ -13119,7 +13120,7 @@ fn menuTag(caption: []const u8) ?[]const u8 {
 
 /// "prefix:name", allocated for this frame only: a tag a test can look a
 /// widget up by, built from text the widget already shows.
-fn frameTag(prefix: []const u8, name: []const u8) ?[]const u8 {
+pub fn frameTag(prefix: []const u8, name: []const u8) ?[]const u8 {
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "{s}:{s}", .{ prefix, name }) catch null;
 }
 
@@ -13128,7 +13129,7 @@ fn frameTag(prefix: []const u8, name: []const u8) ?[]const u8 {
 /// `tag` is what a shortcut focuses it by. The commits, the "Branches:" menu
 /// and the sidebar each have one. Returns the text entry's id, for a caller
 /// that focuses it.
-fn searchField(
+pub fn searchField(
     src: std.builtin.SourceLocation,
     backing: *std.ArrayList(u8),
     placeholder: []const u8,
@@ -13278,169 +13279,6 @@ fn linkButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, color:
     }
 
     return bw.clicked();
-}
-
-// === Left: refs ===
-
-/// The left panel. Each view brings its own: the branches for the history,
-/// the changed files for a diff, the conflicts for a merge.
-fn sidebarPane() void {
-    var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .border = .{ .w = 1 },
-        .color_border = .{ .color = style.border() },
-        .padding = dvui.Rect.all(0),
-        .margin = dvui.Rect.all(0),
-    });
-    defer panel.deinit();
-
-    // A merge or rebase under way: what is left of it first, the branches
-    // after — it is the one thing to finish before anything else.
-    if (active_view == .graph and history != null and history.?.state != .none) mergeSidebar();
-    refsSidebar();
-}
-
-/// One line of small capitals over a list.
-fn sidebarLabel(src: std.builtin.SourceLocation, caption: []const u8, count: ?usize) void {
-    var row = dvui.box(src, .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = false,
-        .padding = .{
-            .x = style.space.lg,
-            .y = style.space.sm,
-            .w = style.space.lg,
-            .h = style.space.xs,
-        },
-    });
-    defer row.deinit();
-
-    dvui.label(@src(), "{s}", .{caption}, .{
-        .font = style.section(),
-        .color_text = .{ .color = style.textFaint() },
-        .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
-    });
-
-    const n = count orelse return;
-
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    dvui.label(@src(), "{d}", .{n}, .{
-        .font = style.tiny(),
-        .color_text = .{ .color = style.textFaint() },
-        .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
-    });
-}
-
-/// History view: branches, remotes, stashes, tags.
-fn refsSidebar() void {
-    // A filter over the branches and tags: in a repository with a hundred of
-    // them it is how anything is found, as in the "Branches:" menu.
-    _ = searchField(@src(), &sidebar_filter, "Filter branches and tags…", "sidebar_filter", .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm });
-
-    var scroll = dvui.scrollArea(@src(), .{}, .{
-        .expand = .both,
-        .background = false,
-        .padding = dvui.Rect.all(0),
-        // Only the height the window leaves: dvui asks for all of its
-        // content, and every section open pushed the status bar out of it.
-        .max_size_content = .height(0),
-    });
-    defer scroll.deinit();
-
-    // Collected outside the loop: checking a branch out rebuilds the history
-    // these refs point into.
-    var chosen: ?git.Ref = null;
-
-    for (std.enums.values(Section), 0..) |section, i| {
-        if (sidebarSection(@src(), section, i)) |ref| chosen = ref;
-    }
-
-    if (chosen) |ref| checkout(ref);
-}
-
-/// A merge or rebase under way, over the branches: what it is, how much is
-/// left, and the way on — continue, skip, or abort.
-fn mergeSidebar() void {
-    const w = work orelse return;
-    const pending = conflictCount();
-
-    var card = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
-        .corners = style.radius.input,
-        .padding = dvui.Rect.all(style.space.md),
-        .margin = .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm },
-    });
-    defer card.deinit();
-
-    if (pending > 0) {
-        dvui.label(@src(), "{d} conflicted file{s}", .{ pending, plural(pending) }, .{
-            .font = style.bodyBold(),
-            .color_text = .{ .color = style.text() },
-            .padding = dvui.Rect.all(0),
-            .margin = .{ .h = style.space.xs },
-        });
-    } else {
-        dvui.label(@src(), "Every conflict is resolved", .{}, .{
-            .font = style.bodyBold(),
-            .color_text = .{ .color = style.success() },
-            .padding = dvui.Rect.all(0),
-        });
-        if (canContinue()) dvui.label(@src(), "Continue from the bar above — Ctrl+Enter", .{}, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.textMuted() },
-            .margin = .{ .y = style.space.xs },
-            .padding = dvui.Rect.all(0),
-        });
-    }
-
-    // Each one a click away: the list the resolving goes down.
-    for (w.unstaged, 0..) |change, i| {
-        if (change.status != .conflicted) continue;
-        conflictFileRow(i, change.path);
-    }
-}
-
-/// A conflicted file in the sidebar's card: lit while it is the one open.
-fn conflictFileRow(id: usize, path: []const u8) void {
-    const open = viewingConflict() and std.mem.eql(u8, selected_path.items, path);
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(@src(), .{ .draw_focus = false }, .{
-        .id_extra = id,
-        .tag = frameTag("conflict_file", path),
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = if (open) style.accentDim() else style.surfaceRaised() },
-        .color_fill_hover = .{ .color = if (open) style.accentDim() else style.rowHover() },
-        .corners = style.radius.input,
-        .margin = .{ .y = 2 },
-        .padding = .{ .x = style.space.sm, .y = 5, .w = style.space.sm, .h = 5 },
-    });
-    defer bw.deinit();
-    bw.processEvents();
-    bw.drawBackground();
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-        defer row.deinit();
-        dvui.icon(@src(), "conflict_icon", dvui.entypo.warning, .{ .fill_color = .{ .color = style.get().yellow } }, .{
-            .min_size_content = .{ .w = 11, .h = 11 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.sm },
-        });
-        var buf: [MAX_SHOWN_LINE]u8 = undefined;
-        dvui.label(@src(), "{s}", .{fitText(&buf, path, style.small(), 170)}, .{
-            .font = style.small(),
-            .color_text = .{ .color = if (open) style.accent() else style.text() },
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
-    }
-    if (bw.clicked()) selectChange(path, .unstaged);
 }
 
 // === An operation under way ===
@@ -13596,7 +13434,7 @@ fn isDoubleClick(id: dvui.Id) bool {
 }
 
 /// One fold-away group of refs. Returns the ref the user asked to check out.
-fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) ?git.Ref {
+pub fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) ?git.Ref {
     // Only on a host that has them.
     if ((section == .pulls or section == .issues) and pr.host == .none) return null;
     const collapsed = &section_collapsed[@backingInt(section)];
@@ -13865,7 +13703,7 @@ fn sideRows(items: []const SideItem, h: git.History, si: *const dvui.ScrollInfo)
 }
 
 /// What the sidebar's branches and tags are narrowed to.
-var sidebar_filter: std.ArrayList(u8) = .empty;
+pub var sidebar_filter: std.ArrayList(u8) = .empty;
 
 fn sidebarFiltering() bool {
     return std.mem.trim(u8, sidebar_filter.items, " ").len > 0;
@@ -16181,7 +16019,7 @@ const COL_MAX: f32 = 400;
 
 /// `text` cut to fit `width` at `font`, ending in "…" where it was cut.
 /// Whole UTF-8 sequences only; the cut point is found by halving.
-fn fitText(buf: *[MAX_SHOWN_LINE]u8, text: []const u8, font: dvui.Font, width: f32) []const u8 {
+pub fn fitText(buf: *[MAX_SHOWN_LINE]u8, text: []const u8, font: dvui.Font, width: f32) []const u8 {
     if (width <= 0 or font.textSize(text).w <= width) return text;
     const ellipsis = "…";
     var lo: usize = 0;
@@ -19654,7 +19492,7 @@ fn pairedLine(lines: []const git.DiffLine, i: usize) ?usize {
 
 /// Longest line of a file drawn, in bytes after tabs are expanded. Past it the
 /// row is cut: it is wider than any pane already.
-const MAX_SHOWN_LINE = 4096;
+pub const MAX_SHOWN_LINE = 4096;
 const TAB_WIDTH = 4;
 
 /// `text` with its tabs as spaces, to the next multiple of `TAB_WIDTH`.
