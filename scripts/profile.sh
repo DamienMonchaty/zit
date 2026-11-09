@@ -2,13 +2,13 @@
 # Where Zit's time goes, without perf: sample every thread's stack with
 # eu-stack and count the frames on top.
 #
-#   tools/profile.sh [repository] [samples] [settle seconds]
+#   scripts/profile.sh [repository] [samples] [settle seconds]
 #
 # Builds an unstripped Zit into .zig-cache/profile (symbols, or the stacks are
 # addresses). Yama's ptrace_scope=1 lets only a parent trace a process, and
 # eu-stack is not Zit's parent: a two-line preload library has Zit allow any
 # tracer instead. Config and cache are throwaway; CACHE keeps a cache, as in
-# tools/measure.sh.
+# scripts/measure.sh.
 set -eu
 repo=${1:-.}
 samples=${2:-150}

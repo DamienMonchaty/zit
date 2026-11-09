@@ -17,9 +17,9 @@ const root = path.dirname(site);
 const pages = {
 	'README.md': '/',
 	'CHANGELOG.md': '/project/changelog/',
-	'CONTRIBUTING.md': '/project/contributing/',
-	'PRIVACY.md': '/project/privacy/',
-	'SECURITY.md': '/project/security/',
+	'.github/CONTRIBUTING.md': '/project/contributing/',
+	'docs/PRIVACY.md': '/project/privacy/',
+	'.github/SECURITY.md': '/project/security/',
 };
 
 /** @param {{ base: string, blob: string }} options */

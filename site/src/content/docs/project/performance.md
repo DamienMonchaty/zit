@@ -34,7 +34,7 @@ repository.
 ## Ceilings
 
 Checked before every delivery, on a repository of a few thousand commits opened
-in a fresh window and left alone. `tools/measure.sh` fails when one is over.
+in a fresh window and left alone. `scripts/measure.sh` fails when one is over.
 
 | What | Ceiling |
 | --- | --- |
@@ -47,7 +47,7 @@ in a fresh window and left alone. `tools/measure.sh` fails when one is over.
 
 ```sh
 zig build bench -- /path/to/a/repository     # history, graph, status, diffs
-tools/measure.sh zig-out/bin/zit /path/to/a/repository   # memory and idle CPU, on Linux
+scripts/measure.sh zig-out/bin/zit /path/to/a/repository   # memory and idle CPU, on Linux
 ```
 
 `zig build bench` times each step with no window — the median of up to 200

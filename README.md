@@ -61,7 +61,7 @@ repository.
 
 Zit draws a frame only when something changes, so an idle window costs
 nothing. Every number here can be measured again with `zig build bench --
-<repository>` and `tools/measure.sh`; see [docs/PERF.md](docs/PERF.md).
+<repository>` and `scripts/measure.sh`; see [docs/PERF.md](docs/PERF.md).
 
 ## Features
 
@@ -189,13 +189,13 @@ SDL_VIDEODRIVER=dummy zig build test   # the whole suite, no display needed
 
 ## Contributing
 
-Bug reports, ideas and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+Bug reports, ideas and pull requests are welcome: see [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 What changed in each version is in the [changelog](CHANGELOG.md), and security
-problems are reported privately as described in [SECURITY.md](SECURITY.md).
+problems are reported privately as described in [SECURITY.md](.github/SECURITY.md).
 
 ## Privacy
 
-Zit has no server and collects nothing: see the [privacy policy](PRIVACY.md).
+Zit has no server and collects nothing: see the [privacy policy](docs/PRIVACY.md).
 
 ## License
 

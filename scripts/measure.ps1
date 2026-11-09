@@ -1,9 +1,9 @@
 # Zit's footprint on Windows, measured rather than supposed — what
-# tools/measure.sh reads from /proc on Linux, read here from the kernel
+# scripts/measure.sh reads from /proc on Linux, read here from the kernel
 # (NtQuerySystemInformation), which the localized performance counters'
 # names would not let a script do the same way on every machine.
 #
-#   tools/measure.ps1 [-Exe zig-out\bin\zit.exe] [-Repo .] [-Settle 40] [-Idle 20]
+#   scripts/measure.ps1 [-Exe zig-out\bin\zit.exe] [-Repo .] [-Settle 40] [-Idle 20]
 #                     [-Focus] [-Renderer direct3d11|direct3d12|vulkan|opengl|gpu]
 #                     [-Cache dir] [-Out results.tsv]
 #

@@ -15,7 +15,7 @@ opened in a fresh window and left alone.
 | Private_Dirty — Zit's own memory | 40 MB | 16 MB |
 | CPU while idle, window focused | 0.5 % — the goal is 0 | 0.07–0.10 % |
 
-`tools/measure.sh` checks them and fails when one is over. Last run:
+`scripts/measure.sh` checks them and fails when one is over. Last run:
 2026-10-29, ReleaseSafe, a clone of a ~3,000-commit repository **on disk**,
 warm picture cache, read 70 s after opening, two runs.
 
@@ -37,7 +37,7 @@ old 0.7 s poll, still without frames for a status that did not change.
 
 The first numbers there: an Intel Core i7-1185G7 under Windows 11,
 ReleaseSafe, a clone of a 1,039-commit, 2,300-file repository,
-`tools/measure.ps1` read 40 s after opening for 60 s, window focused, two
+`scripts/measure.ps1` read 40 s after opening for 60 s, window focused, two
 runs of each build, alternated.
 
 | Build | Idle CPU | Wake-ups/s | Working set | Commit |
@@ -69,17 +69,17 @@ preemption is a context switch. Measure on a quiet one.
 
 ## Method
 
-1. **Measure.** `tools/measure.sh [binary] [repository] [idle s]` runs Zit
+1. **Measure.** `scripts/measure.sh [binary] [repository] [idle s]` runs Zit
    with a throwaway config and cache and reads `/proc`: RSS and VmHWM in
    `status`, Private_Dirty in `smaps_rollup` (RSS counts shared pages —
    the GPU driver's, the fonts — that are not Zit's to save), and the
    process's ticks in `stat` over the idle window. On Windows,
-   `tools/measure.ps1` reads the same from the kernel: working set (the
+   `scripts/measure.ps1` reads the same from the kernel: working set (the
    RSS), private working set, commit, CPU time and every thread's context
    switches; `-Focus` puts the window in front, `-Renderer` picks SDL's
    renderer. `CACHE=dir` keeps the
    picture cache between runs, `SETTLE=s` waits longer before measuring.
-2. **Where the time goes.** `tools/profile.sh [repository] [samples]`
+2. **Where the time goes.** `scripts/profile.sh [repository] [samples]`
    samples every thread's stack with `eu-stack` on an unstripped build and
    counts the frames: who is busy, and inside what. No perf on this machine;
    no root needed.
@@ -125,7 +125,7 @@ every tracked file `touch`ed, `zig build bench`, three runs:
 | `status`, the repository's index | 4,323–5,211 ms |
 | `status, kept` — `git.StatusCache` | 119–169 ms |
 
-The app on it, idle, `tools/measure.ps1`: develop keeps a core busy — 99–101 %
+The app on it, idle, `scripts/measure.ps1`: develop keeps a core busy — 99–101 %
 CPU, the 0.7 s poll asking again before a read ends. With the cache, 5.9–6.3 %
 with the window in the background (a 150 ms read every 3 s), the same private
 memory (85–87 MB against 80–91).
@@ -157,7 +157,7 @@ Core Ultra 7 155H.
 | status | 16 ms | 5 ms |
 | 50 commits' diffs | 322 ms | 79 ms |
 
-`tools/measure.sh` on git/git, the picture cache kept from a first run: 79 MB
+`scripts/measure.sh` on git/git, the picture cache kept from a first run: 79 MB
 RSS (96 MB peak), 43 MB Private_Dirty, 0 % idle CPU, 0.3 wake-ups/s. With an
 empty cache the first minute is not idle — 24 % CPU — while hundreds of
 authors' pictures are fetched.

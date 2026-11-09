@@ -19,7 +19,7 @@ zig build run -- /path/to/a/repository
 ```
 
 More options (release builds, cross-compiling, a system libgit2) are in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).
 
 ## Testing
 
@@ -33,7 +33,7 @@ add a test with every fix and feature: the smallest one that fails without
 your change.
 
 If your change touches memory or speed, measure it as described in
-[docs/PERF.md](docs/PERF.md).
+[docs/PERF.md](../docs/PERF.md).
 
 ## The website
 
@@ -62,9 +62,9 @@ it, and match the style of the code around it.
 
 ## Releasing
 
-1. On `develop`, check the ceilings in [docs/PERF.md](docs/PERF.md) the way
+1. On `develop`, check the ceilings in [docs/PERF.md](../docs/PERF.md) the way
    its *Method* measures them, and write down what moved:
-   - `tools/measure.sh` on a copy of a repository of a few thousand
+   - `scripts/measure.sh` on a copy of a repository of a few thousand
      commits: RSS, peak RSS, Private_Dirty and idle CPU, each under its
      ceiling — the script fails when one is over;
    - `zig build bench` against the last release's numbers, `--vs`;
@@ -92,4 +92,4 @@ accepts a pull request once they pass.
 ## License
 
 By contributing, you agree that your contribution is licensed under the
-[MIT License](LICENSE).
+[MIT License](../LICENSE).

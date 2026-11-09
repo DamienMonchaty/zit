@@ -39,7 +39,7 @@ told not to load libdecor except under GNOME — its GTK plugin alone pulled
 GTK, Pango, GLib and ICU into the process, about 24 MB, for a title bar the
 other desktops draw themselves. About 56 MB with a 3,000-commit repository
 open — 14 MB of it git's pack files, mapped — and 33 MB with none. The ceilings, how they are measured and what has
-been tried: [`PERF.md`](PERF.md) — `tools/measure.sh`, `tools/profile.sh`, `zig build
+been tried: [`PERF.md`](PERF.md) — `scripts/measure.sh`, `scripts/profile.sh`, `zig build
 bench`.
 
 The fonts are Inter and JetBrains Mono cut down to Latin, Greek, Cyrillic and

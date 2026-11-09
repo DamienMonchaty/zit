@@ -2,7 +2,7 @@
 # Zit's footprint, measured rather than supposed: run it on a repository with a
 # throwaway config and cache, let it settle, then read the kernel's numbers.
 #
-#   tools/measure.sh [binary] [repository] [idle seconds]
+#   scripts/measure.sh [binary] [repository] [idle seconds]
 #
 # RSS is what the kernel charges the process, shared pages included; the
 # memory Zit itself is responsible for is Private_Dirty, from smaps_rollup.

@@ -24,4 +24,4 @@ receives security fixes.
 
 Zit runs on your computer and has no server. What matters most is how it
 handles your GitHub token, the repositories it opens, and the commands it
-runs. See the [privacy policy](PRIVACY.md) for what it stores and who it talks to.
+runs. See the [privacy policy](../docs/PRIVACY.md) for what it stores and who it talks to.

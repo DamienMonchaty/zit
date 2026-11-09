@@ -10,9 +10,9 @@ on:
     paths:
       - site/**
       - CHANGELOG.md
-      - CONTRIBUTING.md
-      - PRIVACY.md
-      - SECURITY.md
+      - .github/CONTRIBUTING.md
+      - docs/PRIVACY.md
+      - .github/SECURITY.md
       - docs/screenshots/**
       - assets/icons/**
       - src/brand/**
