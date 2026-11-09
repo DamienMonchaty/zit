@@ -12,6 +12,7 @@ const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const command_palette = @import("command_palette.zig");
 const home_page = @import("home_page.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -86,7 +87,7 @@ pub fn titlebar() void {
         const on_branch = if (app.history) |h| h.head != null else false;
 
         if (dialog_views.toolButton(@src(), "Fetch", dvui.entypo.cw, .{ .busy = std.mem.eql(u8, running, "Fetching"), .usable = idle, .hint = "Fetch every remote, nothing merged" })) {
-            app.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
+            repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
         }
         // After a rebase the branch and its upstream have parted: a plain
         // push is refused, and Pull would merge the old commits back in.
@@ -108,7 +109,7 @@ pub fn titlebar() void {
             var split = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
             defer split.deinit();
             if (dialog_views.toolButton(@src(), "Pull", dvui.entypo.download, .{ .badge = if (rebased) 0 else tracking.behind, .busy = std.mem.eql(u8, running, "Pulling"), .usable = pullable, .hint = pull_hint })) {
-                app.requestNetwork("Pulling", &.{"pull"});
+                repo_io.requestNetwork("Pulling", &.{"pull"});
             }
             pullMenu(pullable);
         }
@@ -130,7 +131,7 @@ pub fn titlebar() void {
             } else {
                 // A branch with no upstream yet gets one, on the default remote —
                 // otherwise the first push of every new branch is an error message.
-                app.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+                repo_io.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
             }
         }
         toolbarDivider(@src(), 1);
@@ -154,7 +155,7 @@ pub fn titlebar() void {
         if (tab_strip.uses_lfs) {
             toolbarDivider(@src(), 2);
             if (dialog_views.toolButton(@src(), "LFS", dvui.entypo.cloud, .{ .busy = std.mem.eql(u8, running, "Fetching LFS files"), .usable = idle, .hint = "Fetch the LFS files this checkout points to" })) {
-                app.requestNetwork("Fetching LFS files", &.{ "lfs", "pull" });
+                repo_io.requestNetwork("Fetching LFS files", &.{ "lfs", "pull" });
             }
         }
 
@@ -183,7 +184,7 @@ pub fn titlebar() void {
         }
         // At the very end: the rest of git — and everything else — is a
         // terminal away.
-        if (dialog_views.toolButton(@src(), "Terminal", dvui.entypo.code, .{ .hint = "A terminal in this repository's folder — Ctrl+Shift+T" })) app.openTerminal();
+        if (dialog_views.toolButton(@src(), "Terminal", dvui.entypo.code, .{ .hint = "A terminal in this repository's folder — Ctrl+Shift+T" })) repo_io.openTerminal();
     }
 }
 
@@ -306,7 +307,7 @@ fn pullMenu(usable: bool) void {
     if (graph_view.menuIcon(@src(), dvui.entypo.controller_fast_forward, "Pull, fast-forward only", false)) args = &.{ "pull", "--ff-only" };
     if (args) |a| {
         m.close();
-        app.requestNetwork("Pulling", a);
+        repo_io.requestNetwork("Pulling", a);
     }
 }
 
@@ -836,5 +837,5 @@ pub fn signOutGithub(login: []const u8) void {
     _ = login;
     github.signOut();
     me_loaded = false;
-    app.refreshRequests();
+    repo_io.refreshRequests();
 }

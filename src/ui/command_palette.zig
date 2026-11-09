@@ -10,6 +10,7 @@ const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Command palette ===
@@ -35,22 +36,22 @@ const commands = [_]Command{
     .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = app.midOperation, .run = app.requestAbortOperation },
     .{ .name = "Fetch all remotes", .icon = dvui.entypo.cw, .run = struct {
         fn f() void {
-            app.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
+            repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
         }
     }.f },
     .{ .name = "Pull", .icon = dvui.entypo.download, .run = struct {
         fn f() void {
-            app.requestNetwork("Pulling", &.{"pull"});
+            repo_io.requestNetwork("Pulling", &.{"pull"});
         }
     }.f },
     .{ .name = "Pull, rebasing local commits", .icon = dvui.entypo.level_down, .run = struct {
         fn f() void {
-            app.requestNetwork("Pulling", &.{ "pull", "--rebase" });
+            repo_io.requestNetwork("Pulling", &.{ "pull", "--rebase" });
         }
     }.f },
     .{ .name = "Push", .icon = dvui.entypo.upload, .run = struct {
         fn f() void {
-            app.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+            repo_io.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
         }
     }.f },
     .{ .name = "Force push…", .icon = dvui.entypo.warning, .run = struct {
@@ -92,7 +93,7 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Unstage everything", .icon = dvui.entypo.squared_minus, .run = struct {
         fn f() void {
-            app.request(&.{ "reset", "-q", "--", "." });
+            repo_io.request(&.{ "reset", "-q", "--", "." });
         }
     }.f },
     .{ .name = "Discard every unstaged change…", .icon = dvui.entypo.trash, .run = struct {
@@ -107,12 +108,12 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Refresh", .icon = dvui.entypo.retweet, .keys = "F5", .run = struct {
         fn f() void {
-            app.requestAction(.refresh);
+            repo_io.requestAction(.refresh);
         }
     }.f },
     .{ .name = "Open a repository…", .icon = dvui.entypo.folder, .keys = "Ctrl+O", .needs_repo = false, .run = struct {
         fn f() void {
-            app.requestAction(.open_repo);
+            repo_io.requestAction(.open_repo);
         }
     }.f },
     .{ .name = "Clone a repository…", .icon = dvui.entypo.download, .needs_repo = false, .run = struct {
@@ -125,7 +126,7 @@ const commands = [_]Command{
             dialog_views.openRepoDialog(.create);
         }
     }.f },
-    .{ .name = "Open a terminal here", .icon = dvui.entypo.code, .keys = "Ctrl+Shift+T", .run = app.openTerminal },
+    .{ .name = "Open a terminal here", .icon = dvui.entypo.code, .keys = "Ctrl+Shift+T", .run = repo_io.openTerminal },
     .{ .name = "New tab", .icon = dvui.entypo.browser, .keys = "Ctrl+T", .needs_repo = false, .run = struct {
         fn f() void {
             app.new_tab_open = true;

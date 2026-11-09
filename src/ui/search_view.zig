@@ -11,6 +11,7 @@ const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Search through git ===
@@ -570,7 +571,7 @@ fn commitMenu(
     };
     if (graph_view.menuIcon(@src(), dvui.entypo.login, "Check out this commit (detaches HEAD)", false)) {
         fw.close();
-        app.request(&.{ "checkout", sha });
+        repo_io.request(&.{ "checkout", sha });
     }
 
     graph_view.menuSeparator(1);
@@ -589,9 +590,9 @@ fn commitMenu(
         // A merge, like a revert of one: its change is the diff against the
         // first parent, the branch it was merged into.
         if (commit.parents.len > 1) {
-            app.request(&.{ "cherry-pick", "-m", "1", sha });
+            repo_io.request(&.{ "cherry-pick", "-m", "1", sha });
         } else {
-            app.request(&.{ "cherry-pick", sha });
+            repo_io.request(&.{ "cherry-pick", sha });
         }
     }
     if (!app.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
@@ -600,9 +601,9 @@ fn commitMenu(
         // first is the branch it was merged into, which is what "undo this
         // merge" means.
         if (commit.parents.len > 1) {
-            app.request(&.{ "revert", "--no-edit", "-m", "1", sha });
+            repo_io.request(&.{ "revert", "--no-edit", "-m", "1", sha });
         } else {
-            app.request(&.{ "revert", "--no-edit", sha });
+            repo_io.request(&.{ "revert", "--no-edit", sha });
         }
     }
     if (!app.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
@@ -625,11 +626,11 @@ fn commitMenu(
         defer sub.deinit();
         if (graph_view.menuIcon(@src(), dvui.entypo.back, "Soft — keep changes staged", false)) {
             fw.close();
-            app.request(&.{ "reset", "--soft", sha });
+            repo_io.request(&.{ "reset", "--soft", sha });
         }
         if (graph_view.menuIcon(@src(), dvui.entypo.back, "Mixed — keep changes unstaged", false)) {
             fw.close();
-            app.request(&.{ "reset", "--mixed", sha });
+            repo_io.request(&.{ "reset", "--mixed", sha });
         }
         if (graph_view.menuIcon(@src(), dvui.entypo.trash, "Hard — discard changes", true)) {
             fw.close();

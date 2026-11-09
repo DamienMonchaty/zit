@@ -13,6 +13,7 @@ const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_settings = @import("repo_settings.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -1120,7 +1121,7 @@ fn workingDetail() void {
 /// working tree — staging, a stash, a commit — or the read after a command.
 fn changesWaiting() ?[]const u8 {
     if (tab_strip.job != null and app.job_after != .remote) return tab_strip.job_label;
-    if (app.work_settling) return app.settling_label;
+    if (repo_io.work_settling) return repo_io.settling_label;
     return null;
 }
 
@@ -1483,7 +1484,7 @@ fn folderLine(src: std.builtin.SourceLocation, id: usize, row: TreeRow, folded: 
 
     if (side) |s| {
         if (s == .staged) {
-            if (dialog_views.iconButton(@src(), "unstage_folder", "Unstage this folder", dvui.entypo.minus, style.textMuted())) app.request(&.{ "reset", "-q", "--", row.path });
+            if (dialog_views.iconButton(@src(), "unstage_folder", "Unstage this folder", dvui.entypo.minus, style.textMuted())) repo_io.request(&.{ "reset", "-q", "--", row.path });
         } else {
             if (dialog_views.iconButton(@src(), "stage_folder", "Stage this folder", dvui.entypo.plus, style.textMuted())) app.requestLocal("Staging", &.{ "add", "-A", "--", row.path });
         }
@@ -1684,7 +1685,7 @@ fn changesSection(
             if (dialog_views.iconButtonTagged(@src(), "picked_clear", "Clear the selection — Esc", dvui.entypo.cross, style.textFaint(), "link:picked_clear")) clearPickedChanges();
         } else if (changes.len > 0) {
             if (staged) {
-                if (dialog_views.linkButtonTagged(@src(), "Unstage all", style.accent(), "link:unstage_all")) app.request(&.{ "reset", "-q", "--", "." });
+                if (dialog_views.linkButtonTagged(@src(), "Unstage all", style.accent(), "link:unstage_all")) repo_io.request(&.{ "reset", "-q", "--", "." });
             } else {
                 // A job: adding 11,000 new files is 13 s of git on Windows,
                 // which the window would otherwise wait out frozen.
@@ -1931,7 +1932,7 @@ const PickedVerb = enum { stage, unstage, stash };
 /// standard input, NUL-separated: there may be more of them than a command
 /// line Zit keeps room for, and a path may hold anything but a NUL.
 pub fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.Change) void {
-    if (app.action != .none) return;
+    if (repo_io.action != .none) return;
     var input: std.ArrayList(u8) = .empty;
     for (changes) |c| {
         if (!isChangePicked(side, c.path)) continue;
@@ -1946,14 +1947,14 @@ pub fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.
     }
     if (input.items.len == 0) return input.deinit(app.gpa);
     switch (verb) {
-        .stage => app.request(&.{ "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul" }),
-        .unstage => app.request(&.{ "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul" }),
+        .stage => repo_io.request(&.{ "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul" }),
+        .unstage => repo_io.request(&.{ "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul" }),
         .stash => app.requestLocal("Stashing", &.{ "stash", "push", "--include-untracked", "--pathspec-from-file=-", "--pathspec-file-nul" }),
     }
     // Refused — a job running, say — the paths would wait for whatever
     // command comes next.
-    if (app.action == .none) return input.deinit(app.gpa);
-    app.action_input = input.toOwnedSlice(app.gpa) catch return input.deinit(app.gpa);
+    if (repo_io.action == .none) return input.deinit(app.gpa);
+    repo_io.action_input = input.toOwnedSlice(app.gpa) catch return input.deinit(app.gpa);
     clearPickedChanges();
 }
 
@@ -1995,9 +1996,9 @@ pub fn markersLeft(path: []const u8) bool {
 pub fn requestStage(path: []const u8, old: []const u8, stage: bool) void {
     if (stage) {
         if (markersLeft(path)) return app.ask(.stage_markers, path);
-        app.request(&.{ "--literal-pathspecs", "add", "--", path, old });
+        repo_io.request(&.{ "--literal-pathspecs", "add", "--", path, old });
     } else {
-        app.request(&.{ "--literal-pathspecs", "reset", "-q", "--", path, old });
+        repo_io.request(&.{ "--literal-pathspecs", "reset", "-q", "--", path, old });
     }
 }
 
@@ -2097,7 +2098,7 @@ pub fn ignorePath(path: []const u8) void {
         return app.setCommandError("Could not write .gitignore.");
     };
     app.clearCommandError();
-    app.workChanged("Ignoring");
+    repo_io.workChanged("Ignoring");
 }
 
 /// Hand a file in the working tree to the desktop, without waiting for it.
@@ -2275,7 +2276,7 @@ fn commitBox() void {
         });
     }
 
-    if (can_commit and bw.clicked()) app.requestAction(.commit);
+    if (can_commit and bw.clicked()) repo_io.requestAction(.commit);
 }
 
 fn commitField(

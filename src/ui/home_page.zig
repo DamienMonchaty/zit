@@ -9,6 +9,7 @@ const tab_strip = @import("tab_strip.zig");
 const window_chrome = @import("window_chrome.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === What Zit does ===
@@ -329,7 +330,7 @@ pub fn startScreen() void {
     {
         var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.xl } });
         defer actions.deinit();
-        if (startAction(@src(), dvui.entypo.folder, "Open a folder", "Ctrl+O", "start:Open a repository", true)) app.requestAction(.open_repo);
+        if (startAction(@src(), dvui.entypo.folder, "Open a folder", "Ctrl+O", "start:Open a repository", true)) repo_io.requestAction(.open_repo);
         if (startAction(@src(), dvui.entypo.download, "Clone", null, "start:Clone", false)) dialog_views.openRepoDialog(.clone);
         if (startAction(@src(), dvui.entypo.plus, "New repository", null, "start:Start a new one", false)) dialog_views.openRepoDialog(.create);
     }

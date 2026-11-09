@@ -12,6 +12,7 @@ const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -65,7 +66,7 @@ pub fn graphFilterChanged() void {
     // A test calling in from outside a frame reads it again at once. Inside
     // one — a click on a sidebar eye — the rows still to be drawn point into
     // this history: the frame's end reads it again, as in the app.
-    if (@import("builtin").is_test and !tab_strip.in_frame) return app.reloadHistory();
+    if (@import("builtin").is_test and !tab_strip.in_frame) return repo_io.reloadHistory();
     graph_filter_dirty = true;
 }
 
@@ -233,11 +234,11 @@ pub fn startHistoryLoad() void {
         history_load = null;
         if (old.done.load(.acquire)) old.free() else history_retired.append(app.gpa, old) catch old.free();
     }
-    const load = app.gpa.create(HistoryLoad) catch return app.reloadHistory();
+    const load = app.gpa.create(HistoryLoad) catch return repo_io.reloadHistory();
     load.* = .{
         .path = app.gpa.dupe(u8, app.repo_path.items) catch {
             app.gpa.destroy(load);
-            return app.reloadHistory();
+            return repo_io.reloadHistory();
         },
         .gen = history_gen,
         .filter_arena = .init(app.gpa),
@@ -300,7 +301,7 @@ pub fn collectHistoryLoad() bool {
     if (!same_repo) return false;
     if (load.history == null) {
         // Read it here instead, which says what went wrong if it fails again.
-        app.reloadHistory();
+        repo_io.reloadHistory();
     } else {
         if (app.history) |*h| h.deinit();
         if (app.lanes) |*l| l.deinit();
@@ -312,7 +313,7 @@ pub fn collectHistoryLoad() bool {
         diff_view.dropStaleSelection();
         rebase_view.readOpInfo();
         if (file_history.items.len > 0) markFileHistory();
-        app.trimHeap();
+        repo_io.trimHeap();
     }
     if (load.announce) app.historyArrived();
     return false;
@@ -330,7 +331,7 @@ fn startHistoryLoadQuiet() void {
 /// revwalk of a large repository is long enough to see the UI stop. The
 /// one on screen stays until the new one lands.
 pub fn refreshHistory() void {
-    if (@import("builtin").is_test) return app.reloadHistory();
+    if (@import("builtin").is_test) return repo_io.reloadHistory();
     if (history_load != null) {
         history_again = true;
         return;
@@ -345,7 +346,7 @@ pub fn refreshHistory() void {
 /// was for the filter as it was: retired at once rather than waited for and
 /// shown first.
 pub fn refilterHistory() void {
-    if (@import("builtin").is_test) return app.reloadHistory();
+    if (@import("builtin").is_test) return repo_io.reloadHistory();
     history_again = false;
     startHistoryLoadQuiet();
 }
@@ -493,7 +494,7 @@ pub fn dropMenu() void {
             chosen = true;
             fw.close();
             drop_action = .merge;
-            app.requestAction(.drop);
+            repo_io.requestAction(.drop);
         }
         var buf2: [300]u8 = undefined;
         // A remote branch is not rebased itself: the local one tracking it is.
@@ -505,7 +506,7 @@ pub fn dropMenu() void {
             chosen = true;
             fw.close();
             drop_action = .rebase;
-            app.requestAction(.drop);
+            repo_io.requestAction(.drop);
         }
     }
     // Chosen, the drop is the action's to clear once it has run.
@@ -624,11 +625,11 @@ pub fn refMenu(
     if (ref.head) {
         if (menuIcon(@src(), dvui.entypo.download, "Pull, rebasing local commits", false)) {
             fw.close();
-            app.requestNetwork("Pulling", &.{ "pull", "--rebase" });
+            repo_io.requestNetwork("Pulling", &.{ "pull", "--rebase" });
         }
         if (menuIcon(@src(), dvui.entypo.download, "Pull, fast-forward only", false)) {
             fw.close();
-            app.requestNetwork("Pulling", &.{ "pull", "--ff-only" });
+            repo_io.requestNetwork("Pulling", &.{ "pull", "--ff-only" });
         }
         if (menuIcon(@src(), dvui.entypo.upload, "Force push…", true)) {
             fw.close();
@@ -649,21 +650,21 @@ pub fn refMenu(
         menuSeparator(1);
         if (!app.midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge into current branch", false)) {
             fw.close();
-            app.request(&.{ "merge", "--no-edit", refArg(&ref_buf, ref.name, ref.kind) });
+            repo_io.request(&.{ "merge", "--no-edit", refArg(&ref_buf, ref.name, ref.kind) });
         }
         if (!app.midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge, always with a merge commit", false)) {
             fw.close();
-            app.request(&.{ "merge", "--no-edit", "--no-ff", refArg(&ref_buf, ref.name, ref.kind) });
+            repo_io.request(&.{ "merge", "--no-edit", "--no-ff", refArg(&ref_buf, ref.name, ref.kind) });
         }
         // Leaves the result staged and HEAD where it was: the commit that
         // follows is yours to write, which is the point of squashing.
         if (!app.midOperation() and menuIcon(@src(), dvui.entypo.archive, "Squash into current branch, uncommitted", false)) {
             fw.close();
-            app.request(&.{ "merge", "--squash", refArg(&ref_buf, ref.name, ref.kind) });
+            repo_io.request(&.{ "merge", "--squash", refArg(&ref_buf, ref.name, ref.kind) });
         }
         if (!app.midOperation() and menuIcon(@src(), dvui.entypo.level_up, "Rebase current branch onto this", false)) {
             fw.close();
-            app.request(&.{ "rebase", refArg(&ref_buf, ref.name, ref.kind) });
+            repo_io.request(&.{ "rebase", refArg(&ref_buf, ref.name, ref.kind) });
         }
     }
 
@@ -672,7 +673,7 @@ pub fn refMenu(
         if (menuIcon(@src(), dvui.entypo.upload, "Push, and track it", false)) {
             fw.close();
             if (app.defaultRemote()) |remote| {
-                app.requestNetwork("Pushing", &.{ "push", "-u", remote, refArg(&ref_buf, ref.name, ref.kind) });
+                repo_io.requestNetwork("Pushing", &.{ "push", "-u", remote, refArg(&ref_buf, ref.name, ref.kind) });
             } else app.setCommandError("There is no remote to push to. Add one in the sidebar.");
         }
     }
@@ -683,7 +684,7 @@ pub fn refMenu(
                 // The full name, as for a delete: a branch called the same
                 // would make the bare one ambiguous.
                 const full = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{ref.name}) catch ref.name;
-                app.requestNetwork("Pushing", &.{ "push", remote, full });
+                repo_io.requestNetwork("Pushing", &.{ "push", remote, full });
             } else app.setCommandError("There is no remote to push to. Add one in the sidebar.");
         }
     }
@@ -717,7 +718,7 @@ pub fn refMenu(
     if (ref.kind == .local) {
         if (menuIcon(@src(), dvui.entypo.trash, "Delete branch", true)) {
             fw.close();
-            app.request(&.{ "branch", "-d", ref.name });
+            repo_io.request(&.{ "branch", "-d", ref.name });
         }
         if (menuIcon(@src(), dvui.entypo.trash, "Delete, even unmerged…", true)) {
             fw.close();
@@ -733,7 +734,7 @@ pub fn refMenu(
     if (ref.kind == .tag) {
         if (menuIcon(@src(), dvui.entypo.trash, "Delete tag", true)) {
             fw.close();
-            app.request(&.{ "tag", "-d", ref.name });
+            repo_io.request(&.{ "tag", "-d", ref.name });
         }
         if (menuIcon(@src(), dvui.entypo.trash, "Delete on the remote…", true)) {
             fw.close();

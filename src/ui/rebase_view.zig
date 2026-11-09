@@ -15,6 +15,7 @@ const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_settings = @import("repo_settings.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -461,11 +462,11 @@ pub var stash_pending: [40]u8 = undefined;
 pub var stash_verb: []const u8 = "apply";
 
 pub fn requestStash(verb: []const u8, id: git.Oid) void {
-    if (app.action != .none) return;
+    if (repo_io.action != .none) return;
     var hex: [41]u8 = undefined;
     @memcpy(&stash_pending, git.oidHex(id, &hex)[0..40]);
     stash_verb = verb;
-    app.action = .stash;
+    repo_io.action = .stash;
 }
 
 /// `git stash <verb>` on the stash whose commit is `hex`. Held by its commit
@@ -526,7 +527,7 @@ fn sectionMenu(
             }
             if (graph_view.menuIcon(@src(), dvui.entypo.cw, "Fetch them all", false)) {
                 fw.close();
-                app.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
+                repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
             }
         },
         .pulls => {
@@ -540,7 +541,7 @@ fn sectionMenu(
             }
             if (graph_view.menuIcon(@src(), dvui.entypo.ccw, "Refresh the list", false)) {
                 fw.close();
-                app.refreshRequests();
+                repo_io.refreshRequests();
             }
         },
         .issues => {
@@ -626,7 +627,7 @@ fn remoteRow(src: std.builtin.SourceLocation, entry: git.Remote, id: usize) void
     // line reads as a heading the rest of the time.
     if (hover) {
         if (dialog_views.iconButton(@src(), "remote_fetch", "Fetch from this remote", dvui.entypo.cw, style.textMuted())) {
-            app.requestNetwork("Fetching", if (tab_strip.prune_on_fetch) &.{ "fetch", "--prune", entry.name } else &.{ "fetch", entry.name });
+            repo_io.requestNetwork("Fetching", if (tab_strip.prune_on_fetch) &.{ "fetch", "--prune", entry.name } else &.{ "fetch", entry.name });
         }
         if (dialog_views.iconButton(@src(), "remote_rename", "Rename this remote", dvui.entypo.pencil, style.textFaint())) {
             app.askNameWith(.rename_remote, entry.name, entry.name);
@@ -636,7 +637,7 @@ fn remoteRow(src: std.builtin.SourceLocation, entry: git.Remote, id: usize) void
         }
         // Removing a remote drops config, never commits, so it does not ask.
         if (dialog_views.iconButton(@src(), "remote_remove", "Remove this remote", dvui.entypo.cross, style.textFaint())) {
-            app.request(&.{ "remote", "remove", entry.name });
+            repo_io.request(&.{ "remote", "remove", entry.name });
         }
     }
 }
@@ -675,7 +676,7 @@ pub fn requestsError() void {
         if (dialog_views.linkButton(@src(), "Connect", style.accent())) app.openConnect();
         return;
     }
-    if (dialog_views.linkButton(@src(), "Try again", style.accent())) app.refreshRequests();
+    if (dialog_views.linkButton(@src(), "Try again", style.accent())) repo_io.refreshRequests();
 }
 
 pub fn sidebarNote(src: std.builtin.SourceLocation, text: []const u8) void {
@@ -710,7 +711,7 @@ pub fn loadingSpinner(src: std.builtin.SourceLocation) void {
         });
         dot.deinit();
     }
-    app.animateEvery(row.data().id, 200);
+    repo_io.animateEvery(row.data().id, 200);
 }
 
 /// The form for a new request, filled from the commits.
@@ -777,7 +778,7 @@ pub fn rebasePanel() void {
             .padding = dvui.Rect.all(0),
         });
 
-        if (dialog_views.linkButton(@src(), "Start rebase", style.accent())) app.requestAction(.rebase);
+        if (dialog_views.linkButton(@src(), "Start rebase", style.accent())) repo_io.requestAction(.rebase);
     }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{
@@ -1052,7 +1053,7 @@ fn conflictRegions() void {
         });
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
         defer row.deinit();
-        if (app.opButton(@src(), "Stage it and open the next — Enter", "conflict:stage_next")) app.requestAction(.stage_next);
+        if (app.opButton(@src(), "Stage it and open the next — Enter", "conflict:stage_next")) repo_io.requestAction(.stage_next);
         return;
     }
 
@@ -1071,7 +1072,7 @@ fn safeBar(safe: usize) void {
     dialog_views.alertText(@src(), std.fmt.bufPrint(&text_buf, "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, app.conflicts.len, window_chrome.plural(app.conflicts.len) }) catch "", style.success());
     var buf: [48]u8 = undefined;
     const caption = if (safe == 1) "Resolve it" else std.fmt.bufPrint(&buf, "Resolve these {d}", .{safe}) catch "Resolve them";
-    if (dialog_views.alertButton(@src(), caption, style.success(), "conflict:resolve_safe")) app.requestAction(.resolve_safe);
+    if (dialog_views.alertButton(@src(), caption, style.success(), "conflict:resolve_safe")) repo_io.requestAction(.resolve_safe);
 }
 
 /// A file one side deleted and the other changed: keep it, or let it go.
@@ -1252,9 +1253,9 @@ fn keyedLink(src: std.builtin.SourceLocation, key: []const u8, caption: []const 
 }
 
 pub fn takeFile(side: git.ConflictSide) void {
-    if (app.action != .none) return;
-    app.action_side = side;
-    app.action = .take_file;
+    if (repo_io.action != .none) return;
+    repo_io.action_side = side;
+    repo_io.action = .take_file;
 }
 
 /// "All of main": the whole file as one side has it.
@@ -1693,7 +1694,7 @@ pub fn lineNumber(src: std.builtin.SourceLocation, n: u32) void {
 pub fn requestHunk(file: git.FileDiff, hunk: u32, side: git.DiffSide) void {
     // Checked up front: `request` drops the command if one is already pending,
     // and the patch would then be allocated with nothing left to free it.
-    if (app.action != .none) return;
+    if (repo_io.action != .none) return;
 
     const patch = git.patchForHunk(app.gpa, file, hunk) catch {
         app.setCommandError("Out of memory building the patch.");
@@ -1703,10 +1704,10 @@ pub fn requestHunk(file: git.FileDiff, hunk: u32, side: git.DiffSide) void {
     // `--cached` applies to the index: forward to stage a hunk that is not
     // staged, reversed to take a staged one back out.
     switch (side) {
-        .unstaged => app.request(&.{ "apply", "--cached", "-" }),
-        .staged => app.request(&.{ "apply", "--cached", "--reverse", "-" }),
+        .unstaged => repo_io.request(&.{ "apply", "--cached", "-" }),
+        .staged => repo_io.request(&.{ "apply", "--cached", "--reverse", "-" }),
     }
-    app.action_input = patch;
+    repo_io.action_input = patch;
 }
 
 pub fn isPicked(index: usize) bool {
@@ -1732,7 +1733,7 @@ pub fn pickedInHunk(file: git.FileDiff, hunk: u32) usize {
 /// Stage, unstage or discard only the picked lines of one hunk. Discarding
 /// asks first, the same as a whole hunk does.
 pub fn requestLines(file: git.FileDiff, hunk: u32, side: git.DiffSide, discard: bool) void {
-    if (app.action != .none) return;
+    if (repo_io.action != .none) return;
 
     const reverse = discard or side == .staged;
     const patch = (git.patchForLines(app.gpa, file, hunk, app.picked_lines.items, reverse) catch {
@@ -1744,10 +1745,10 @@ pub fn requestLines(file: git.FileDiff, hunk: u32, side: git.DiffSide, discard: 
         return app.ask(.discard_hunk, patch);
     }
     switch (side) {
-        .unstaged => app.request(&.{ "apply", "--cached", "-" }),
-        .staged => app.request(&.{ "apply", "--cached", "--reverse", "-" }),
+        .unstaged => repo_io.request(&.{ "apply", "--cached", "-" }),
+        .staged => repo_io.request(&.{ "apply", "--cached", "--reverse", "-" }),
     }
-    app.action_input = patch;
+    repo_io.action_input = patch;
 }
 
 /// Throwing a hunk away is staging's mirror image — the same rebuilt patch,

@@ -9,6 +9,7 @@ const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_settings = @import("repo_settings.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Split diff ===
@@ -668,7 +669,7 @@ fn diffHeader() void {
                 // Taking back a pick, and starting the file over, while there
                 // is something to take back.
                 if (app.resolve_undo.items.len > 0) {
-                    if (dialog_views.linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) app.requestAction(.undo_resolve);
+                    if (dialog_views.linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) repo_io.requestAction(.undo_resolve);
                     if (dialog_views.linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) app.ask(.restart_file, app.selected_path.items);
                 }
                 // The whole file as one side has it, staged in the same click.
@@ -680,7 +681,7 @@ fn diffHeader() void {
                     if (dialog_views.linkButtonTagged(@src(), rebase_view.allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) rebase_view.takeFile(.ours);
                     if (dialog_views.linkButtonTagged(@src(), rebase_view.allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) rebase_view.takeFile(.theirs);
                 }
-                if (dialog_views.linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) app.requestAction(.stage_next);
+                if (dialog_views.linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) repo_io.requestAction(.stage_next);
                 return;
             }
 

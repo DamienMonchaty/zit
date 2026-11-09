@@ -11,6 +11,7 @@ const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Tabs and groups ===
@@ -358,8 +359,8 @@ pub fn setIntegrations(on: bool) void {
     avatars.use_github.store(on, .release);
     window_chrome.me_loaded = false;
     if (!on and app.active_view == .pulls) app.closePulls();
-    avatars.setGithubRepo(if (on) app.githubRemote() else null);
-    app.refreshRequests();
+    avatars.setGithubRepo(if (on) repo_io.githubRemote() else null);
+    repo_io.refreshRequests();
     saveWorkspace();
 }
 pub var default_branch: std.ArrayList(u8) = .empty;

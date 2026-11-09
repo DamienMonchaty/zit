@@ -29,6 +29,7 @@ const identity_view = @import("ui/identity_view.zig");
 const repo_settings = @import("ui/repo_settings.zig");
 const command_palette = @import("ui/command_palette.zig");
 const home_page = @import("ui/home_page.zig");
+const repo_io = @import("core/repo_io.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -82,13 +83,13 @@ fn startOptions() dvui.App.StartOptions {
         // thread of its own, and its arena kept the read's freed scratch
         // pinned between the live snapshot's pages — 6 MB that never went
         // back. The threads here take turns; a shared lock costs nothing.
-        if (mallopt) |set| _ = set(M_ARENA_MAX, 1);
+        if (repo_io.mallopt) |set| _ = set(repo_io.M_ARENA_MAX, 1);
         // A fixed mmap threshold: glibc's moves up to whatever large block
         // was last freed — up to 32 MB — and the next ones come out of the
         // heap instead, where a free gives nothing back until a trim. Fixed,
         // a snapshot's arena pages or a big diff are their own mapping, and
         // their free is the system's at once.
-        if (mallopt) |set| _ = set(M_MMAP_THRESHOLD, 128 * 1024);
+        if (repo_io.mallopt) |set| _ = set(repo_io.M_MMAP_THRESHOLD, 128 * 1024);
     }
     return .{
         .size = .{ .w = 1320.0, .h = 840.0 },
@@ -906,7 +907,7 @@ fn sameDiff(a: git.Diff, b: git.Diff) bool {
 fn appInit(win: *dvui.Window) !void {
     app_window = win;
     run.wake = wakeUi;
-    stillUi();
+    repo_io.stillUi();
 
     // Set by `dvui.App.main` before it calls us, so this is never null here.
     const init = dvui.App.main_init.?;
@@ -951,7 +952,7 @@ fn appInit(win: *dvui.Window) !void {
         migrateFromZync(dir, "zit/avatars");
         avatars.init(gpa, app_io, dir);
     }
-    initStatusCache(init.environ_map.*);
+    repo_io.initStatusCache(init.environ_map.*);
     pr.init(gpa, app_io);
     github.init(gpa, app_io, tab_strip.config_dir.items);
 
@@ -1017,10 +1018,10 @@ fn appDeinit(win: *dvui.Window) void {
     graph_view.history_load = null;
     graph_view.reapHistoryLoads(true);
     graph_view.history_retired.deinit(gpa);
-    if (work_load) |load| load.free();
-    work_load = null;
+    if (repo_io.work_load) |load| load.free();
+    repo_io.work_load = null;
     dialog_views.closeRepo();
-    status_cache_file.deinit(gpa);
+    repo_io.status_cache_file.deinit(gpa);
     git.shutdown();
     avatars.deinit();
     pr.deinit();
@@ -1113,8 +1114,8 @@ fn appDeinit(win: *dvui.Window) void {
     diff_view.split_rows.deinit(gpa);
     for ([_]*std.ArrayList(u8){ &dialog_views.dialog_url, &dialog_views.dialog_parent, &dialog_views.dialog_name, &dialog_views.dialog_branch }) |list| list.deinit(gpa);
     freeViews();
-    if (action_input) |patch| gpa.free(patch);
-    action_input = null;
+    if (repo_io.action_input) |patch| gpa.free(patch);
+    repo_io.action_input = null;
 
     for (tab_strip.groups.items) |*group| group.deinit();
     tab_strip.groups.deinit(gpa);
@@ -1193,17 +1194,17 @@ pub fn openRepo(path: []const u8) void {
     tab_strip.open_error = null;
     new_tab_open = false;
 
-    detectLfs();
+    repo_io.detectLfs();
     graph_view.loadGraphPrefs();
     commit_view.startRepoConfig();
     // Off the UI thread too, beside the history's: under the loading screen,
     // which is up longer than 11,000 files take to stat.
-    workChanged("Reading the changes");
+    repo_io.workChanged("Reading the changes");
     // The first read of a repository is the slow one — packfiles not yet in
     // the page cache — so it happens off the UI thread, with the loading
     // screen in the meantime. Tests read it in place: they assert on it straight after.
     if (@import("builtin").is_test) {
-        reloadHistory();
+        repo_io.reloadHistory();
         historyArrived();
     } else {
         graph_view.startHistoryLoad();
@@ -1213,748 +1214,9 @@ pub fn openRepo(path: []const u8) void {
 /// What needs the history once it is there: the remotes it lists say where
 /// pictures and pull requests come from.
 pub fn historyArrived() void {
-    avatars.setGithubRepo(if (tab_strip.integrations) githubRemote() else null);
-    refreshRequests();
+    avatars.setGithubRepo(if (tab_strip.integrations) repo_io.githubRemote() else null);
+    repo_io.refreshRequests();
 }
-
-// === Working tree, read in the background ===
-//
-// The status is re-read on the poll timer. On Linux that is a few
-// milliseconds; on Windows, where every stat is slow, it is long enough in a
-// big repository to freeze the window every poll. So the timer's reads go to
-// another thread, and so do the reads after a command (`workChanged`): with
-// 11,000 changed files one is 300 ms on Windows, which the window waited out
-// frozen after every stage. A read after a command bumps `work_gen`, which
-// retires any read already out — it may have started before the command.
-
-const WorkLoad = struct {
-    path: []u8,
-    gen: u64,
-    done: std.atomic.Value(bool) = .init(false),
-    work: ?git.Work = null,
-    future: ?std.Io.Future(void) = null,
-
-    fn run(self: *WorkLoad) void {
-        defer wakeUi();
-        defer self.done.store(true, .release);
-        if (status_cache_file.items.len > 0 and status_cache_lock.tryLock()) {
-            defer status_cache_lock.unlock(app_io);
-            defer if (status_cache_drop.swap(false, .acq_rel)) dropStatusCache();
-            if (statusCacheFor(self.path)) |cache| {
-                if (cache.readWork(gpa, app_io)) |w| {
-                    self.work = w;
-                    return;
-                } else |_| dropStatusCache();
-            }
-        }
-        var r = git.Repo.open(self.path) catch return;
-        defer r.deinit();
-        self.work = r.readWork(gpa) catch null;
-    }
-
-    fn free(self: *WorkLoad) void {
-        if (self.future) |*f| f.await(app_io);
-        if (self.work) |*w| w.deinit();
-        gpa.free(self.path);
-        gpa.destroy(self);
-    }
-};
-
-/// The status reads' copy of the index (`git.StatusCache`), kept from one
-/// read to the next, so that a file touched without being changed is hashed
-/// once rather than at every read. One read holds it at a time — a read
-/// after a command, with the timer's still out, reads without it — and it is
-/// for the repository last read.
-var status_cache: ?git.StatusCache = null;
-var status_cache_lock: std.Io.Mutex = .init;
-/// Set by `closeRepo` while a read holds the cache: dropped as that read
-/// ends, with its file.
-var status_cache_drop: std.atomic.Value(bool) = .init(false);
-/// Where the index's copy is kept: Zit's cache, under a name of this
-/// process's own. Empty — no cache — when there is no cache folder.
-var status_cache_file: std.ArrayList(u8) = .empty;
-
-/// The cache for `path`, opened — and the last repository's dropped — if
-/// it is not that one's. Called with `status_cache_lock` held.
-fn statusCacheFor(path: []const u8) ?*git.StatusCache {
-    if (status_cache) |cache| if (!std.mem.eql(u8, cache.path, path)) dropStatusCache();
-    if (status_cache == null) status_cache = git.StatusCache.open(gpa, path, status_cache_file.items) catch return null;
-    return &status_cache.?;
-}
-
-/// Called with `status_cache_lock` held, or with no read left to hold it.
-fn dropStatusCache() void {
-    if (status_cache) |*cache| cache.deinit(gpa, app_io);
-    status_cache = null;
-}
-
-/// The closed repository's cache let go of: now, or as the read holding it
-/// ends — which is not waited for, as `closeRepo` waits for no read.
-pub fn releaseStatusCache() void {
-    if (status_cache_lock.tryLock()) {
-        defer status_cache_lock.unlock(app_io);
-        dropStatusCache();
-    } else status_cache_drop.store(true, .release);
-}
-
-fn initStatusCache(env: std.process.Environ.Map) void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = store.appDir(env, &buf, .cache, "") orelse return;
-    std.Io.Dir.cwd().createDirPath(app_io, dir) catch return;
-    var id: [8]u8 = undefined;
-    app_io.random(&id);
-    const sep = if (@import("builtin").os.tag == .windows) "\\" else "/";
-    status_cache_file.print(gpa, "{s}" ++ sep ++ "index-{x}", .{ dir, id[0..] }) catch status_cache_file.clearRetainingCapacity();
-}
-
-var work_load: ?*WorkLoad = null;
-var work_gen: u64 = 0;
-/// Asked for while one was out: what changed during that read is read when
-/// it lands, not lost.
-var work_again = false;
-
-/// After a command: the status read again, off the UI thread. A read
-/// already out may have begun before the command: retired, and read again
-/// once it lands, so what lands is never older than the command.
-pub fn workChanged(what: []const u8) void {
-    if (@import("builtin").is_test) return reloadWork();
-    work_gen +%= 1;
-    work_settling = true;
-    settling_label = what;
-    refreshWork();
-}
-
-/// A read asked for by a command is out: the lists on screen are about to
-/// change, which the changes panel says over them — with what the command
-/// did, "Staging". The poll's reads, which usually find nothing new, do not
-/// set it.
-pub var work_settling = false;
-pub var settling_label: []const u8 = "Reading the changes";
-
-/// What the command a result is folded in for did, as the changes' veil says
-/// it until they are read again: set by whoever calls `applyOutcome`.
-var command_label: []const u8 = "Reading the changes";
-
-/// "Staging" for `git add`: what a command does, in the words the veil over
-/// the changes uses while they are read again after it.
-fn commandLabel(args: []const []const u8) []const u8 {
-    // Past git's own options: `--literal-pathspecs`, `-c key=value`.
-    var at: usize = 0;
-    while (at < args.len and args[at].len > 0 and args[at][0] == '-') : (at += 1) {
-        if (std.mem.eql(u8, args[at], "-c")) at += 1;
-    }
-    if (at >= args.len) return "Updating";
-    const verb = args[at];
-    const rest = args[at..];
-    const eq = std.mem.eql;
-    if (eq(u8, verb, "add")) return "Staging";
-    if (eq(u8, verb, "reset")) return if (hasArg(rest, "--hard") or hasArg(rest, "--soft") or hasArg(rest, "--mixed")) "Resetting" else "Unstaging";
-    if (eq(u8, verb, "apply")) return if (!hasArg(rest, "--cached")) "Discarding" else if (hasArg(rest, "-R") or hasArg(rest, "--reverse")) "Unstaging" else "Staging";
-    if (eq(u8, verb, "restore") or eq(u8, verb, "clean")) return "Discarding";
-    if (eq(u8, verb, "checkout")) return if (hasArg(rest, "--")) "Discarding" else "Switching";
-    if (eq(u8, verb, "switch")) return "Switching";
-    if (eq(u8, verb, "rm")) return "Removing";
-    if (eq(u8, verb, "mv")) return "Renaming";
-    if (eq(u8, verb, "commit")) return "Committing";
-    if (eq(u8, verb, "stash")) return "Stashing";
-    if (eq(u8, verb, "merge")) return "Merging";
-    if (eq(u8, verb, "rebase")) return "Rebasing";
-    if (eq(u8, verb, "cherry-pick")) return "Cherry-picking";
-    if (eq(u8, verb, "revert")) return "Reverting";
-    return "Updating";
-}
-
-fn hasArg(args: []const []const u8, arg: []const u8) bool {
-    for (args) |a| if (std.mem.eql(u8, a, arg)) return true;
-    return false;
-}
-
-fn refreshWork() void {
-    if (@import("builtin").is_test) return reloadWork();
-    if (repo == null) return;
-    if (work_load != null) {
-        work_again = true;
-        return;
-    }
-    const load = gpa.create(WorkLoad) catch return;
-    load.* = .{ .path = gpa.dupe(u8, repo_path.items) catch {
-        gpa.destroy(load);
-        return;
-    }, .gen = work_gen };
-    work_load = load;
-    load.future = app_io.concurrent(WorkLoad.run, .{load}) catch blk: {
-        load.run();
-        break :blk null;
-    };
-}
-
-/// Once a frame, before anything draws: swap a finished read in, if it is
-/// still the newest. True when one landed.
-fn collectWorkLoad() bool {
-    const load = work_load orelse return false;
-    if (!load.done.load(.acquire)) return false;
-    work_load = null;
-    defer load.free();
-    defer if (work_again) {
-        work_again = false;
-        refreshWork();
-    };
-    if (repo == null or !std.mem.eql(u8, load.path, repo_path.items) or load.gen != work_gen) return false;
-    // The newest read is in, whatever it found.
-    work_settling = false;
-    var next = load.work orelse return false;
-    load.work = null;
-    // Nothing changed — the usual answer, on a timer or a watcher's word —
-    // and nothing is drawn again. Except the open file's diff: its lines can
-    // change with its status staying "modified".
-    if (work) |w| if (sameWork(w, next)) {
-        next.deinit();
-        if (selection != .change) return false;
-        diff_stale = true;
-        return true;
-    };
-    swapWork(next);
-    // The old snapshot just went: its pages back now, not at some later trim.
-    trimHeap();
-    return true;
-}
-
-fn sameWork(a: git.Work, b: git.Work) bool {
-    for ([_][2][]const git.Change{ .{ a.staged, b.staged }, .{ a.unstaged, b.unstaged } }) |pair| {
-        if (pair[0].len != pair[1].len) return false;
-        for (pair[0], pair[1]) |x, y| {
-            if (x.status != y.status or !std.mem.eql(u8, x.path, y.path) or !std.mem.eql(u8, x.old_path, y.old_path)) return false;
-        }
-    }
-    return true;
-}
-
-/// What a tab shows while its history is read — on opening it, and on coming
-/// back to it: Zit's mark, breathing, over the repository's name, the way
-/// GitKraken shows its own while it reads a repository.
-fn loadingScreen() void {
-    var area = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = true,
-        .color_fill = .{ .color = style.background() },
-    });
-    defer area.deinit();
-    var stack = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 0.5, .gravity_y = 0.45, .background = false });
-    defer stack.deinit();
-
-    // One breath every 1.2 s: a few pixels bigger and back, inside a box
-    // that does not move, so the name under it stays put.
-    const period_ms = 1200;
-    const t: f32 = @floatFromInt(@mod(@divTrunc(dvui.frameTimeNS(), std.time.ns_per_ms), period_ms));
-    const breath = 0.5 - 0.5 * @cos(t / period_ms * 2 * std.math.pi);
-    const size: f32 = 64;
-    const d = size - 10 * (1 - breath);
-    {
-        var frame = dvui.box(@src(), .{}, .{
-            .gravity_x = 0.5,
-            .min_size_content = .{ .w = size, .h = size },
-            .max_size_content = .size(.{ .w = size, .h = size }),
-            .background = false,
-        });
-        defer frame.deinit();
-        _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = @embedFile("brand/zit-icon-256.png"), .name = "zit" } }, .shrink = .both }, .{
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .min_size_content = .{ .w = d, .h = d },
-            .max_size_content = .size(.{ .w = d, .h = d }),
-        });
-    }
-    dvui.label(@src(), "Loading {s}…", .{repo_name}, .{
-        .font = style.small(),
-        .color_text = .{ .color = style.textMuted() },
-        .gravity_x = 0.5,
-        .margin = .{ .y = style.space.md },
-    });
-    // The next breath, a few times a second; the history's landing wakes the
-    // window by itself.
-    animateEvery(area.data().id, 80);
-}
-
-/// No motion dvui would add by itself: a hover's wash fading in over 0.12 s,
-/// a pane sliding shut. Each is frames at the display's rate for nothing a
-/// git client says; a wash that snaps on says the same.
-fn stillUi() void {
-    dvui.reduce_motion = true;
-    dvui.hover_fade_secs = 0;
-}
-
-/// The next step of an animation, `ms` from now: a timer, not a refresh — a
-/// refresh draws again at once, as fast as the display goes, for something
-/// that moves a few times a second.
-pub fn animateEvery(id: dvui.Id, ms: u32) void {
-    if (dvui.timerDoneOrNone(id)) dvui.timer(id, @intCast(ms * 1000));
-}
-
-fn historyLoading() bool {
-    return graph_view.history_load != null and history == null;
-}
-
-/// How many of the newest commits CI is asked about.
-const CI_COMMITS = 40;
-/// And how many pull requests' heads, on top.
-const CI_REQUESTS = 30;
-
-/// Ask the host what CI made of the newest commits; `pr` paces it.
-fn askCi() void {
-    if (@import("builtin").is_test) return;
-    const h = history orelse return;
-    var shas: [CI_COMMITS + CI_REQUESTS]pr.Sha = undefined;
-    // Typed: against a comptime constant `@min` narrows to the smallest type
-    // that holds it — a u6 for 40 — and the requests' heads counted on top
-    // overflowed it, the moment a repository had enough open requests.
-    var n: usize = @min(h.commits.len, CI_COMMITS);
-    for (h.commits[0..n], 0..) |commit, i| {
-        var hex: [41]u8 = undefined;
-        @memcpy(&shas[i], git.oidHex(commit.id, &hex)[0..40]);
-    }
-    // And the pull requests' heads, for their rows' checks.
-    for (pr.list) |req| {
-        if (n == shas.len) break;
-        if (req.sha.len != 40) continue;
-        @memcpy(&shas[n], req.sha[0..40]);
-        n += 1;
-    }
-    pr.ciRefresh(repo_path.items, shas[0..n], frame_now_s);
-}
-
-/// Re-list the open pull requests, if the repository is on GitHub.
-pub fn refreshRequests() void {
-    repo_slug.clearRetainingCapacity();
-    if (history == null or !tab_strip.integrations) return pr.refresh(repo_path.items, .none, "");
-    // The first remote on GitHub, `origin` before the others.
-    const found = firstRemote([]const u8, struct {
-        fn pick(r: git.Remote) ?[]const u8 {
-            return avatars.githubSlug(r.url);
-        }
-    }.pick);
-    if (found) |s| repo_slug.appendSlice(gpa, s) catch {};
-    pr.refresh(repo_path.items, if (found != null) .github else .none, repo_slug.items);
-    pr.refreshIssues(repo_path.items);
-}
-
-/// What `pick` makes of the first remote it makes anything of — `origin`
-/// before the others, then in the order they are listed.
-fn firstRemote(comptime T: type, comptime pick: fn (git.Remote) ?T) ?T {
-    const h = history orelse return null;
-    for (h.remotes) |r| {
-        if (std.mem.eql(u8, r.name, "origin")) if (pick(r)) |v| return v;
-    }
-    for (h.remotes) |r| if (pick(r)) |v| return v;
-    return null;
-}
-
-/// "owner/repo" of the remote a GitHub repository is known by — origin if it
-/// is on GitHub, else the first one that is.
-pub fn githubRemote() ?[]const u8 {
-    return firstRemote([]const u8, struct {
-        fn pick(r: git.Remote) ?[]const u8 {
-            return avatars.githubSlug(r.url);
-        }
-    }.pick);
-}
-
-/// Whether anything here is tracked through LFS.
-///
-/// Checked once, on open: `.gitattributes` naming the lfs filter is how a
-/// repository declares it, and that does not change while you work in one.
-fn detectLfs() void {
-    tab_strip.uses_lfs = false;
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs = std.fmt.bufPrint(&path_buf, "{s}.gitattributes", .{repo_path.items}) catch return;
-
-    // Having no `.gitattributes` at all is the common case, not an error.
-    const text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(1 << 20)) catch return;
-    defer gpa.free(text);
-
-    tab_strip.uses_lfs = std.mem.indexOf(u8, text, "filter=lfs") != null;
-}
-
-/// Ask for a folder and open whatever repository contains it.
-fn promptOpenRepo() void {
-    dialog_views.pickFolder(.open_repo, "Open a repository", if (repo_path.items.len > 0) repo_path.items else null);
-}
-
-// === Reading ===
-
-/// Refs, commits and lanes. Built into locals and swapped in at the end, so a
-/// failed read leaves the previous graph on screen rather than an empty pane.
-pub fn reloadHistory() void {
-    const r = repo orelse return;
-    graph_view.history_gen +%= 1;
-
-    var next_history = r.readHistoryFiltered(gpa, graph_view.graphFilter()) catch {
-        setCommandError(git.lastError());
-        return;
-    };
-    var next_lanes = graph.build(gpa, next_history.commits, next_history.head_oid) catch {
-        next_history.deinit();
-        setCommandError("Out of memory laying out the graph.");
-        return;
-    };
-
-    if (history) |*h| h.deinit();
-    if (lanes) |*l| l.deinit();
-    history = next_history;
-    lanes = next_lanes;
-    _ = &next_history;
-    _ = &next_lanes;
-    graph_view.history_seq +%= 1;
-    diff_view.dropStaleSelection();
-    rebase_view.readOpInfo();
-
-    if (graph_view.file_history.items.len > 0) graph_view.markFileHistory();
-    // The old snapshot just went: give its pages back now rather than at the
-    // next timed trim, or every refresh shows as a spike of a few seconds.
-    trimHeap();
-}
-
-fn reloadWork() void {
-    const r = repo orelse return;
-    work_gen +%= 1;
-    const next = r.readWork(gpa) catch return;
-    swapWork(next);
-}
-
-fn swapWork(next: git.Work) void {
-    if (work) |*w| w.deinit();
-    work = next;
-    commit_view.work_version +%= 1;
-
-    if (open_first_conflict) {
-        open_first_conflict = false;
-        for (next.unstaged) |change| {
-            if (change.status != .conflicted) continue;
-            active_view = .graph;
-            selectChange(change.path, .unstaged);
-            break;
-        }
-    }
-
-    // A commit's diff cannot change, so only the working-tree side is worth
-    // re-reading — and this runs on the poll timer.
-    switch (selection) {
-        .change => diff_stale = true,
-        else => {},
-    }
-}
-
-/// glibc's `mallopt`, for the arena count; null elsewhere, as `malloc_trim`.
-const mallopt: ?*const fn (c_int, c_int) callconv(.c) c_int = if (@import("builtin").os.tag == .linux and @import("builtin").abi.isGnu())
-    @extern(*const fn (c_int, c_int) callconv(.c) c_int, .{ .name = "mallopt" })
-else
-    null;
-const M_ARENA_MAX: c_int = -8;
-const M_MMAP_THRESHOLD: c_int = -3;
-
-/// glibc's `malloc_trim`: hands the heap's free pages back to the system.
-/// glibc keeps what is freed for reuse, and a client that rebuilds its
-/// snapshots every poll frees a lot — so without this the RSS shows the
-/// high-water mark of every refresh since start, not what is in use.
-const malloc_trim: ?*const fn (usize) callconv(.c) c_int = if (@import("builtin").os.tag == .linux and @import("builtin").abi.isGnu())
-    @extern(*const fn (usize) callconv(.c) c_int, .{ .name = "malloc_trim" })
-else
-    null;
-
-pub fn trimHeap() void {
-    if (malloc_trim) |trim| _ = trim(0);
-}
-
-/// Runs every `POLL_INTERVAL_US`. Re-reads the working tree always — that is
-/// what notices a file you just saved — and the history only when HEAD has
-/// actually moved, which is what notices a commit or checkout you made in a
-/// terminal.
-fn poll() void {
-    const r = repo orelse return;
-    // The first read is still out on its thread; reading it again here would
-    // only do the same work twice, on the UI thread.
-    if (graph_view.history_load != null) return refreshWork();
-
-    refreshWork();
-    autoFetch();
-
-    const now = r.headOid();
-    const known = if (history) |h| h.head_oid else null;
-    const moved = if (now) |a|
-        if (known) |b| !git.oidEql(a, b) else true
-    else
-        known != null;
-
-    // A checkout of another branch at the same commit moves no oid, but it is
-    // still a move: the branch shown, and the reflog entry Undo takes back.
-    const name_now = r.headBranch(gpa) catch null;
-    defer if (name_now) |n| gpa.free(n);
-    const name_known = if (history) |h| h.head else null;
-    const switched = if (name_now) |a|
-        if (name_known) |b| !std.mem.eql(u8, a, b) else true
-    else
-        name_known != null;
-
-    // A reset to the commit HEAD is already on moves neither: only the
-    // reflog says so, and it is what Undo would act on.
-    const move_now = r.readLastMove(gpa);
-    defer if (move_now) |m| gpa.free(m.message);
-    const move_known = if (history) |h| h.last_move else null;
-    const logged = if (move_now) |a|
-        if (move_known) |b| !git.oidEql(a.old, b.old) or !std.mem.eql(u8, a.message, b.message) else true
-    else
-        move_known != null;
-
-    // A merge stopped on a conflict in a terminal moves none of the three:
-    // only the repository's state says it is under way.
-    const state_changed = if (history) |h| r.state() != h.state else false;
-
-    if (moved or switched or logged or state_changed) graph_view.refreshHistory();
-}
-
-/// The quiet fetch, when it is due and nothing else is running.
-fn autoFetch() void {
-    // Tests drive their own fetches; one arriving on its own would race them.
-    if (@import("builtin").is_test) return;
-    if (tab_strip.auto_fetch_minutes == 0 or tab_strip.job != null or action != .none) return;
-    if (frame_now_s - tab_strip.last_auto_fetch_s < @as(i64, tab_strip.auto_fetch_minutes) * 60) return;
-    tab_strip.last_auto_fetch_s = frame_now_s;
-    const h = history orelse return;
-    if (h.remotes.len == 0) return;
-    requestNetwork("Fetching", tab_strip.fetchAllArgs(true));
-    tab_strip.job_quiet = action == .network;
-}
-
-/// The desktop's own terminal, in the repository's folder: `$TERMINAL` if
-/// set, else the first of the usual ones found, told the folder outright
-/// where it takes it — a profile's start folder would win over the one it
-/// was started in. Through `sh` and in the background, so it leaves no child
-/// of Zit's behind.
-pub fn openTerminal() void {
-    if (repo == null) return;
-    // Windows Terminal where there is one, the console otherwise; `start`
-    // gives either its own window and returns.
-    // The one picked in the settings first — only ever one of
-    // `known_terminals`, so a name safe in a command line.
-    const chosen = std.mem.trim(u8, tab_strip.terminal_cmd.items, " ");
-    const windows_line: []const u8 = if (std.mem.eql(u8, chosen, "wt"))
-        "start wt -d ."
-    else if (std.mem.eql(u8, chosen, "pwsh"))
-        "start pwsh"
-    else if (std.mem.eql(u8, chosen, "powershell"))
-        "start powershell"
-    else if (std.mem.eql(u8, chosen, "cmd"))
-        "start cmd"
-    else
-        "where wt >nul 2>nul && start wt -d . || start cmd";
-    const argv: []const []const u8 = if (@import("builtin").os.tag == .windows)
-        &.{ "cmd.exe", "/s", "/c", windows_line }
-    else
-        &.{
-            "sh", "-c",
-            \\for t in "$1" "$TERMINAL" x-terminal-emulator konsole gnome-terminal kitty alacritty wezterm foot ghostty xfce4-terminal tilix xterm; do
-            \\  [ -n "$t" ] && command -v "$t" >/dev/null 2>&1 || continue
-            \\  case "${t##*/}" in
-            \\    konsole) set -- --workdir "$PWD" ;;
-            \\    gnome-terminal|xfce4-terminal|alacritty) set -- --working-directory "$PWD" ;;
-            \\    kitty) set -- --directory "$PWD" ;;
-            \\    wezterm) set -- start --cwd "$PWD" ;;
-            \\    foot) set -- -D "$PWD" ;;
-            \\    tilix) set -- -w "$PWD" ;;
-            \\    *) set -- ;;
-            \\  esac
-            \\  "$t" "$@" >/dev/null 2>&1 &
-            \\  exit 0
-            \\done
-            \\exit 1
-            ,
-            "sh", chosen,
-        };
-    const ok = run.launch(app_io, repo_path.items, argv) catch return setCommandError("Could not start a terminal.");
-    if (!ok) setCommandError("No terminal found. Set $TERMINAL to the one you use.");
-}
-
-// === Writing ===
-
-/// What this frame asked the repository to do.
-///
-/// Nothing mutates the repository while the frame is being built. Every panel
-/// iterates slices that live inside a snapshot arena (`History`, `Work`), and
-/// any git command throws those arenas away and builds new ones — so a button
-/// that ran `git add` in place left the loop around it walking freed memory.
-/// One action is collected here and run in `runAction`, after the last widget.
-const Action = enum {
-    none,
-    /// `action_argv[0..action_argc]`, copied in by `request`.
-    run,
-    commit,
-    confirmed,
-    prompt,
-    resolve,
-    /// Every region that resolves on its own, in the open file.
-    resolve_safe,
-    /// The open file as it was before its last pick.
-    undo_resolve,
-    /// The open file whole, as `action_side` has it, staged.
-    take_file,
-    /// The open file staged, nothing left in it, and on to the next.
-    stage_next,
-    rebase,
-    network,
-    tabs,
-    refresh,
-    open_repo,
-    close_repo,
-    /// The clone or create dialog's button, and its Browse button.
-    repo_dialog,
-    browse_parent,
-    /// The drop menu's answer, for `drop`.
-    drop,
-    /// The forget dialog's yes.
-    forget,
-    /// Apply or pop of the stash in `stash_pending`, by `stash_verb`.
-    stash,
-};
-
-pub var action: Action = .none;
-var action_argv: [8][]const u8 = undefined;
-var action_argc: usize = 0;
-/// Holds the pending command's arguments: the callers build them in buffers
-/// on their own stack, or in a snapshot a command throws away, and the
-/// command runs after both are gone.
-var action_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-
-/// Copy `args` in as the pending command's. False, with the error said, when
-/// there was no memory for it.
-fn setArgv(args: []const []const u8) bool {
-    std.debug.assert(args.len <= action_argv.len);
-    _ = action_arena.reset(.retain_capacity);
-    for (args, 0..) |a, i| {
-        action_argv[i] = action_arena.allocator().dupe(u8, a) catch {
-            setCommandError("Out of memory.");
-            return false;
-        };
-    }
-    action_argc = args.len;
-    return true;
-}
-/// Fed to the pending command's standard input, owned. Set by `requestHunk`
-/// and freed by `runAction` — one action per frame means one buffer.
-pub var action_input: ?[]u8 = null;
-/// What the tab strip asked for.
-///
-/// Deferred like every other mutation: these rebuild the very lists the strip
-/// is iterating at the moment it asks.
-const TabAction = union(enum) {
-    none,
-    select: usize,
-    close: usize,
-    select_group: usize,
-    close_group: usize,
-    /// Group, tab.
-    select_in: [2]usize,
-    close_in: [2]usize,
-    group_toggle: usize,
-    /// Group, colour.
-    group_color: [2]usize,
-    ungroup: usize,
-    /// Group, tab, the group it goes to.
-    tab_to: [3]usize,
-    tab_out: [2]usize,
-    /// Group, tab, then the group and slot it was dragged to.
-    tab_at: [4]usize,
-    /// A tab let go past the last one: out of its group, at the end.
-    tab_end: [2]usize,
-    /// A repository picked out of the menu of known ones, owned — the list it
-    /// came from is about to be rebuilt underneath it.
-    open: []u8,
-    select_ws: usize,
-    close_ws: usize,
-    /// The workspace dialog answered: what it holds is applied.
-    workspace_named,
-};
-
-var tab_action: TabAction = .none;
-/// The group — and tab — a group prompt is about: the tab a new group
-/// starts with, the group being renamed.
-var group_target: [2]usize = .{ 0, 0 };
-
-/// Which conflict region the pending `.resolve` applies to, and how.
-var action_conflict: usize = 0;
-pub var action_side: git.ConflictSide = .ours;
-
-/// Ask for `git <args...>` once the frame is built.
-pub fn request(args: []const []const u8) void {
-    // First one wins. Two mutations in one frame is not something a person
-    // does, and the second would run against a tree the first just changed.
-    if (action != .none) return;
-    if (!setArgv(args)) return;
-    action = .run;
-}
-
-pub fn requestAction(kind: Action) void {
-    if (action == .none) action = kind;
-}
-
-/// Returns true when it did something, so the caller knows to draw again.
-fn runAction() bool {
-    const pending = action;
-    action = .none;
-
-    switch (pending) {
-        .none => return false,
-        .run => {
-            gitDoInput(action_argv[0..action_argc], action_input);
-            if (action_input) |patch| gpa.free(patch);
-            action_input = null;
-        },
-        .commit => doCommit(),
-        .confirmed => runConfirmed(),
-        .prompt => runPrompt(),
-        .resolve => runResolve(),
-        .resolve_safe => runResolveSafe(),
-        .undo_resolve => runUndoResolve(),
-        .take_file => runTakeFile(),
-        .stage_next => runStageNext(),
-        .rebase => runRebase(),
-        .network => startJob(),
-        .tabs => runTabAction(),
-        .refresh => {
-            graph_view.refreshHistory();
-            workChanged("Refreshing");
-        },
-        .open_repo => promptOpenRepo(),
-        .repo_dialog => dialog_views.submitRepoDialog(),
-        .browse_parent => dialog_views.browseParent(),
-        .drop => graph_view.runDrop(),
-        .forget => dialog_views.runForget(),
-        .close_repo => dialog_views.closeRepo(),
-        .stash => rebase_view.stashDo(rebase_view.stash_verb, &rebase_view.stash_pending),
-    }
-
-    return true;
-}
-
-/// Ask for `git <args...>` on another thread once the frame is built.
-///
-/// For the commands that talk to a remote, and for the local ones that can
-/// take a while: switching branch, stashing, committing — which runs the
-/// hooks and the signing. Waited for on the UI thread, any of them froze the
-/// window on Windows. The quick ones go through `request`, which finishes
-/// before it returns: one code path that completes synchronously is worth
-/// more than making all of them look alike.
-pub fn requestNetwork(label: []const u8, args: []const []const u8) void {
-    if (action != .none) return;
-    // The toolbar says one is running, but a held key or a double click can
-    // still arrive before the frame showing that — and a click while a quiet
-    // fetch runs would otherwise vanish without a word.
-    if (tab_strip.job != null) return setCommandError(BUSY);
-    if (!setArgv(args)) return;
-    tab_strip.job_label = label;
-    action = .network;
-}
-
-const BUSY = "Another command is still running. Try again when it finishes.";
 
 // === GitHub, acted on ===
 //
@@ -2008,7 +1270,7 @@ var api_gone_number: u32 = 0;
 var api_gone_state: []const u8 = "";
 
 /// `owner/name` on GitHub of the open repository; empty when it is not there.
-var repo_slug: std.ArrayList(u8) = .empty;
+pub var repo_slug: std.ArrayList(u8) = .empty;
 
 /// `/repos/<owner>/<name>` followed by `fmt`, into `buf`; null when the
 /// repository is not on GitHub.
@@ -2086,7 +1348,7 @@ fn collectApi() void {
     // does not keep the list from being read again.
     if (failed != null and api_then == .branch_after_merge) {
         if (api_queue.items.len > 0) return startNextApi();
-        refreshRequests();
+        repo_io.refreshRequests();
         if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
         return;
     }
@@ -2125,15 +1387,15 @@ fn collectApi() void {
         new_tab_open = false;
         pr_filter = .open;
         active_view = .pulls;
-        refreshRequests();
+        repo_io.refreshRequests();
         return selectRequest(n);
     }
-    refreshRequests();
+    repo_io.refreshRequests();
     if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
     if (api_fetch_after) {
         api_fetch_after = false;
-        requestNetwork("Fetching", tab_strip.fetchAllArgs(true));
-        tab_strip.job_quiet = action == .network;
+        repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(true));
+        tab_strip.job_quiet = repo_io.action == .network;
     }
 }
 
@@ -2209,10 +1471,10 @@ fn checkoutRequest(number: u32, branch: []const u8, fork: bool) void {
     if (midOperation()) return setCommandError("Finish or abort what is under way first.");
     if (fork) {
         var spec_buf: [32]u8 = undefined;
-        requestNetwork("Fetching", &.{ "fetch", remote, std.fmt.bufPrint(&spec_buf, "pull/{d}/head", .{number}) catch return });
+        repo_io.requestNetwork("Fetching", &.{ "fetch", remote, std.fmt.bufPrint(&spec_buf, "pull/{d}/head", .{number}) catch return });
         queueRequestBranch(number, branch, remote, true);
     } else {
-        requestNetwork("Fetching", &.{ "fetch", remote, branch });
+        repo_io.requestNetwork("Fetching", &.{ "fetch", remote, branch });
         queueRequestBranch(number, branch, remote, false);
     }
 }
@@ -2244,7 +1506,7 @@ fn resolveRequestLocally(d: pr.Detail, rebase: bool) void {
     if (work) |w| if (w.staged.len > 0 or hasTrackedChanges(w)) {
         return setCommandError("Commit or stash your changes first: the branch is about to change under them.");
     };
-    requestNetwork("Fetching", &.{ "fetch", remote, d.base, d.head });
+    repo_io.requestNetwork("Fetching", &.{ "fetch", remote, d.base, d.head });
     queueRequestBranch(d.number, d.head, remote, false);
     var base_buf: [512]u8 = undefined;
     const base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ remote, d.base }) catch return;
@@ -2271,7 +1533,7 @@ var job_steps: std.ArrayList(JobStep) = .empty;
 
 fn queueStep(label: []const u8, args: []const []const u8) void {
     // Only behind a job that was queued.
-    if (action != .network) return clearJobSteps();
+    if (repo_io.action != .network) return clearJobSteps();
     const argv = gpa.alloc([]u8, args.len) catch return clearJobSteps();
     for (args, 0..) |arg, i| {
         argv[i] = gpa.dupe(u8, arg) catch {
@@ -2310,16 +1572,16 @@ pub fn openOnGithub(comptime tail: []const u8, args: anytype) void {
     openUrl(buf[0 .. head.len + rest.len]);
 }
 
-fn startJob() void {
+pub fn startJob() void {
     // Copied by the job, and owned here either way.
-    defer if (action_input) |bytes| {
+    defer if (repo_io.action_input) |bytes| {
         gpa.free(bytes);
-        action_input = null;
+        repo_io.action_input = null;
     };
     const after = action_after;
     action_after = .remote;
     if (repo == null or tab_strip.job != null) return;
-    tab_strip.job = run.Job.start(gpa, app_io, repo_path.items, action_argv[0..action_argc], .{ .input = action_input }) catch {
+    tab_strip.job = run.Job.start(gpa, app_io, repo_path.items, repo_io.action_argv[0..repo_io.action_argc], .{ .input = repo_io.action_input }) catch {
         setCommandError("Could not start git.");
         tab_strip.job_label = "";
         // Left set, the next job's failure would be swallowed as a quiet one.
@@ -2345,8 +1607,8 @@ var action_after: JobAfter = .remote;
 
 /// As `requestNetwork`, for a command of the repository's own.
 pub fn requestLocal(label: []const u8, args: []const []const u8) void {
-    requestNetwork(label, args);
-    if (action == .network) action_after = .local;
+    repo_io.requestNetwork(label, args);
+    if (repo_io.action == .network) action_after = .local;
 }
 
 /// Start a networked command now, from inside `runAction` — for the ones that
@@ -2354,8 +1616,8 @@ pub fn requestLocal(label: []const u8, args: []const []const u8) void {
 /// deferred action.
 fn startNetwork(label: []const u8, args: []const []const u8) void {
     // A confirmed force push dropped here has to say so.
-    if (tab_strip.job != null) return setCommandError(BUSY);
-    if (!setArgv(args)) return;
+    if (tab_strip.job != null) return setCommandError(repo_io.BUSY);
+    if (!repo_io.setArgv(args)) return;
     tab_strip.job_label = label;
     startJob();
 }
@@ -2363,7 +1625,7 @@ fn startNetwork(label: []const u8, args: []const []const u8) void {
 /// As `startNetwork`, for a command of the repository's own, with what to
 /// do once it lands.
 pub fn startLocal(label: []const u8, args: []const []const u8, after: JobAfter) void {
-    if (tab_strip.job != null) return setCommandError(BUSY);
+    if (tab_strip.job != null) return setCommandError(repo_io.BUSY);
     action_after = after;
     startNetwork(label, args);
 }
@@ -2419,7 +1681,7 @@ fn collectJob() void {
     tab_strip.job = null;
     // Its words go on over the changes while they are read again after it.
     // A literal, as every job's label is: it outlives the job.
-    command_label = if (tab_strip.job_label.len > 0) tab_strip.job_label else "Reading the changes";
+    repo_io.command_label = if (tab_strip.job_label.len > 0) tab_strip.job_label else "Reading the changes";
     tab_strip.job_label = "";
     const quiet = tab_strip.job_quiet;
     tab_strip.job_quiet = false;
@@ -2458,7 +1720,7 @@ fn collectJob() void {
         } else clearJobSteps();
     }
     // Whatever went to the remote may have opened, merged or closed one.
-    refreshRequests();
+    repo_io.refreshRequests();
     if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
 }
 
@@ -2487,8 +1749,8 @@ fn applyOutcome(outcome: ?run.Outcome) void {
     // moving it — a fetch being the obvious one, and a merge that stopped on a
     // conflict being the one that hides its controls if this is skipped.
     graph_view.refreshHistory();
-    workChanged(command_label);
-    command_label = "Reading the changes";
+    repo_io.workChanged(repo_io.command_label);
+    repo_io.command_label = "Reading the changes";
 }
 
 /// Whether a failed command stopped a merge, rebase, cherry-pick or revert
@@ -2504,7 +1766,7 @@ fn stoppedAtConflict(message: []const u8) bool {
 
 /// Set when an operation stopped at a conflict: the first conflicted file
 /// is opened as soon as the changes are read again.
-var open_first_conflict = false;
+pub var open_first_conflict = false;
 
 /// Run a git command in the repository and fold the result back into the UI.
 pub fn gitDo(args: []const []const u8) void {
@@ -2513,11 +1775,11 @@ pub fn gitDo(args: []const []const u8) void {
 
 /// As `gitDo`, with `input` on the command's standard input — which is how a
 /// single hunk is staged: `git apply --cached -` reading a patch Zit rebuilt.
-fn gitDoInput(args: []const []const u8, input: ?[]const u8) void {
+pub fn gitDoInput(args: []const []const u8, input: ?[]const u8) void {
     if (repo == null) return;
 
     const outcome = run.gitInput(gpa, app_io, repo_path.items, args, input) catch null;
-    command_label = commandLabel(args);
+    repo_io.command_label = repo_io.commandLabel(args);
     applyOutcome(outcome);
 }
 
@@ -2596,7 +1858,7 @@ pub fn beginRebase(onto: ?git.Oid) void {
 }
 
 /// Hand the composed list to `git rebase -i` and let it run.
-fn runRebase() void {
+pub fn runRebase() void {
     const r = repo orelse return;
     if (rebase_steps.items.len == 0) return;
 
@@ -2665,22 +1927,22 @@ pub fn closeShownTab() void {
     } else requestTab(.{ .close = tab_strip.active_tab });
 }
 
-pub fn requestTab(what: TabAction) void {
-    if (action != .none) return;
-    tab_action = what;
-    action = .tabs;
+pub fn requestTab(what: repo_io.TabAction) void {
+    if (repo_io.action != .none) return;
+    repo_io.tab_action = what;
+    repo_io.action = .tabs;
 }
 
 pub fn requestOpenKnown(path: []const u8) void {
-    if (action != .none) return;
+    if (repo_io.action != .none) return;
     const owned = gpa.dupe(u8, path) catch return;
-    tab_action = .{ .open = owned };
-    action = .tabs;
+    repo_io.tab_action = .{ .open = owned };
+    repo_io.action = .tabs;
 }
 
-fn runTabAction() void {
-    const what = tab_action;
-    tab_action = .none;
+pub fn runTabAction() void {
+    const what = repo_io.tab_action;
+    repo_io.tab_action = .none;
 
     switch (what) {
         .none => {},
@@ -2714,19 +1976,19 @@ fn runTabAction() void {
 }
 
 pub fn requestResolve(index: usize, side: git.ConflictSide) void {
-    if (action != .none) return;
-    action_conflict = index;
-    action_side = side;
-    action = .resolve;
+    if (repo_io.action != .none) return;
+    repo_io.action_conflict = index;
+    repo_io.action_side = side;
+    repo_io.action = .resolve;
 }
 
 /// Rewrite the conflicted file with one region replaced by the chosen side.
 ///
 /// Nothing is staged here. The file still has to look right, and marking it
 /// resolved is a separate, deliberate click — same as resolving in an editor.
-fn runResolve() void {
-    if (action_conflict >= conflicts.len) return;
-    const next = git.resolveConflict(gpa, conflict_text, conflicts[action_conflict], action_side) catch {
+pub fn runResolve() void {
+    if (repo_io.action_conflict >= conflicts.len) return;
+    const next = git.resolveConflict(gpa, conflict_text, conflicts[repo_io.action_conflict], repo_io.action_side) catch {
         setCommandError("Out of memory resolving that conflict.");
         return;
     };
@@ -2738,7 +2000,7 @@ fn runResolve() void {
 /// changed it, line by line at the finest. The file written in one pass —
 /// one region at a time was a copy of all of it for each, 345 ms for 250
 /// regions of a 1.3 MB lockfile.
-fn runResolveSafe() void {
+pub fn runResolveSafe() void {
     const with = gpa.alloc(?[]const u8, conflicts.len) catch return;
     defer gpa.free(with);
     @memset(with, null);
@@ -2752,7 +2014,7 @@ fn runResolveSafe() void {
 }
 
 /// U and Ctrl+Z in a conflicted file: the file as it was before the last pick.
-fn runUndoResolve() void {
+pub fn runUndoResolve() void {
     const step = resolve_undo.pop() orelse return;
     defer step.deinit(gpa);
     const previous = (git.spliceUndo(gpa, conflict_text, step) catch return) orelse {
@@ -2799,19 +2061,19 @@ fn writeConflictFile(next: []const u8, keep_undo: bool) bool {
     // The offsets of every region after the one just resolved have moved, so
     // the list is rebuilt rather than patched.
     diff_stale = true;
-    workChanged("Resolving");
+    repo_io.workChanged("Resolving");
     return true;
 }
 
 /// The whole file as one side has it, staged: `checkout --ours` or
 /// `--theirs`, then `add` — or, where that side deleted it, `rm`. The
 /// next conflicted file opens after it.
-fn runTakeFile() void {
+pub fn runTakeFile() void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (selected_path.items.len > path_buf.len) return;
     @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
     const file = path_buf[0..selected_path.items.len];
-    const side = action_side;
+    const side = repo_io.action_side;
 
     const deleted = (conflict_kind == .deleted_by_us and side == .ours) or (conflict_kind == .deleted_by_them and side == .theirs);
     if (deleted) {
@@ -2827,11 +2089,11 @@ fn runTakeFile() void {
     if (tab_strip.command_error != null) return;
     clearResolveUndo();
     open_first_conflict = true;
-    workChanged("Resolving");
+    repo_io.workChanged("Resolving");
 }
 
 /// A file with nothing left to resolve, staged, and the next one opened.
-fn runStageNext() void {
+pub fn runStageNext() void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (selected_path.items.len > path_buf.len) return;
     @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
@@ -2841,7 +2103,7 @@ fn runStageNext() void {
     if (tab_strip.command_error != null) return;
     clearResolveUndo();
     open_first_conflict = true;
-    workChanged("Resolving");
+    repo_io.workChanged("Resolving");
 }
 
 /// Take back whatever last moved HEAD, as the reflog tells it.
@@ -2862,7 +2124,7 @@ pub fn requestUndo() void {
     const what = std.mem.trim(u8, move.message, " \r\n");
     redo_what_len = @min(what.len, redo_what.len);
     @memcpy(redo_what[0..redo_what_len], what[0..redo_what_len]);
-    request(args);
+    repo_io.request(args);
 }
 
 /// HEAD before the last undo Zit made, while that undo can be redone.
@@ -2930,7 +2192,7 @@ pub fn checkout(ref: git.Ref) void {
 
     // A job, with its pill in the status bar: rewriting the working tree takes
     // long enough on Windows to freeze the window if it is waited for here.
-    requestNetwork("Switching branch", &.{ "switch", name });
+    repo_io.requestNetwork("Switching branch", &.{ "switch", name });
 }
 
 pub fn setCommandError(message: []const u8) void {
@@ -2954,7 +2216,7 @@ pub fn clearConfirm() void {
 }
 
 /// Run whatever was confirmed. Every branch here destroys work on purpose.
-fn runConfirmed() void {
+pub fn runConfirmed() void {
     const c = confirm orelse return;
     switch (c.kind) {
         .discard => doDiscard(c.arg),
@@ -3021,8 +2283,8 @@ fn runConfirmed() void {
         .stage_markers => if (c.arg.len == 0)
             requestLocal("Staging", &.{ "add", "-A" })
         else
-            request(&.{ "--literal-pathspecs", "add", "--", c.arg }),
-        .abort_operation => if (operationCommand()) |cmd| request(&.{ cmd, "--abort" }),
+            repo_io.request(&.{ "--literal-pathspecs", "add", "--", c.arg }),
+        .abort_operation => if (operationCommand()) |cmd| repo_io.request(&.{ cmd, "--abort" }),
         .skip_step => if (operationCommand()) |cmd| requestLocal("Skipping", &.{ cmd, "--skip" }),
         // `checkout -m` writes the conflict again from the index's three
         // stages: every pick made in the file goes.
@@ -3093,7 +2355,7 @@ pub fn splitPair(text: []const u8) ?[2][]const u8 {
 /// Where a branch or tag goes when nothing says otherwise: `origin` if there is
 /// one, else the first remote. Null when there are none.
 pub fn defaultRemote() ?[]const u8 {
-    return firstRemote([]const u8, struct {
+    return repo_io.firstRemote([]const u8, struct {
         fn pick(r: git.Remote) ?[]const u8 {
             return r.name;
         }
@@ -3123,7 +2385,7 @@ pub fn clearPrompt() void {
 
 /// Run the command the name was for. A failure keeps the bar open with the text
 /// still in it, because the usual failure is a name that is already taken.
-fn runPrompt() void {
+pub fn runPrompt() void {
     const p = prompt orelse return;
 
     const name = std.mem.trim(u8, prompt_text.items, " \t");
@@ -3188,11 +2450,11 @@ fn runPrompt() void {
         },
         // Nothing to run and nothing to fail: these only rearrange the strip.
         .new_group => {
-            tab_strip.groupTab(name, group_target[0], group_target[1]);
+            tab_strip.groupTab(name, repo_io.group_target[0], repo_io.group_target[1]);
             return clearPrompt();
         },
         .rename_group => {
-            tab_strip.renameGroup(group_target[0], name);
+            tab_strip.renameGroup(repo_io.group_target[0], name);
             return clearPrompt();
         },
     }
@@ -3260,7 +2522,7 @@ pub fn fillFromHead() void {
     commit_description.appendSlice(gpa, std.mem.trim(u8, whole[nl..], " \t\r\n")) catch {};
 }
 
-fn doCommit() void {
+pub fn doCommit() void {
     if (commit_summary.items.len == 0) return;
 
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -3330,7 +2592,7 @@ fn appFrame() !dvui.App.Result {
     collectApi();
     commit_view.collectRepoConfig();
     dialog_views.takeFolder();
-    if (collectWorkLoad()) dvui.refresh(null, @src(), null);
+    if (repo_io.collectWorkLoad()) dvui.refresh(null, @src(), null);
     if (graph_view.collectHistoryLoad()) dvui.refresh(null, @src(), null);
     updateWindowTitle();
     // A zoom key that reached dvui rather than `shortcuts` — under a modal,
@@ -3371,7 +2633,7 @@ fn appFrame() !dvui.App.Result {
     if (pr.pumpMeta()) dvui.refresh(null, @src(), null);
     if (pr.pumpDetail()) dvui.refresh(null, @src(), null);
     if (pr.ciPump()) dvui.refresh(null, @src(), null);
-    askCi();
+    repo_io.askCi();
 
     // One timer, hung off the root widget's id, is the whole refresh story.
     const poll_id = root.data().id;
@@ -3388,7 +2650,7 @@ fn appFrame() !dvui.App.Result {
         std.log.warn("stopped watching the repository ({d} folders): polling instead", .{w.count.load(.acquire)});
     };
     if (dvui.timerDoneOrNone(poll_id) or refocused or told) {
-        poll();
+        repo_io.poll();
         dvui.timer(poll_id, pollInterval(focused));
     }
 
@@ -3468,7 +2730,7 @@ fn appFrame() !dvui.App.Result {
     // After every widget: see `Action`. The frame just drawn was built from the
     // old snapshot, so ask for another one rather than leaving it on screen
     // until the poll timer comes round.
-    if (runAction()) dvui.refresh(null, @src(), null);
+    if (repo_io.runAction()) dvui.refresh(null, @src(), null);
 
     if (graph_view.graph_filter_dirty or graph_view.authors_dirty) {
         graph_view.graph_filter_dirty = false;
@@ -3518,7 +2780,7 @@ fn contentPane() void {
     }
 
     switch (active_view) {
-        .graph => if (historyLoading()) loadingScreen() else graphView(),
+        .graph => if (repo_io.historyLoading()) repo_io.loadingScreen() else graphView(),
         .pulls => pullsView(),
     }
 }
@@ -3658,7 +2920,7 @@ fn requestList() void {
             prSortMenu();
             if (dialog_views.iconButton(@src(), "pr_new", "Create one for this branch", dvui.entypo.plus, style.textMuted())) rebase_view.requestCreateRequest();
             if (dialog_views.iconButton(@src(), "pr_refresh", "Refresh", dvui.entypo.ccw, style.textMuted())) {
-                refreshRequests();
+                repo_io.refreshRequests();
                 if (pr_filter == .merged or pr_filter == .closed) pr.refreshPast(repo_path.items, if (pr_filter == .merged) .merged else .closed);
             }
         }
@@ -5970,7 +5232,7 @@ fn onRequestBranch(d: pr.Detail) bool {
 fn applySuggestion(number: u32, t: pr.Thread, code: []const u8) void {
     if (applySuggestionTo(dvui.currentWindow().arena(), repo_path.items, t, code)) |message| return setCommandError(message);
     markApplied(number, t.id);
-    workChanged("Applying");
+    repo_io.workChanged("Applying");
 }
 
 /// The suggestions applied here, by their thread's id, for request
@@ -6264,7 +5526,7 @@ fn shortcuts() void {
             }.f;
             if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and canCommit()) break :blk struct {
                 fn f() void {
-                    requestAction(.commit);
+                    repo_io.requestAction(.commit);
                 }
             }.f;
             // With nothing to commit, the same keys go on with what is under
@@ -6272,12 +5534,12 @@ fn shortcuts() void {
             if ((pressed(ke, .enter, true) or pressed(ke, .kp_enter, true)) and canContinue()) break :blk requestContinue;
             if (pressed(ke, .f5, false) or pressed(ke, .r, true)) break :blk struct {
                 fn f() void {
-                    requestAction(.refresh);
+                    repo_io.requestAction(.refresh);
                 }
             }.f;
             if (pressed(ke, .o, true)) break :blk struct {
                 fn f() void {
-                    requestAction(.open_repo);
+                    repo_io.requestAction(.open_repo);
                 }
             }.f;
             if (pressed(ke, .t, true)) break :blk struct {
@@ -6285,7 +5547,7 @@ fn shortcuts() void {
                     new_tab_open = true;
                 }
             }.f;
-            if (pressedShift(ke, .t)) break :blk openTerminal;
+            if (pressedShift(ke, .t)) break :blk repo_io.openTerminal;
             if (pressed(ke, .p, true)) break :blk command_palette.openPalette;
             if (pressed(ke, .comma, true)) break :blk struct {
                 fn f() void {
@@ -6396,13 +5658,13 @@ fn conflictKey(ke: dvui.Event.Key) bool {
     if (pressed(ke, .u, false) or pressed(ke, .z, true)) {
         // Ctrl+Z here never reaches the reflog's undo: mid-merge it would
         // reset under it.
-        if (resolve_undo.items.len > 0) requestAction(.undo_resolve);
+        if (resolve_undo.items.len > 0) repo_io.requestAction(.undo_resolve);
         return true;
     }
     if ((pressed(ke, .enter, false) or pressed(ke, .kp_enter, false)) and conflicts.len == 0 and !conflict_binary and
         conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them)
     {
-        requestAction(.stage_next);
+        repo_io.requestAction(.stage_next);
         return true;
     }
     if (pressed(ke, .f4, false)) {
@@ -6664,8 +5926,8 @@ fn pumpConnect(timer_id: dvui.Id) void {
                 github.saveUser(user.login) catch {};
                 connect_state = .done;
                 window_chrome.me_loaded = false;
-                if (!tab_strip.integrations) tab_strip.setIntegrations(true) else refreshRequests();
-                avatars.setGithubRepo(githubRemote());
+                if (!tab_strip.integrations) tab_strip.setIntegrations(true) else repo_io.refreshRequests();
+                avatars.setGithubRepo(repo_io.githubRemote());
                 if (connect_fills_identity) {
                     connect_fills_identity = false;
                     identity_view.identity_note = if (identity_view.fillFromGithub()) "Filled in from your GitHub account." else "Connected.";
@@ -6822,7 +6084,7 @@ fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.pencil, "Rename the group…", false)) {
         fw.close();
-        group_target = .{ g, 0 };
+        repo_io.group_target = .{ g, 0 };
         openWorkspaceDialog(.group_rename);
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.squared_minus, "Ungroup", false)) {
@@ -7041,8 +6303,8 @@ fn openWorkspaceDialog(kind: WorkspaceDialog) void {
         ws_name.appendSlice(gpa, tab_strip.workspaces.items[tab_strip.active_ws].name) catch {};
         ws_color = tab_strip.workspaces.items[tab_strip.active_ws].color;
     }
-    if (kind == .group_rename and group_target[0] < tab_strip.groups.items.len) {
-        const group = tab_strip.groups.items[group_target[0]];
+    if (kind == .group_rename and repo_io.group_target[0] < tab_strip.groups.items.len) {
+        const group = tab_strip.groups.items[repo_io.group_target[0]];
         ws_name.appendSlice(gpa, tab_strip.groupLabel(group)) catch {};
         ws_color = group.color;
     }
@@ -7092,12 +6354,12 @@ fn applyWorkspaceDialog() void {
     switch (kind) {
         .new => if (newWorkspace(name, ws_color)) |w| selectWorkspace(w),
         .with_tab => if (newWorkspace(name, ws_color)) |w| {
-            moveTabToWorkspace(group_target[0], group_target[1], w);
+            moveTabToWorkspace(repo_io.group_target[0], repo_io.group_target[1], w);
             selectWorkspace(w);
         },
         .group => {
-            const g0 = group_target[0];
-            const t0 = group_target[1];
+            const g0 = repo_io.group_target[0];
+            const t0 = repo_io.group_target[1];
             if (g0 >= tab_strip.groups.items.len or t0 >= tab_strip.groups.items[g0].tabs.items.len) return;
             // Found again by its tab: the group it left may go, empty.
             const tab = tab_strip.groups.items[g0].tabs.items[t0].path.ptr;
@@ -7108,7 +6370,7 @@ fn applyWorkspaceDialog() void {
             tab_strip.saveWorkspace();
         },
         .group_rename => {
-            const g = group_target[0];
+            const g = repo_io.group_target[0];
             // Only a group: tabs in no group are not renamed into one.
             if (g >= tab_strip.groups.items.len or tab_strip.groups.items[g].name.len == 0) return;
             tab_strip.groups.items[g].color = ws_color;
@@ -7149,7 +6411,7 @@ pub fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
 
     if (graph_view.menuIcon(@src(), dvui.entypo.plus, "Add to a new group…", false)) {
         fw.close();
-        group_target = .{ g, t };
+        repo_io.group_target = .{ g, t };
         openWorkspaceDialog(.group);
     }
     for (tab_strip.groups.items, 0..) |other, gi| {
@@ -7178,7 +6440,7 @@ pub fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.plus, "Move to a new workspace…", false)) {
         fw.close();
-        group_target = .{ g, t };
+        repo_io.group_target = .{ g, t };
         openWorkspaceDialog(.with_tab);
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.cross, "Close", false)) {
@@ -7761,7 +7023,7 @@ fn confirmToast() void {
     defer line.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialog_views.linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
-    if (dialog_views.alertButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) requestAction(.confirmed);
+    if (dialog_views.alertButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) repo_io.requestAction(.confirmed);
 }
 
 /// The button that does what the toast asks, named for it.
@@ -7942,8 +7204,8 @@ fn prCreateDialog() void {
         dialog_views.alertText(@src(), if (missing) "The branch is not on the remote yet: push it first." else "Some commits are not pushed yet: push them first.", orange);
         if (dialog_views.alertButton(@src(), "Push", orange, "pr_new:push")) {
             if (on_head) {
-                requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
-            } else if (defaultRemote()) |remote| requestNetwork("Pushing", &.{ "push", "-u", remote, head });
+                repo_io.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+            } else if (defaultRemote()) |remote| repo_io.requestNetwork("Pushing", &.{ "push", "-u", remote, head });
         }
     }
 
@@ -8984,15 +8246,15 @@ test "stage, commit and switch branches through the real git commands" {
     // Requesting must not touch the repository: the UI is still iterating the
     // snapshot at that point. This is the use-after-free rule, as a test.
     const before = work.?.unstaged.ptr;
-    request(&.{ "add", "-A" });
+    repo_io.request(&.{ "add", "-A" });
     try std.testing.expectEqual(before, work.?.unstaged.ptr);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
 
     // Switch to a branch whose name would be read as a path by `checkout --`.
     gitDo(&.{ "branch", "hello.txt" });
     const branch = findRef("hello.txt") orelse return error.BranchNotListed;
     checkout(branch);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("hello.txt", history.?.head.?);
@@ -9002,7 +8264,7 @@ test "stage, commit and switch branches through the real git commands" {
     // And back.
     const main_branch = findRef("main") orelse return error.BranchNotListed;
     checkout(main_branch);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqualStrings("main", history.?.head.?);
 }
@@ -9371,7 +8633,7 @@ test "staging one hunk moves that hunk and leaves the other alone" {
         try std.testing.expectEqual(@as(u32, 2), unstaged.files[0].hunk_count);
 
         rebase_view.requestHunk(unstaged.files[0], 0, .unstaged);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
@@ -9391,7 +8653,7 @@ test "staging one hunk moves that hunk and leaves the other alone" {
         // And back out again. The reverse apply is a different command, and
         // getting its direction wrong stages more rather than less.
         rebase_view.requestHunk(staged.files[0], 0, .staged);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
@@ -9528,7 +8790,7 @@ test "down and up walk the history, and the commit pane follows" {
     // goes back to the working tree rather than a commit with no message.
     selectCommit(history.?.commits[0].id);
     try expectGit(dir, &.{ "commit", "-q", "--amend", "--allow-empty", "-m", "three, again" });
-    reloadHistory();
+    repo_io.reloadHistory();
     try std.testing.expect(selection == .none);
 }
 
@@ -9885,7 +9147,7 @@ test "mid-merge, staging markers and aborting are asked first, and undo is refus
     // Undo would reset under the merge.
     requestUndo();
     try std.testing.expect(tab_strip.command_error != null);
-    try std.testing.expectEqual(@as(Action, .none), action);
+    try std.testing.expectEqual(@as(repo_io.Action, .none), repo_io.action);
     try std.testing.expectEqual(git.State.merge, history.?.state);
     clearCommandError();
 
@@ -9894,7 +9156,7 @@ test "mid-merge, staging markers and aborting are asked first, and undo is refus
     try std.testing.expect(confirm != null and confirm.?.kind == .abort_operation);
     try std.testing.expectEqual(git.State.merge, history.?.state);
     runConfirmed();
-    _ = runAction();
+    _ = repo_io.runAction();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
 }
@@ -9928,7 +9190,7 @@ test "a pick refuses to write over a file changed since it was shown" {
     const edited = "edited elsewhere\n";
     try tmp.dir.writeFile(app_io, .{ .sub_path = "lines.txt", .data = edited });
     requestResolve(0, .ours);
-    _ = runAction();
+    _ = repo_io.runAction();
     try std.testing.expect(tab_strip.command_error != null);
 
     const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(1024));
@@ -10033,7 +9295,7 @@ test "a rebase stopped on a conflict says where it is, and continues" {
     try std.testing.expect(opNext() == .proceed);
     try std.testing.expect(canContinue());
     requestContinue();
-    _ = runAction();
+    _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
@@ -10130,7 +9392,7 @@ test "a pull request is checked out tracking its branch, brought up to date, and
 
     // Not here yet: made, tracking the remote's.
     checkoutRequest(3, "feat", false);
-    _ = runAction();
+    _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("feat", history.?.head.?);
@@ -10139,9 +9401,9 @@ test "a pull request is checked out tracking its branch, brought up to date, and
     // Here but behind: switched to, and brought up to date.
     try expectGit(down, &.{ "reset", "-q", "--hard", "HEAD~1" });
     try expectGit(down, &.{ "switch", "-q", "main" });
-    reloadHistory();
+    repo_io.reloadHistory();
     checkoutRequest(3, "feat", false);
-    _ = runAction();
+    _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("feat", history.?.head.?);
@@ -10149,9 +9411,9 @@ test "a pull request is checked out tracking its branch, brought up to date, and
 
     // From a fork, its branch named "main": on pr/7, and main left alone.
     try expectGit(down, &.{ "switch", "-q", "main" });
-    reloadHistory();
+    repo_io.reloadHistory();
     checkoutRequest(7, "main", true);
-    _ = runAction();
+    _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("pr/7", history.?.head.?);
@@ -10193,7 +9455,7 @@ test "a pull request in conflict is rebased onto its base here, stopping at the 
     defer clearCommandError();
 
     resolveRequestLocally(.{ .number = 3, .head = "feat", .base = "main", .mergeable = "CONFLICTING" }, true);
-    _ = runAction();
+    _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.rebase, history.?.state);
@@ -10337,8 +9599,8 @@ test "a conflict of changes on neighbouring lines is resolved safely, with its b
     try std.testing.expect(git.sameText("a = 1\nb = 2\nc = 3\n", conflicts[0].base));
     try std.testing.expectEqual(@as(?git.AutoReason, .lines_apart), conflict_autos[0]);
 
-    requestAction(.resolve_safe);
-    _ = runAction();
+    repo_io.requestAction(.resolve_safe);
+    _ = repo_io.runAction();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     const now = try tmp.dir.readFileAlloc(app_io, "n.txt", gpa, .limited(4096));
     defer gpa.free(now);
@@ -10379,7 +9641,7 @@ test "a file deleted on one side is kept or deleted in one click" {
 
     // "Delete it": the side that deleted it.
     rebase_view.takeFile(.theirs);
-    _ = runAction();
+    _ = repo_io.runAction();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 0), dialog_views.conflictCount());
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(app_io, "notes.txt", .{}));
@@ -10430,7 +9692,7 @@ test "a conflict is resolved region by region, then staged" {
     try std.testing.expectEqualStrings("other\n", conflicts[0].theirs);
 
     requestResolve(0, .ours);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     // Our side is what landed, and no marker survived it.
@@ -10579,8 +9841,8 @@ test "a branch named like a tag merges the branch, not the tag" {
     var ref_buf: [512]u8 = undefined;
     try std.testing.expectEqualStrings("main", graph_view.refArg(&ref_buf, "main", .local));
 
-    request(&.{ "merge", "--no-edit", "--no-ff", graph_view.refArg(&ref_buf, "v1", .local) });
-    try std.testing.expect(runAction());
+    repo_io.request(&.{ "merge", "--no-edit", "--no-ff", graph_view.refArg(&ref_buf, "v1", .local) });
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 2), history.?.commits[0].parents.len);
 }
@@ -10911,8 +10173,8 @@ test "a networked command runs off the UI thread and folds its result in" {
     defer dialog_views.closeRepo();
     defer clearCommandError();
 
-    requestNetwork("Fetching", &.{ "fetch", "origin" });
-    try std.testing.expect(runAction());
+    repo_io.requestNetwork("Fetching", &.{ "fetch", "origin" });
+    try std.testing.expect(repo_io.runAction());
 
     const started = tab_strip.job orelse return error.NoJobStarted;
     // Ran inline on this thread instead: every fetch would freeze the window.
@@ -10967,14 +10229,14 @@ test "the branch knows how far it is from its upstream" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "down/b.txt", .data = "b\n" });
     try expectGit(down, &.{ "add", "-A" });
     try expectGit(down, &.{ "commit", "-qm", "local work" });
-    reloadHistory();
+    repo_io.reloadHistory();
 
     try std.testing.expectEqual(@as(usize, 1), history.?.tracking.ahead);
     try std.testing.expectEqual(@as(usize, 0), history.?.tracking.behind);
 
     // A branch with no upstream at all says nothing rather than guessing.
     try expectGit(down, &.{ "checkout", "-q", "-b", "solo" });
-    reloadHistory();
+    repo_io.reloadHistory();
     try std.testing.expectEqual(@as(?[]const u8, null), history.?.tracking.upstream);
     try std.testing.expectEqual(@as(usize, 0), history.?.tracking.ahead);
 }
@@ -11056,8 +10318,8 @@ test "a command that lands after the repository changed is discarded, not report
     defer dialog_views.closeRepo();
     defer clearCommandError();
 
-    requestNetwork("Fetching", &.{ "fetch", "origin" });
-    try std.testing.expect(runAction());
+    repo_io.requestNetwork("Fetching", &.{ "fetch", "origin" });
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expect(tab_strip.job != null);
 
     // Away before it lands.
@@ -11380,7 +10642,7 @@ test "a group is made in a dialog, with its colour and no name" {
     tab_strip.loadWorkspace();
     tab_strip.openAndRemember(a);
 
-    group_target = .{ 0, 0 };
+    repo_io.group_target = .{ 0, 0 };
     openWorkspaceDialog(.group);
     try std.testing.expect(ws_dialog == .group);
     try std.testing.expect(prompt == null);
@@ -11396,7 +10658,7 @@ test "a group is made in a dialog, with its colour and no name" {
     try std.testing.expectEqualStrings("", tab_strip.groupLabel(tab_strip.groups.items[0]));
 
     // Named, then the name taken off again: still a group, its dot alone.
-    group_target = .{ 0, 0 };
+    repo_io.group_target = .{ 0, 0 };
     openWorkspaceDialog(.group_rename);
     try std.testing.expectEqual(@as(u8, 4), ws_color);
     ws_name.appendSlice(gpa, " Client ") catch unreachable;
@@ -11510,7 +10772,7 @@ test "First-parent shows the mainline through a merge, All branches the side bra
     try std.testing.expectEqual(@as(usize, 3), history.?.commits.len);
 
     graph_view.graph_first_parent = true;
-    reloadHistory();
+    repo_io.reloadHistory();
     try std.testing.expectEqual(@as(usize, 2), history.?.commits.len);
     for (history.?.commits) |c| try std.testing.expect(!std.mem.eql(u8, c.summary, "on the side"));
     // The merge is still a merge, drawn without a line to the side.
@@ -11521,15 +10783,15 @@ test "First-parent shows the mainline through a merge, All branches the side bra
 fn answerPrompt(text: []const u8) !void {
     prompt_text.clearRetainingCapacity();
     try prompt_text.appendSlice(gpa, text);
-    requestAction(.prompt);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.prompt);
+    try std.testing.expect(repo_io.runAction());
 }
 
 /// Say yes to the open confirmation.
 fn answerConfirm() !void {
     try std.testing.expect(confirm != null);
-    requestAction(.confirmed);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.confirmed);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?Confirm, null), confirm);
 }
 
@@ -11599,7 +10861,7 @@ test "renames, a named stash and a forced delete go through git" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "third\n" });
     try expectGit(dir, &.{ "stash", "push", "-m", "newest" });
     rebase_view.requestStash("pop", newer);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     const popped = try tmp.dir.readFileAlloc(app_io, "a.txt", gpa, .limited(64));
@@ -11616,7 +10878,7 @@ test "renames, a named stash and a forced delete go through git" {
     try expectGit(dir, &.{ "add", "-A" });
     try expectGit(dir, &.{ "commit", "-qm", "only here" });
     try expectGit(dir, &.{ "switch", "-q", "main" });
-    reloadHistory();
+    repo_io.reloadHistory();
 
     gitDo(&.{ "branch", "-d", "lost" });
     try std.testing.expect(tab_strip.command_error != null);
@@ -11664,7 +10926,7 @@ test "a hunk is discarded alone, and a file comes back from a commit" {
     try std.testing.expectEqualStrings("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\ntwelve\n", after);
 
     try expectGit(dir, &.{ "commit", "-qam", "twelve" });
-    reloadHistory();
+    repo_io.reloadHistory();
     const base = findCommit("base") orelse return error.CommitNotFound;
 
     var arg_buf: [64]u8 = undefined;
@@ -11772,7 +11034,7 @@ test "ignoring a file appends it to .gitignore and it drops out of the changes" 
     // `a1.txt` the bare pattern would have meant.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a[1].txt", .data = "x\n" });
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a1.txt", .data = "x\n" });
-    reloadWork();
+    repo_io.reloadWork();
     commit_view.ignorePath("a[1].txt");
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 2), work.?.unstaged.len);
@@ -11810,8 +11072,8 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     defer clearCommandError();
 
     // The toolbar's push, on a branch with no upstream yet.
-    requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
-    try std.testing.expect(runAction());
+    repo_io.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("origin/feat") != null);
@@ -11819,7 +11081,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
 
     // Rewrite what was pushed, and force it over.
     try expectGit(down, &.{ "commit", "-q", "--amend", "-m", "rewritten" });
-    reloadHistory();
+    repo_io.reloadHistory();
     ask(.force_push, "");
     try answerConfirm();
     try pumpJob();
@@ -11840,9 +11102,9 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     }
 
     try expectGit(down, &.{ "tag", "v1" });
-    reloadHistory();
-    requestNetwork("Pushing", &.{ "push", defaultRemote().?, "v1" });
-    try std.testing.expect(runAction());
+    repo_io.reloadHistory();
+    repo_io.requestNetwork("Pushing", &.{ "push", defaultRemote().?, "v1" });
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try expectGit(up, &.{ "rev-parse", "--verify", "-q", "refs/tags/v1" });
 
@@ -11929,7 +11191,7 @@ test "fetch, and each pull the menu offers, through the toolbar" {
     // Both sides move: rebasing puts the local commit back on top.
     try commitFile(&tmp, up, "up/c.txt", "upstream three");
     try commitFile(&tmp, down, "down/d.txt", "local one");
-    reloadHistory();
+    repo_io.reloadHistory();
     try dvui.testing.settle(frameArrowCursor);
     try clickAt(try tagCenter("toolbar:pull_menu"));
     try clickAt(try tagCenter("menu:Pull, rebasing local commits"));
@@ -11941,7 +11203,7 @@ test "fetch, and each pull the menu offers, through the toolbar" {
     // And again: merging joins the two in a merge commit, no editor asked for.
     try commitFile(&tmp, up, "up/e.txt", "upstream four");
     try commitFile(&tmp, down, "down/f.txt", "local two");
-    reloadHistory();
+    repo_io.reloadHistory();
     try dvui.testing.settle(frameArrowCursor);
     try clickAt(try tagCenter("toolbar:pull_menu"));
     try clickAt(try tagCenter("menu:Pull, merging"));
@@ -12065,7 +11327,7 @@ test "cherry-pick and revert from a commit's menu, a merge's too" {
 
     // A merge of feat, reverted: its change against main goes, the merge stays.
     try expectGit(dir, &.{ "merge", "-q", "--no-ff", "--no-edit", "-m", "merge feat", "feat" });
-    reloadHistory();
+    repo_io.reloadHistory();
     try dvui.testing.settle(frameArrowCursor);
     try rightClickAt(try commitCenter("merge feat"));
     try clickAt(try tagCenter("menu:Revert"));
@@ -12100,7 +11362,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
 
     // Stashed, then applied from its row: the change back, the stash kept.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "edited\n" });
-    reloadWork();
+    repo_io.reloadWork();
     try dvui.testing.settle(frameArrowCursor);
     try clickAt(try tagCenter("toolbar:Stash"));
     try pumpJobFrame();
@@ -12912,8 +12174,8 @@ test "a clone opens in a tab" {
     dialog_views.dialog_parent.clearRetainingCapacity();
     try dialog_views.dialog_parent.appendSlice(gpa, try absPath(&root_abs_buf, root));
     try dialog_views.dialog_name.appendSlice(gpa, "cloned");
-    requestAction(.repo_dialog);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.repo_dialog);
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(std.mem.endsWith(u8, repo_path.items, "cloned/"));
@@ -12954,32 +12216,32 @@ test "undo takes back a commit and a checkout, and undoing an undo redoes" {
 
     requestUndo();
     // The commit by its full sha: seven characters can be ambiguous.
-    try std.testing.expectEqual(@as(usize, 40), action_argv[2].len);
-    try std.testing.expect(runAction());
+    try std.testing.expectEqual(@as(usize, 40), repo_io.action_argv[2].len);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findCommit("second") == null);
     // Nothing lost: what the commit carried is staged again.
     try std.testing.expectEqual(@as(usize, 1), work.?.staged.len);
 
     requestUndo();
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expect(findCommit("second") != null);
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
 
     // Switched outside Zit, at the same commit: the poll still notices, so
     // Undo takes back the switch and not the redo before it.
     try expectGit(dir, &.{ "switch", "-q", "-c", "elsewhere" });
-    poll();
+    repo_io.poll();
     try std.testing.expectEqualStrings("elsewhere", history.?.head.?);
     requestUndo();
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("main", history.?.head.?);
 
     // A reset outside Zit onto the commit HEAD is already on: same oid, same
     // branch, and still the move Undo has to see.
     try expectGit(dir, &.{ "reset", "-q", "HEAD" });
-    poll();
+    repo_io.poll();
     try std.testing.expect(std.mem.startsWith(u8, history.?.last_move.?.message, "reset:"));
 }
 
@@ -13008,10 +12270,10 @@ test "redo takes back the last undo, and only while nothing has moved since" {
     clearCommandError();
 
     requestUndo();
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expect(findCommit("second") == null);
     requestRedo();
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findCommit("second") != null);
     // Redone once; a second redo has nothing to take back.
@@ -13021,9 +12283,9 @@ test "redo takes back the last undo, and only while nothing has moved since" {
 
     // Undone, then something else moves HEAD: the redo is gone with it.
     requestUndo();
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try expectGit(dir, &.{ "commit", "-qm", "another" });
-    poll();
+    repo_io.poll();
     try std.testing.expect(!canRedo());
     requestRedo();
     try std.testing.expect(tab_strip.command_error != null);
@@ -13218,7 +12480,7 @@ test "search terms: fields, dates, and path and code through git" {
     // the hits for "code:needle" have landed, and the query does not change.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "src/b.ts", .data = "const needle = 1;\nconst needle2 = 2;\n" });
     try expectGit(dir, &.{ "commit", "-qam", "more needles" });
-    reloadHistory();
+    repo_io.reloadHistory();
     var waited: usize = 0;
     search_view.updateSearchHits();
     while ((!search_view.search_hits.ready or search_view.search_hits.seq != graph_view.history_seq or search_view.search_hits.running != null) and waited < 500) : (waited += 1) {
@@ -13440,7 +12702,7 @@ test "changes picked together are stashed or staged together, and only they" {
     try std.testing.expectEqual(@as(usize, 2), commit_view.pickedIn(.unstaged, work.?.unstaged));
     commit_view.requestPicked(.stash, .unstaged, work.?.unstaged);
     try std.testing.expectEqual(@as(usize, 0), commit_view.picked_changes.items.len);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
@@ -13449,7 +12711,7 @@ test "changes picked together are stashed or staged together, and only they" {
 
     // Back, then two of the three staged.
     rebase_view.requestStash("pop", history.?.stashes[0].id);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqual(@as(usize, 3), work.?.unstaged.len);
     commit_view.toggleChangePick(.unstaged, "b.txt");
@@ -13460,7 +12722,7 @@ test "changes picked together are stashed or staged together, and only they" {
     commit_view.toggleChangePick(.unstaged, "b.txt");
     commit_view.toggleChangePick(.unstaged, "c.txt");
     commit_view.requestPicked(.stage, .unstaged, work.?.unstaged);
-    try std.testing.expect(runAction());
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(usize, 2), work.?.staged.len);
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
     try std.testing.expectEqualStrings("a.txt", work.?.unstaged[0].path);
@@ -13495,7 +12757,7 @@ test "picked lines of a new file go into the index alone" {
             if (l.kind == .addition and !std.mem.eql(u8, l.text, "two")) rebase_view.togglePicked(i, file.lines.len);
         }
         rebase_view.requestLines(file, 0, .unstaged, false);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
@@ -13531,11 +12793,11 @@ test "picked lines are staged and unstaged alone" {
     selectChange("f.txt", .unstaged);
     ensureDiff();
     rebase_view.togglePicked(1, diff.?.files[0].lines.len);
-    poll();
+    repo_io.poll();
     ensureDiff();
     try std.testing.expect(rebase_view.isPicked(1));
     try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "one\n2\nthree\nfour\n" });
-    poll();
+    repo_io.poll();
     ensureDiff();
     try std.testing.expect(!rebase_view.isPicked(1));
     try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "one\n2\nthree\n" });
@@ -13554,7 +12816,7 @@ test "picked lines are staged and unstaged alone" {
         }
         try std.testing.expectEqual(@as(usize, 2), rebase_view.pickedInHunk(file, 0));
         rebase_view.requestLines(file, 0, .unstaged, false);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
@@ -13579,7 +12841,7 @@ test "picked lines are staged and unstaged alone" {
             if (l.kind == .addition or l.kind == .deletion) rebase_view.togglePicked(i, show.files[0].lines.len);
         }
         rebase_view.requestLines(show.files[0], 0, .staged, false);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     var none = try r.readWorkDiff(gpa, .staged, "f.txt");
@@ -13596,14 +12858,14 @@ test "picked lines are staged and unstaged alone" {
         var d = try r.readWorkDiff(gpa, .unstaged, "f.txt");
         defer d.deinit();
         rebase_view.requestHunk(d.files[0], 0, .unstaged);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     {
         var d = try r.readWorkDiff(gpa, .staged, "f.txt");
         defer d.deinit();
         rebase_view.requestHunk(d.files[0], 0, .staged);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     {
@@ -13614,7 +12876,7 @@ test "picked lines are staged and unstaged alone" {
             if (l.kind == .addition and std.mem.eql(u8, l.text, "4")) rebase_view.togglePicked(i, d.files[0].lines.len);
         }
         rebase_view.requestLines(d.files[0], 0, .unstaged, false);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     var nonl_rest = try r.readWorkDiff(gpa, .unstaged, "f.txt");
@@ -13630,7 +12892,7 @@ test "picked lines are staged and unstaged alone" {
         var d = try r.readWorkDiff(gpa, .unstaged, "f.txt");
         defer d.deinit();
         rebase_view.requestHunk(d.files[0], 0, .unstaged);
-        try std.testing.expect(runAction());
+        try std.testing.expect(repo_io.runAction());
     }
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     var crlf_rest = try r.readWorkDiff(gpa, .unstaged, "f.txt");
@@ -13640,19 +12902,19 @@ test "picked lines are staged and unstaged alone" {
     // A staged rename is two paths, and unstaging takes back both.
     try expectGit(dir, &.{ "commit", "-qm", "c" });
     try expectGit(dir, &.{ "mv", "f.txt", "[g].txt" });
-    reloadWork();
+    repo_io.reloadWork();
     const moved = work.?.staged[0];
     try std.testing.expectEqualStrings("[g].txt", moved.path);
     try std.testing.expectEqualStrings("f.txt", moved.old_path);
-    request(&.{ "--literal-pathspecs", "reset", "-q", "--", moved.path, moved.old_path });
-    try std.testing.expect(runAction());
+    repo_io.request(&.{ "--literal-pathspecs", "reset", "-q", "--", moved.path, moved.old_path });
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
 
     // Which leaves it renamed on disk only. Discarding that brings the old
     // name back and takes the new one away — and `[g].txt` is a name, not a
     // glob that would also clean the untracked `g.txt` beside it.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "g.txt", .data = "decoy\n" });
-    reloadWork();
+    repo_io.reloadWork();
     const renamed = for (work.?.unstaged) |ch| {
         if (std.mem.eql(u8, ch.path, "[g].txt")) break ch;
     } else return error.RenameNotListed;
@@ -13702,7 +12964,7 @@ test "discarding everything stops at a restore that failed, and needs none for u
     const ro = try std.fmt.bufPrint(&ro_buf, "{s}/ro", .{dir});
     try expectRun(&.{ "chmod", "555", ro });
     defer expectRun(&.{ "chmod", "755", ro }) catch {};
-    reloadWork();
+    repo_io.reloadWork();
     doDiscard("");
     try std.testing.expect(tab_strip.command_error != null);
     const kept = try tmp.dir.readFileAlloc(app_io, "u.txt", gpa, .limited(64));
@@ -13712,7 +12974,7 @@ test "discarding everything stops at a restore that failed, and needs none for u
     // Untracked files alone: nothing for `restore` to name, and no error for it.
     try expectRun(&.{ "chmod", "755", ro });
     try expectGit(dir, &.{ "checkout", "--", "ro/f.txt" });
-    reloadWork();
+    repo_io.reloadWork();
     doDiscard("");
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(app_io, "u.txt", gpa, .limited(64)));
@@ -13801,8 +13063,8 @@ test "the new repository dialog makes the folder, the first commit, and a tab" {
     defer run.env_override = null;
     try std.testing.expect(dialog_views.dialog_readme);
 
-    requestAction(.repo_dialog);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.repo_dialog);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(dialog_views.RepoDialog.none, dialog_views.repo_dialog);
     try std.testing.expect(repo != null);
     try std.testing.expect(std.mem.endsWith(u8, repo_path.items, "fresh/"));
@@ -13816,11 +13078,11 @@ test "the new repository dialog makes the folder, the first commit, and a tab" {
     dialog_views.dialog_parent.clearRetainingCapacity();
     try dialog_views.dialog_parent.appendSlice(gpa, abs_root);
     try dialog_views.dialog_name.appendSlice(gpa, "fresh");
-    requestAction(.repo_dialog);
-    _ = runAction();
+    repo_io.requestAction(.repo_dialog);
+    _ = repo_io.runAction();
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(dialog_views.RepoDialog.create, dialog_views.repo_dialog);
-    reloadHistory();
+    repo_io.reloadHistory();
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     dialog_views.repo_dialog = .none;
 }
@@ -13854,8 +13116,8 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
     // Merge feat into main, while other is checked out.
     graph_view.setDrop("feat", "main");
     graph_view.drop_action = .merge;
-    requestAction(.drop);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.drop);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("main", history.?.head.?);
     try std.testing.expect(graph_view.drop == null);
@@ -13865,8 +13127,8 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
     // Rebase other onto main.
     graph_view.setDrop("other", "main");
     graph_view.drop_action = .rebase;
-    requestAction(.drop);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.drop);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectGit(dir, &.{ "merge-base", "--is-ancestor", "main", "other" });
 
@@ -13877,16 +13139,16 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
     try expectGit(dir, &.{ "update-ref", "refs/remotes/origin/lone", "feat" });
     try expectGit(dir, &.{ "config", "branch.feat.remote", "origin" });
     try expectGit(dir, &.{ "config", "branch.feat.merge", "refs/heads/up" });
-    reloadHistory();
+    repo_io.reloadHistory();
     graph_view.setDrop("origin/up", "other");
     graph_view.drop_action = .rebase;
-    requestAction(.drop);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.drop);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectGit(dir, &.{ "merge-base", "--is-ancestor", "other", "feat" });
     graph_view.setDrop("origin/lone", "other");
-    requestAction(.drop);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.drop);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expect(tab_strip.command_error != null);
 }
 
@@ -14116,7 +13378,7 @@ test "after the mouse has swept the window, frames stop" {
     app_io = std.testing.io;
     defer resetUiGlobals();
     diff_view.section_collapsed = @splat(false);
-    stillUi();
+    repo_io.stillUi();
     defer {
         dvui.reduce_motion = false;
         dvui.hover_fade_secs = 0.12;
@@ -14418,7 +13680,7 @@ test "a long list of changes is built a screenful at a time, scrolls, and leaves
     }
     openRepo(dir);
     defer dialog_views.closeRepo();
-    reloadWork();
+    repo_io.reloadWork();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -14451,7 +13713,7 @@ test "a long list of changes is built a screenful at a time, scrolls, and leaves
     // Most of them staged while it is scrolled to its end: the shorter list
     // draws, still scrolled past its end for a frame.
     try expectGit(dir, &.{ "add", "src/f-00*", "src/f-01*", "src/f-02*", "src/f-03*", "src/f-04*" });
-    reloadWork();
+    repo_io.reloadWork();
     try dvui.testing.settle(frameArrowCursor);
     try std.testing.expectEqual(@as(usize, 100), work.?.unstaged.len);
     // The file at the top of what is in view is drawn: f-0500 is row 0 now.
@@ -14941,7 +14203,7 @@ test "a history read off the UI thread lands in place of the loading screen" {
         graph_view.history_retired.deinit(gpa);
         graph_view.history_retired = .empty;
     }
-    try std.testing.expect(historyLoading());
+    try std.testing.expect(repo_io.historyLoading());
     {
         var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
         defer t.deinit();
@@ -15059,8 +14321,8 @@ test "a closed tab is remembered, and only forgetting removes it" {
     tab_strip.closeTab(0);
 
     dialog_views.askForget(path);
-    requestAction(.forget);
-    try std.testing.expect(runAction());
+    repo_io.requestAction(.forget);
+    try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(usize, 0), tab_strip.recent.items.len);
     try std.testing.expect(dialog_views.forget_path == null);
     // Nothing on disk went with it.
@@ -15266,7 +14528,7 @@ test "audit: the main controls do what they say when clicked" {
     tab_strip.openAndRemember(a);
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a/one.txt", .data = "one, edited\n" });
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a/two.txt", .data = "two\n" });
-    reloadWork();
+    repo_io.reloadWork();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -15682,7 +14944,7 @@ test "docs screenshots" {
     defer git.shutdown();
     diff_view.section_collapsed = @splat(false);
     diff_view.section_collapsed[@backingInt(diff_view.Section.tags)] = true;
-    stillUi();
+    repo_io.stillUi();
     try window_chrome.me_name.appendSlice(gpa, "Alice Martin");
     try window_chrome.me_email.appendSlice(gpa, "alice@acme.dev");
     window_chrome.me_loaded = true;

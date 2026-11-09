@@ -14,6 +14,7 @@ const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const identity_view = @import("identity_view.zig");
 const repo_settings = @import("repo_settings.zig");
+const repo_io = @import("../core/repo_io.zig");
 const app = @import("../main.zig");
 
 // === Folder picker ===
@@ -86,7 +87,7 @@ pub fn closeRepo() void {
     // A status read still out is not waited for — on a large tree, or on
     // Windows, that is the tab switch frozen. `collectWorkLoad` throws its
     // result away for being another repository's, and frees it.
-    app.releaseStatusCache();
+    repo_io.releaseStatusCache();
     if (app.repo) |*r| r.deinit();
     app.repo = null;
     if (app.history) |*h| h.deinit();
@@ -96,7 +97,7 @@ pub fn closeRepo() void {
     if (app.work) |*w| w.deinit();
     app.work = null;
     commit_view.work_version +%= 1;
-    app.work_settling = false;
+    repo_io.work_settling = false;
 
     app.repo_path.clearAndFree(app.gpa);
     app.repo_name = "";
@@ -280,7 +281,7 @@ pub fn repoDialog() void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
         defer row.deinit();
         _ = dialogInput(@src(), 1, &dialog_parent, "/home/you/dev", false, &entered);
-        if (dialogButton(@src(), "Browse…", false)) app.requestAction(.browse_parent);
+        if (dialogButton(@src(), "Browse…", false)) repo_io.requestAction(.browse_parent);
     }
 
     if (dialogField(@src(), 2, if (cloning) "Folder name" else "Name", &dialog_name, if (cloning) "repo" else "my-project", !cloning, &entered)) {
@@ -336,7 +337,7 @@ pub fn repoDialog() void {
         if (dialogButton(@src(), "Cancel", false)) open = false;
         const ready = dialogReady();
         if ((dialogButton(@src(), if (cloning) "Clone" else "Create repository", true) or entered) and ready) {
-            app.requestAction(.repo_dialog);
+            repo_io.requestAction(.repo_dialog);
         }
     }
 
@@ -566,7 +567,7 @@ pub fn promptDialog() void {
         if (dialogButton(@src(), "Cancel", false)) open = false;
         if (dialogButtonTagged(@src(), app.Prompt.verb(p.kind), true, "prompt:go")) entered = true;
     }
-    if (entered) app.requestAction(.prompt) else if (!open) app.clearPrompt();
+    if (entered) repo_io.requestAction(.prompt) else if (!open) app.clearPrompt();
     // Gone, or answered: the frame that no longer shows it.
     if (entered or !open) dvui.refresh(null, @src(), null);
 }
@@ -1236,7 +1237,7 @@ pub fn forgetDialog() void {
     defer foot.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialogButton(@src(), "Cancel", false)) open = false;
-    if (dialogButton(@src(), "Remove", true)) app.requestAction(.forget);
+    if (dialogButton(@src(), "Remove", true)) repo_io.requestAction(.forget);
 
     if (escapePressed()) open = false;
     if (!open) clearForget();
