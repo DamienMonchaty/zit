@@ -2,6 +2,7 @@ const std = @import("std");
 const dvui = @import("dvui");
 const style = @import("style.zig");
 const git = @import("../git/git.zig");
+const window_chrome = @import("window_chrome.zig");
 const app = @import("../main.zig");
 
 // === Left: refs ===
@@ -103,7 +104,7 @@ fn mergeSidebar() void {
     defer card.deinit();
 
     if (pending > 0) {
-        dvui.label(@src(), "{d} conflicted file{s}", .{ pending, app.plural(pending) }, .{
+        dvui.label(@src(), "{d} conflicted file{s}", .{ pending, window_chrome.plural(pending) }, .{
             .font = style.bodyBold(),
             .color_text = .{ .color = style.text() },
             .padding = dvui.Rect.all(0),

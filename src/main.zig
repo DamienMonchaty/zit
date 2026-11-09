@@ -18,6 +18,7 @@ const watch = @import("git/watch.zig");
 const github = @import("github/github.zig");
 const refs_panel = @import("ui/refs_panel.zig");
 const tab_strip = @import("ui/tab_strip.zig");
+const window_chrome = @import("ui/window_chrome.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -213,15 +214,15 @@ pub var work: ?git.Work = null;
 
 /// Where the three draggable seams sit. The sidebar takes what its branch
 /// names need and no more: about 280px on a 1920px screen.
-var sidebar_split: f32 = 0.15;
+pub var sidebar_split: f32 = 0.15;
 /// The commit list against the detail panel beside it: the list gets two
 /// thirds, the columns need the room more than the panel does.
-var detail_split: f32 = 0.68;
+pub var detail_split: f32 = 0.68;
 /// The two side panels, each hidden by a key (Ctrl+B, Ctrl+J) or from the
 /// palette. Hiding leaves the ratio alone, so the
 /// panel comes back the width it was.
 var show_sidebar: bool = true;
-var show_detail: bool = true;
+pub var show_detail: bool = true;
 /// What a hidden panel's seam points at instead: no room on that side. The
 /// paned widget writes through it while dragging, so these are not consts.
 var no_split: f32 = 0;
@@ -1218,8 +1219,8 @@ fn appInit(win: *dvui.Window) !void {
     // A machine git has never been told who is using it: every commit would
     // fail, so say so before the first one does. Read once, for the avatar's
     // menu as well.
-    loadMe();
-    if (me_name.items.len == 0 or me_email.items.len == 0) openIdentity();
+    window_chrome.loadMe();
+    if (window_chrome.me_name.items.len == 0 or window_chrome.me_email.items.len == 0) openIdentity();
 }
 
 /// The app was called Zync, and its tabs, settings and pictures live under
@@ -1326,7 +1327,7 @@ fn appDeinit(win: *dvui.Window) void {
     file_history.deinit(gpa);
     palette_text.deinit(gpa);
     branch_filter.deinit(gpa);
-    switch_filter.deinit(gpa);
+    window_chrome.switch_filter.deinit(gpa);
     author_filter.deinit(gpa);
     clearNames(&author_only);
     author_only.deinit(gpa);
@@ -1350,7 +1351,7 @@ fn appDeinit(win: *dvui.Window) void {
     clearForget();
     identity_name.deinit(gpa);
     identity_email.deinit(gpa);
-    forgetMe();
+    window_chrome.forgetMe();
     clearDrop();
     drag_source.deinit(gpa);
     picked_lines.deinit(gpa);
@@ -2424,7 +2425,7 @@ fn autoFetch() void {
 /// where it takes it — a profile's start folder would win over the one it
 /// was started in. Through `sh` and in the background, so it leaves no child
 /// of Zit's behind.
-fn openTerminal() void {
+pub fn openTerminal() void {
     if (repo == null) return;
     // Windows Terminal where there is one, the console otherwise; `start`
     // gives either its own window and returns.
@@ -2637,7 +2638,7 @@ fn runAction() bool {
 /// window on Windows. The quick ones go through `request`, which finishes
 /// before it returns: one code path that completes synchronously is worth
 /// more than making all of them look alike.
-fn requestNetwork(label: []const u8, args: []const []const u8) void {
+pub fn requestNetwork(label: []const u8, args: []const []const u8) void {
     if (action != .none) return;
     // The toolbar says one is running, but a held key or a double click can
     // still arrive before the frame showing that — and a click while a quiet
@@ -2991,7 +2992,7 @@ fn clearJobSteps() void {
 }
 
 /// Open `url` in the browser.
-fn openUrl(url: []const u8) void {
+pub fn openUrl(url: []const u8) void {
     run.open(app_io, ".", url) catch setCommandError("Could not open the browser.");
 }
 
@@ -3038,7 +3039,7 @@ var job_after: JobAfter = .remote;
 var action_after: JobAfter = .remote;
 
 /// As `requestNetwork`, for a command of the repository's own.
-fn requestLocal(label: []const u8, args: []const []const u8) void {
+pub fn requestLocal(label: []const u8, args: []const []const u8) void {
     requestNetwork(label, args);
     if (action == .network) action_after = .local;
 }
@@ -3359,7 +3360,7 @@ fn closeShownTab() void {
     } else requestTab(.{ .close = tab_strip.active_tab });
 }
 
-fn requestTab(what: TabAction) void {
+pub fn requestTab(what: TabAction) void {
     if (action != .none) return;
     tab_action = what;
     action = .tabs;
@@ -3539,7 +3540,7 @@ fn runStageNext() void {
 }
 
 /// Take back whatever last moved HEAD, as the reflog tells it.
-fn requestUndo() void {
+pub fn requestUndo() void {
     const h = history orelse return;
     // Mid-rebase the reflog's last move is a step of it, and resetting there
     // leaves the rebase replaying onto the wrong commit: Abort is the undo.
@@ -3567,7 +3568,7 @@ var redo_what_len: usize = 0;
 
 /// Whether Redo has something to take back: an undo made here, and nothing
 /// moved HEAD since.
-fn canRedo() bool {
+pub fn canRedo() bool {
     const h = history orelse return false;
     const from = redo_from orelse return false;
     const move = h.last_move orelse return false;
@@ -3575,14 +3576,14 @@ fn canRedo() bool {
 }
 
 /// Undo's hover: what it would take back, as the reflog says it.
-fn undoHint() []const u8 {
+pub fn undoHint() []const u8 {
     const h = history orelse return "Undo";
     const move = h.last_move orelse return "Nothing to undo yet";
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "Undo \u{201C}{s}\u{201D} — Ctrl+Z", .{std.mem.trim(u8, move.message, " \r\n")}) catch "Undo";
 }
 
 /// Redo's hover: what the last undo took back, or why there is nothing.
-fn redoHint() []const u8 {
+pub fn redoHint() []const u8 {
     if (!canRedo()) return "Nothing to redo: undo something first";
     return std.fmt.allocPrint(dvui.currentWindow().arena(), "Redo \u{201C}{s}\u{201D} — Ctrl+Shift+Z", .{redo_what[0..redo_what_len]}) catch "Redo";
 }
@@ -3590,7 +3591,7 @@ fn redoHint() []const u8 {
 /// Ctrl+Shift+Z: take back the last undo — an undo undone, which is what
 /// `requestUndo` already does to it — and only that: after anything else
 /// has moved HEAD there is nothing to redo.
-fn requestRedo() void {
+pub fn requestRedo() void {
     const h = history orelse return;
     const from = redo_from orelse return setCommandError("Nothing to redo.");
     const move = h.last_move orelse return setCommandError("Nothing to redo.");
@@ -3637,7 +3638,7 @@ fn clearCommandError() void {
     tab_strip.command_error = null;
 }
 
-fn ask(kind: Confirm.Kind, arg: []const u8) void {
+pub fn ask(kind: Confirm.Kind, arg: []const u8) void {
     clearConfirm();
     confirm = .{ .kind = kind, .arg = gpa.dupe(u8, arg) catch return };
 }
@@ -3711,7 +3712,7 @@ fn runConfirmed() void {
             api_gone_state = "CLOSED";
             requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .gone);
         },
-        .sign_out => signOutGithub(c.arg),
+        .sign_out => window_chrome.signOutGithub(c.arg),
         .stage_markers => if (c.arg.len == 0)
             requestLocal("Staging", &.{ "add", "-A" })
         else
@@ -3748,7 +3749,7 @@ fn requestSkipStep() void {
     ask(.skip_step, "");
 }
 
-fn askName(kind: Prompt.Kind, arg: []const u8) void {
+pub fn askName(kind: Prompt.Kind, arg: []const u8) void {
     clearPrompt();
     prompt = .{ .kind = kind, .arg = gpa.dupe(u8, arg) catch return };
 }
@@ -4390,7 +4391,7 @@ fn appFrame() !dvui.App.Result {
         dvui.timer(poll_id, pollInterval(focused));
     }
 
-    if (close_requested) return .close;
+    if (window_chrome.close_requested) return .close;
     for (dvui.events()) |*e| {
         if (e.handled) continue;
         switch (e.evt) {
@@ -4404,7 +4405,7 @@ fn appFrame() !dvui.App.Result {
     // toolbar and sidebar have nothing to say about a tab with none in it.
     const start_page = new_tab_open or repo == null;
     tabStrip();
-    if (!start_page) titlebar();
+    if (!start_page) window_chrome.titlebar();
     // A name asked for in a dialog; a yes or no in a toast low on the
     // right; a dropped branch's merge or rebase in a menu where it fell.
     promptDialog();
@@ -4490,7 +4491,7 @@ fn showWindowOnce() void {
     const back = dvui.currentWindow().backend.impl;
     // Zit's own frame: see `hitTest`.
     _ = dvui.backend.c.SDL_SetWindowBordered(back.window, false);
-    _ = dvui.backend.c.SDL_SetWindowHitTest(back.window, hitTest, null);
+    _ = dvui.backend.c.SDL_SetWindowHitTest(back.window, window_chrome.hitTest, null);
     if (back.window_geometry.state != .normal) _ = dvui.backend.c.SDL_MaximizeWindow(back.window);
     _ = dvui.backend.c.SDL_ShowWindow(back.window);
 }
@@ -4584,8 +4585,8 @@ var pr_search: std.ArrayList(u8) = .empty;
 
 /// Asked to review by the person signed in to the host, and not answered.
 fn waitsOnMe(entry: pr.Request) bool {
-    if (me_gh.items.len == 0) return false;
-    for (entry.reviewers) |r| if (std.ascii.eqlIgnoreCase(r, me_gh.items)) return true;
+    if (window_chrome.me_gh.items.len == 0) return false;
+    for (entry.reviewers) |r| if (std.ascii.eqlIgnoreCase(r, window_chrome.me_gh.items)) return true;
     return false;
 }
 
@@ -4600,7 +4601,7 @@ fn requestShown(entry: pr.Request) bool {
     switch (pr_filter) {
         .open, .merged, .closed => {},
         .review => if (!waitsOnMe(entry)) return false,
-        .mine => if (me_gh.items.len == 0 or !std.ascii.eqlIgnoreCase(entry.author, me_gh.items)) return false,
+        .mine => if (window_chrome.me_gh.items.len == 0 or !std.ascii.eqlIgnoreCase(entry.author, window_chrome.me_gh.items)) return false,
         .drafts => if (!entry.draft) return false,
     }
     const needle = std.mem.trim(u8, pr_search.items, " #");
@@ -4620,7 +4621,7 @@ fn requestList() void {
         .color_fill = .{ .color = style.background() },
     });
     defer panel.deinit();
-    loadMe();
+    window_chrome.loadMe();
     if (pr.pumpPast()) dvui.refresh(null, @src(), null);
 
     const source = requestSource();
@@ -4748,7 +4749,7 @@ fn prFilterMenu() void {
     var mine: usize = 0;
     for (pr.list) |e| {
         drafts += @intFromBool(e.draft);
-        mine += @intFromBool(me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(e.author, me_gh.items));
+        mine += @intFromBool(window_chrome.me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(e.author, window_chrome.me_gh.items));
     }
     const items = [_]struct { PrFilter, []const u8, ?usize }{
         .{ .open, "Open", pr.list.len },
@@ -4762,7 +4763,7 @@ fn prFilterMenu() void {
         if (it[0] == pr_filter) break it;
     } else items[0];
 
-    const button = DropButton.begin(@src(), .{
+    const button = window_chrome.DropButton.begin(@src(), .{
         .tag = "pr:filter",
         .gravity_y = 0.5,
         .background = false,
@@ -4804,7 +4805,7 @@ fn prFilterMenu() void {
 
 /// The list's order, as a menu.
 fn prSortMenu() void {
-    const button = DropButton.begin(@src(), .{
+    const button = window_chrome.DropButton.begin(@src(), .{
         .tag = "pr_sort",
         .gravity_y = 0.5,
         .background = false,
@@ -5093,7 +5094,7 @@ fn requestConversation(d: pr.Detail) void {
             const hue = if (open_threads > 0) style.get().yellow else style.success();
             dvui.icon(@src(), "threads_icon", if (open_threads > 0) dvui.entypo.chat else dvui.entypo.check, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .w = style.space.sm } });
             if (open_threads > 0) {
-                dvui.label(@src(), "{d} open conversation{s}", .{ open_threads, plural(open_threads) }, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+                dvui.label(@src(), "{d} open conversation{s}", .{ open_threads, window_chrome.plural(open_threads) }, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
             } else {
                 dvui.label(@src(), "Every conversation is resolved", .{}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
             }
@@ -5247,7 +5248,7 @@ fn sideHeading(kind: SideKind, d: pr.Detail) void {
         .labels => "Labels",
     };
     const editable = requestOpen(d);
-    var button = DropButton.begin(@src(), .{
+    var button = window_chrome.DropButton.begin(@src(), .{
         .id_extra = id,
         .tag = frameTag("side", caption),
         .expand = .horizontal,
@@ -5681,7 +5682,7 @@ fn plainInline(a: std.mem.Allocator, text: []const u8) []const u8 {
 /// the three ways to send it.
 fn requestComposer() void {
     var row = TimelineRow.begin(90000);
-    row.rail(railAvatar, if (me_gh.items.len > 0) me_gh.items else "you");
+    row.rail(railAvatar, if (window_chrome.me_gh.items.len > 0) window_chrome.me_gh.items else "you");
     defer row.end();
     var card = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .horizontal,
@@ -5709,7 +5710,7 @@ fn requestComposer() void {
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialogButton(@src(), "Comment", false) and text.len > 0) prAnswer(.comment);
     // GitHub refuses a review of your own request: only a comment there.
-    const own = if (pr.detail) |d| me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(d.author, me_gh.items) else false;
+    const own = if (pr.detail) |d| window_chrome.me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(d.author, window_chrome.me_gh.items) else false;
     if (own) return;
     if (dialogButton(@src(), "Request changes", false) and text.len > 0) prAnswer(.request_changes);
     if (dialogButton(@src(), "Approve", true)) prAnswer(.approve);
@@ -5823,7 +5824,7 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         sizeMarks(d.additions, d.deletions);
-        dvui.label(@src(), "{d} file{s}", .{ d.files, plural(d.files) }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
+        dvui.label(@src(), "{d} file{s}", .{ d.files, window_chrome.plural(d.files) }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
     }
     // Reviewers, assignees, labels — here only where the sidebar has no room.
     if (people_inline and d.reviewers.len + d.assignees.len + d.labels.len > 0) {
@@ -6167,17 +6168,17 @@ fn mergeReadiness(d: pr.Detail) void {
         if (std.ascii.eqlIgnoreCase(d.state, "MERGED")) break :blk .{ dvui.entypo.merge, style.get().purple, std.fmt.bufPrint(&buf, "Merged into {s}", .{d.base}) catch "Merged" };
         if (std.ascii.eqlIgnoreCase(d.state, "CLOSED")) break :blk .{ dvui.entypo.block, style.danger(), "Closed without merging" };
         if (std.mem.eql(u8, d.mergeable, "CONFLICTING")) break :blk .{ dvui.entypo.warning, style.danger(), std.fmt.bufPrint(&buf, "Conflicts with {s}: resolve them before it can merge", .{d.base}) catch "" };
-        if (t.failed > 0) break :blk .{ dvui.entypo.cross, style.danger(), std.fmt.bufPrint(&buf, "{d} check{s} failing", .{ t.failed, plural(t.failed) }) catch "" };
+        if (t.failed > 0) break :blk .{ dvui.entypo.cross, style.danger(), std.fmt.bufPrint(&buf, "{d} check{s} failing", .{ t.failed, window_chrome.plural(t.failed) }) catch "" };
         if (std.mem.eql(u8, d.review, "CHANGES_REQUESTED")) break :blk .{ dvui.entypo.cross, style.danger(), changesText(d) };
         if (std.mem.eql(u8, d.merge_state, "BEHIND")) break :blk .{ dvui.entypo.arrow_down, style.get().orange, std.fmt.bufPrint(&buf, "Behind {s}: update the branch first", .{d.base}) catch "" };
         if (std.mem.eql(u8, d.review, "REVIEW_REQUIRED")) break :blk .{ dvui.entypo.eye, style.get().orange, "A review is still needed" };
-        if (t.running > 0) break :blk .{ dvui.entypo.clock, style.get().orange, std.fmt.bufPrint(&buf, "{d} check{s} still running", .{ t.running, plural(t.running) }) catch "" };
+        if (t.running > 0) break :blk .{ dvui.entypo.clock, style.get().orange, std.fmt.bufPrint(&buf, "{d} check{s} still running", .{ t.running, window_chrome.plural(t.running) }) catch "" };
         if (d.draft) break :blk .{ dvui.entypo.pencil, style.textMuted(), "A draft: mark it ready for review to merge it" };
         if (std.mem.eql(u8, d.merge_state, "BLOCKED")) break :blk .{ dvui.entypo.lock, style.get().orange, "Blocked by the branch's protection rules" };
         // GitHub works mergeability out after a push, a while later: until
         // then it says UNKNOWN, which is not a yes.
         if (mergeUnknown(d)) break :blk .{ dvui.entypo.clock, style.textMuted(), "GitHub is still working out whether it can merge…" };
-        break :blk .{ dvui.entypo.check, style.success(), if (t.passed > 0) std.fmt.bufPrint(&buf, "Ready to merge: {d} check{s} passed", .{ t.passed, plural(t.passed) }) catch "" else "Ready to merge" };
+        break :blk .{ dvui.entypo.check, style.success(), if (t.passed > 0) std.fmt.bufPrint(&buf, "Ready to merge: {d} check{s} passed", .{ t.passed, window_chrome.plural(t.passed) }) catch "" else "Ready to merge" };
     };
     var bar = alertBox(@src(), 0, hue, icon, .{ .y = style.space.md, .h = style.space.xs });
     defer bar.deinit();
@@ -6212,7 +6213,7 @@ fn changesText(d: pr.Detail) []const u8 {
     }) catch "Changes were asked for";
     const open = openThreads(d);
     if (open == 0) return head;
-    return std.fmt.allocPrint(a, "{s} · {d} open conversation{s}", .{ head, open, plural(open) }) catch head;
+    return std.fmt.allocPrint(a, "{s} · {d} open conversation{s}", .{ head, open, window_chrome.plural(open) }) catch head;
 }
 
 /// Ask again those who asked for changes, once they are made.
@@ -6431,7 +6432,7 @@ fn requestFiles(d: pr.Detail) void {
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.md } });
         defer line.deinit();
-        dvui.label(@src(), "{d} file{s} changed", .{ d.file_list.len, plural(d.file_list.len) }, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "{d} file{s} changed", .{ d.file_list.len, window_chrome.plural(d.file_list.len) }, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
         if (dialogButton(@src(), "Open the changes", true)) openRequestChanges(d);
     }
     if (d.file_list.len == 0) return emptyNote("The host did not list the files.");
@@ -7102,7 +7103,7 @@ fn prAnswer(kind: PrAnswer) void {
 
 /// The branches panel, unless hidden by hand or squeezed out by the
 /// changes panel being dragged wide.
-fn leftShown() bool {
+pub fn leftShown() bool {
     return show_sidebar and active_view == .graph and !left_squeezed;
 }
 
@@ -7111,7 +7112,7 @@ fn leftShown() bool {
 /// by collapsing under its own minimum.
 var left_squeezed: bool = false;
 /// The width of the window's body, last frame.
-var body_width: f32 = 0;
+pub var body_width: f32 = 0;
 /// Narrower than this, the commit list gives up the branches panel.
 const GRAPH_MIN = 380;
 
@@ -7560,462 +7561,6 @@ fn updateWindowTitle() void {
     cw.backend.title(cw, text);
 }
 
-// === Chrome ===
-
-/// The bar across the top: what is open, what branch it is on, what you can
-/// do to it, and whether it is in sync.
-fn titlebar() void {
-    // Three zones over the three panels below them: the repository over the
-    // branches, the buttons centred over the history they act on, and the
-    // search over the changes panel — GitKraken's top bar, lined up with
-    // what is under it rather than with the window.
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .min_size_content = .{ .h = style.titlebar_height },
-        .padding = .{ .x = style.space.lg, .w = style.space.lg },
-        .border = .{ .h = 1 },
-        .color_border = .{ .color = style.border() },
-        .margin = dvui.Rect.all(0),
-    });
-    defer bar.deinit();
-
-    const zones = toolbarZones();
-    {
-        // Over the sidebar, and wider where a narrow one would cut the
-        // branch's name short: the name before the centring.
-        var left = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .gravity_y = 0.5,
-            .min_size_content = .{ .w = zones.left },
-            .max_size_content = .width(@max(zones.left, branchRoom(zones.left) + BRANCH_CHROME_W)),
-            .background = false,
-        });
-        defer left.deinit();
-        // Undo and Redo at the very start, as GitKraken has them: icons alone,
-        // so the branch beside them keeps its name, each saying on hover what
-        // it would take back; Redo lit only when there is one.
-        if (toolButton(@src(), "Undo", dvui.entypo.reply, .{ .icon_only = true, .hint = undoHint() })) requestUndo();
-        if (toolButton(@src(), "Redo", dvui.entypo.forward, .{ .icon_only = true, .usable = canRedo(), .hint = redoHint() })) requestRedo();
-        toolbarDivider(@src(), 0);
-        // The branch every button acts on; the repository is the tab's.
-        if (repo != null) branchSwitcher();
-    }
-    {
-        // Vertical, so the row of buttons in it can be centred across it: a
-        // horizontal box lays its children end to end and ignores that.
-        var middle = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .background = false });
-        defer middle.deinit();
-        // What Pull and Push would move, straight from the upstream comparison.
-        const tracking: git.Tracking = if (history) |h| h.tracking else .{};
-
-        var tools = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .background = false,
-            .gravity_x = 0.5,
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-            .padding = dvui.Rect.all(0),
-        });
-        // Captions while the row fits over the history, as measured the last
-        // frame it had them; icons alone when it would not, so no button is
-        // cut off at a narrow window.
-        if (!toolbar_compact) if (dvui.minSizeGet(tools.data().id)) |m| {
-            toolbar_full_w = m.w;
-        };
-        toolbar_compact = toolbar_full_w + 2 * style.space.sm > middle.data().contentRect().w;
-
-        // A command the bar started, running: its button spins, and the
-        // others that write wait for it.
-        const running: []const u8 = if (tab_strip.job != null and !tab_strip.job_quiet) tab_strip.job_label else "";
-        const idle = tab_strip.job == null or tab_strip.job_quiet;
-        const arena = dvui.currentWindow().arena();
-        const on_branch = if (history) |h| h.head != null else false;
-
-        if (toolButton(@src(), "Fetch", dvui.entypo.cw, .{ .busy = std.mem.eql(u8, running, "Fetching"), .usable = idle, .hint = "Fetch every remote, nothing merged" })) {
-            requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
-        }
-        // After a rebase the branch and its upstream have parted: a plain
-        // push is refused, and Pull would merge the old commits back in.
-        // Push says what it has to be, and Pull keeps its count quiet.
-        const rebased = rebasedSinceUpstream();
-        const pull_hint: []const u8 = if (!on_branch)
-            "No branch checked out to pull into"
-        else if (tracking.upstream) |u|
-            (if (tracking.behind > 0 and !rebased)
-                std.fmt.allocPrint(arena, "Pull {d} commit{s} from {s}", .{ tracking.behind, plural(tracking.behind), u }) catch "Pull"
-            else
-                std.fmt.allocPrint(arena, "Pull from {s}", .{u}) catch "Pull")
-        else
-            "No upstream to pull from: push this branch first";
-        const pullable = idle and on_branch and tracking.upstream != null;
-        {
-            // Pull and its ways, one split button: each half lit on its own
-            // as the other buttons are, a rule between.
-            var split = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
-            defer split.deinit();
-            if (toolButton(@src(), "Pull", dvui.entypo.download, .{ .badge = if (rebased) 0 else tracking.behind, .busy = std.mem.eql(u8, running, "Pulling"), .usable = pullable, .hint = pull_hint })) {
-                requestNetwork("Pulling", &.{"pull"});
-            }
-            pullMenu(pullable);
-        }
-        const push_hint: []const u8 = if (!on_branch)
-            "No branch checked out to push"
-        else if (tracking.upstream) |u|
-            (if (rebased)
-                std.fmt.allocPrint(arena, "Replace {s} with this branch", .{u}) catch "Force push"
-            else if (tracking.ahead > 0)
-                std.fmt.allocPrint(arena, "Push {d} commit{s} to {s}", .{ tracking.ahead, plural(tracking.ahead), u }) catch "Push"
-            else
-                std.fmt.allocPrint(arena, "Nothing to push: {s} has every commit", .{u}) catch "Push")
-        else
-            "Push this branch, and track it on the remote";
-        const pushable = idle and on_branch and (tracking.upstream == null or tracking.ahead > 0);
-        if (toolButton(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, .{ .badge = tracking.ahead, .tag = "toolbar:Push", .busy = std.mem.eql(u8, running, "Pushing") or std.mem.eql(u8, running, "Force pushing"), .usable = pushable, .hint = push_hint })) {
-            if (rebased) {
-                ask(.force_push, "");
-            } else {
-                // A branch with no upstream yet gets one, on the default remote —
-                // otherwise the first push of every new branch is an error message.
-                requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
-            }
-        }
-        toolbarDivider(@src(), 1);
-        if (toolButton(@src(), "Branch", dvui.entypo.flow_branch, .{ .hint = "A new branch at what is checked out" })) askName(.new_branch, "");
-        const changes = changeCount();
-        if (toolButton(@src(), "Stash", dvui.entypo.save, .{
-            .busy = std.mem.eql(u8, running, "Stashing"),
-            .usable = idle and changes > 0,
-            .hint = if (changes == 0) "No changes to stash" else std.fmt.allocPrint(arena, "Set {d} change{s} aside, new files too", .{ changes, plural(changes) }) catch "Stash",
-        })) requestLocal("Stashing", &.{ "stash", "push", "-u" });
-        const stashes = if (history) |h| h.stashes.len else 0;
-        if (toolButton(@src(), "Pop", dvui.entypo.archive, .{
-            .busy = std.mem.eql(u8, running, "Popping the stash"),
-            .usable = idle and stashes > 0,
-            .hint = if (stashes == 0) "No stash to pop" else "Bring the last stash back, and drop it",
-        })) requestLocal("Popping the stash", &.{ "stash", "pop" });
-
-        // Only where there is LFS to pull. `git lfs pull` fetches the real contents
-        // for the pointers a checkout left behind, which is the one LFS operation
-        // that comes up in ordinary work.
-        if (tab_strip.uses_lfs) {
-            toolbarDivider(@src(), 2);
-            if (toolButton(@src(), "LFS", dvui.entypo.cloud, .{ .busy = std.mem.eql(u8, running, "Fetching LFS files"), .usable = idle, .hint = "Fetch the LFS files this checkout points to" })) {
-                requestNetwork("Fetching LFS files", &.{ "lfs", "pull" });
-            }
-        }
-
-        tools.deinit();
-    }
-    {
-        var right = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .gravity_y = 0.5,
-            .min_size_content = .{ .w = zones.right },
-            .max_size_content = .width(zones.right),
-            .background = false,
-        });
-        defer right.deinit();
-        // Kept for the width it holds: the buttons stay centred over the
-        // history, not over the window. And where a merge or a rebase under
-        // way says so, as GitComet's action bar does.
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        operationControls();
-        // Finding a commit: not an action on the repository, so apart from
-        // them, an icon on this side.
-        if (toolButton(@src(), "Search", dvui.entypo.magnifying_glass, .{ .icon_only = true, .on = search_open, .hint = "Search the commits — Ctrl+F" })) {
-            if (search_open) closeSearch() else {
-                search_open = true;
-                active_view = .graph;
-            }
-        }
-        // At the very end: the rest of git — and everything else — is a
-        // terminal away.
-        if (toolButton(@src(), "Terminal", dvui.entypo.code, .{ .hint = "A terminal in this repository's folder — Ctrl+Shift+T" })) openTerminal();
-    }
-}
-
-/// The branch was rebased since it was last pushed: it and its upstream
-/// each have commits the other lacks, and the last thing to move it was a
-/// rebase.
-fn rebasedSinceUpstream() bool {
-    const h = history orelse return false;
-    if (h.state != .none or h.tracking.ahead == 0 or h.tracking.behind == 0) return false;
-    const move = h.last_move orelse return false;
-    return std.mem.startsWith(u8, move.message, "rebase") or std.mem.startsWith(u8, move.message, "pull --rebase");
-}
-
-/// The toolbar's side zones, as wide as the panels under them were last
-/// frame — less the bar's own padding — and never narrower than what they
-/// hold needs.
-fn toolbarZones() struct { left: f32, right: f32 } {
-    const left_w: f32 = if (leftShown()) body_width * sidebar_split else 0;
-    const content_w = body_width - left_w;
-    const right_w: f32 = if (show_detail and active_view == .graph and content_w >= 760) content_w * (1 - detail_split) else 0;
-    return .{
-        .left = @max(left_w - style.space.lg, 230),
-        .right = @max(right_w - style.space.lg, 360),
-    };
-}
-
-/// A toolbar button's least size: GitComet's comfortable action bar, the
-/// caption under the icon. Square without it.
-const TOOL_W: f32 = 58;
-const TOOL_H: f32 = 44;
-
-/// The toolbar's buttons are icons alone this frame: with their captions the
-/// row would not fit over the history.
-var toolbar_compact = false;
-/// How wide the row was the last frame it had its captions.
-var toolbar_full_w: f32 = 0;
-
-/// A thin upright rule between groups of toolbar buttons.
-fn toolbarDivider(src: std.builtin.SourceLocation, id: usize) void {
-    _ = dvui.separator(src, .{
-        .id_extra = id,
-        .min_size_content = .{ .w = 1, .h = 28 },
-        .gravity_y = 0.5,
-        .margin = .{ .x = style.space.md, .w = style.space.md },
-        .color_fill = .{ .color = style.border() },
-    });
-}
-
-/// A button whose menu drops below it. dvui's dropdown opens over its own
-/// button, as a select does, and hides what was just clicked; this is its
-/// menu-bar form instead. The face is drawn after `begin`; `open` returns the
-/// menu while it is up, and `end` closes the lot.
-const DropButton = struct {
-    bar: *dvui.MenuWidget,
-    item: *dvui.MenuItemWidget,
-    /// The menu's least width: a picker's is its field's.
-    min_w: f32 = 0,
-
-    fn begin(src: std.builtin.SourceLocation, opts: dvui.Options) DropButton {
-        // Centred on the line, unless told otherwise: in a column, under a
-        // caption, a centred one would sit over it.
-        const bar = dvui.menu(src, .horizontal, .{ .id_extra = opts.id_extra, .background = false, .gravity_y = opts.gravity_y orelse 0.5, .expand = opts.expand, .padding = dvui.Rect.all(0), .margin = dvui.Rect.all(0) });
-        return .{ .bar = bar, .item = dvui.menuItem(@src(), .{ .submenu = true }, opts) };
-    }
-
-    fn open(self: DropButton) ?*dvui.FloatingMenuWidget {
-        if (self.item.data().borderRectScale().r.contains(dvui.currentWindow().mouse_pt)) dvui.cursorSet(.hand);
-        const rect = self.item.activeRect();
-        self.item.deinit();
-        const r = rect orelse return null;
-        return dvui.floatingMenu(@src(), .{ .from = r }, .{
-            .background = true,
-            .color_fill = .{ .color = style.surfaceRaised() },
-            .border = dvui.Rect.all(1),
-            .color_border = .{ .color = style.border() },
-            .corners = style.radius.popover,
-            .padding = dvui.Rect.all(style.space.xs),
-            .min_size_content = .{ .w = self.min_w },
-        });
-    }
-
-    fn end(self: DropButton, menu: ?*dvui.FloatingMenuWidget) void {
-        if (menu) |m| m.deinit();
-        self.bar.deinit();
-    }
-};
-
-/// The chevron beside Pull: the ways of pulling a plain click does not pick,
-/// which is otherwise a right-click on the current branch away.
-fn pullMenu(usable: bool) void {
-    const enabled = repo != null and usable;
-    // As tall as Pull beside it, the other half of one split button.
-    const button = DropButton.begin(@src(), .{
-        .tag = "toolbar:pull_menu",
-        .gravity_y = 0.5,
-        .background = false,
-        .color_fill_hover = .{ .color = style.rowHover() },
-        .min_size_content = .{ .w = 16, .h = TOOL_H },
-        .margin = .{ .w = 2 },
-        .padding = .{ .x = 2, .w = 2 },
-        .corners = style.radius.input,
-    });
-    {
-        // The rule that parts it from Pull.
-        const rs = button.item.data().borderRectScale();
-        (dvui.Rect.Physical{ .x = rs.r.x - rs.s, .y = rs.r.y + (rs.r.h - 20 * rs.s) / 2, .w = rs.s, .h = 20 * rs.s })
-            .fill(.{}, .{ .color = .{ .color = style.border() }, .fade = 0 });
-    }
-    dvui.icon(@src(), "pull_menu", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = if (enabled) style.textMuted() else style.textFaint() } }, .{
-        .min_size_content = .{ .w = 12, .h = 12 },
-        .gravity_y = 0.5,
-    });
-    const menu = button.open();
-    defer button.end(menu);
-    const m = menu orelse return;
-    if (!enabled) return m.close();
-    var args: ?[]const []const u8 = null;
-    if (menuIcon(@src(), dvui.entypo.merge, "Pull, merging", false)) args = &.{ "pull", "--no-rebase" };
-    if (menuIcon(@src(), dvui.entypo.flow_line, "Pull, rebasing local commits", false)) args = &.{ "pull", "--rebase" };
-    if (menuIcon(@src(), dvui.entypo.controller_fast_forward, "Pull, fast-forward only", false)) args = &.{ "pull", "--ff-only" };
-    if (args) |a| {
-        m.close();
-        requestNetwork("Pulling", a);
-    }
-}
-
-/// Undo, Redo and the rule after them, then the switcher's mark, chevron
-/// and padding: what the left zone holds besides the branch's name.
-const BRANCH_CHROME_W: f32 = 2 * (TOOL_H + 4) + (1 + 2 * style.space.md) + 72;
-
-/// How wide the branch's name may be: what the zone over the sidebar
-/// leaves, but never so little that a usual name is cut.
-fn branchRoom(zone: f32) f32 {
-    return @max(zone - BRANCH_CHROME_W, 220);
-}
-
-/// What the branch switcher's list is narrowed to.
-var switch_filter: std.ArrayList(u8) = .empty;
-
-/// The toolbar's branch, as a menu: the branch checked out, and a click away
-/// every other — local first, then the remotes', a filter over them all.
-fn branchSwitcher() void {
-    const detached = if (history) |h| h.head == null else false;
-    // Mid-rebase HEAD is detached, but the branch being rebased is still
-    // the one being worked on: its name, not "detached HEAD".
-    const head: []const u8 = if (history) |h| h.head orelse (if (op_info.branch.len > 0) op_info.branch else "detached HEAD") else "";
-    const button = DropButton.begin(@src(), .{
-        .tag = "toolbar:branch",
-        .gravity_y = 0.5,
-        .background = false,
-        // Under the face below, which covers it: never the accent, even at
-        // its rounded edge, while the menu is open.
-        .color_fill_hover = .{ .color = style.rowHover() },
-        .corners = style.radius.input,
-        .padding = dvui.Rect.all(0),
-    });
-    {
-        // A control, framed as a field is, so what it does reads before it
-        // is clicked: the branch's mark, its name, the menu's chevron. Lit
-        // under the pointer and while its menu is open.
-        const lit = button.item.show_active or button.item.mouse_over;
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .background = true,
-            .color_fill = .{ .color = if (lit) style.rowHover() else style.surfaceInput() },
-            .border = dvui.Rect.all(1),
-            .color_border = .{ .color = style.border() },
-            .corners = style.radius.input,
-            .min_size_content = .{ .h = BRANCH_BUTTON_H },
-            .padding = .{ .x = style.space.lg, .y = style.space.xs, .w = style.space.md, .h = style.space.xs },
-        });
-        defer face.deinit();
-        dvui.icon(@src(), "branch_mark", if (detached) dvui.entypo.flow_line else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = style.accent() } }, .{
-            .min_size_content = .{ .w = 13, .h = 13 },
-            .gravity_y = 0.5,
-            .margin = .{ .w = style.space.sm },
-        });
-        var buf: [MAX_SHOWN_LINE]u8 = undefined;
-        const room = branchRoom(toolbarZones().left);
-        // Its name, and under it where Pull and Push go — or that they have
-        // nowhere yet.
-        var names = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false });
-        dvui.label(@src(), "{s}", .{fitText(&buf, head, style.bodyBold(), room)}, .{
-            .font = style.bodyBold(),
-            .color_text = .{ .color = style.text() },
-            .padding = dvui.Rect.all(0),
-        });
-        if (history) |h| if (h.head != null) {
-            var up_buf: [MAX_SHOWN_LINE]u8 = undefined;
-            const upstream = h.tracking.upstream orelse "no upstream";
-            dvui.label(@src(), "{s}", .{fitText(&up_buf, upstream, style.tiny(), room)}, .{
-                .font = style.tiny(),
-                .color_text = .{ .color = if (h.tracking.upstream != null) style.textMuted() else style.textFaint() },
-                .padding = dvui.Rect.all(0),
-            });
-        };
-        names.deinit();
-        dvui.icon(@src(), "switch_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
-            .min_size_content = .{ .w = 12, .h = 12 },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.sm },
-        });
-    }
-    const menu = button.open();
-    defer button.end(menu);
-    const m = menu orelse {
-        switch_filter.clearRetainingCapacity();
-        return;
-    };
-    const h = history orelse return;
-
-    focusOnce(searchField(@src(), &switch_filter, "Switch to a branch…", "switch_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm }));
-    const needle = std.mem.trim(u8, switch_filter.items, " ");
-
-    // As tall as its branches, up to a bound — and less where the window is
-    // short: a long list scrolls, a short one leaves no empty space under it.
-    var list = dvui.scrollArea(@src(), .{}, .{
-        .min_size_content = .{ .w = 320 },
-        .max_size_content = .size(.{ .w = 320, .h = @min(BRANCH_LIST_MAX_H, dvui.windowRect().h * 0.6) }),
-        .background = false,
-    });
-    defer list.deinit();
-    var shown: usize = 0;
-    for ([_]git.Ref.Kind{ .local, .remote }, 0..) |kind, k| {
-        var header = false;
-        for (h.refs, 0..) |ref, i| {
-            if (ref.kind != kind) continue;
-            // A remote's branch with a local one of the same name is that one.
-            if (kind == .remote and sameOnRemote(h, ref)) continue;
-            if (needle.len > 0 and std.ascii.findIgnoreCase(ref.name, needle) == null) continue;
-            if (shown >= MAX_BRANCH_CHOICES) break;
-            if (!header) {
-                dropHeading(@src(), k + 10, if (kind == .local) "LOCAL" else "REMOTE");
-                header = true;
-            }
-            shown += 1;
-            if (branchChoice(i, ref) and !ref.head) {
-                checkout(ref);
-                m.close();
-            }
-        }
-    }
-    if (shown == 0) dropHeading(@src(), 20, "NO BRANCH BY THAT NAME");
-}
-
-/// One branch in the switcher: a tick on the one checked out, its distance
-/// from its upstream on the right.
-fn branchChoice(id: usize, ref: git.Ref) bool {
-    var mi = dvui.menuItem(@src(), .{}, .{
-        .id_extra = id,
-        .tag = frameTag("switch", ref.name),
-        .expand = .horizontal,
-        .corners = style.radius.input,
-        .color_fill_hover = .{ .color = style.accentDim() },
-        .padding = .{ .x = style.space.md, .y = MENU_ROW_PAD_Y, .w = style.space.md, .h = MENU_ROW_PAD_Y },
-    });
-    defer mi.deinit();
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-    defer row.deinit();
-    const ink = if (ref.head) style.accent() else style.textMuted();
-    dvui.icon(@src(), "choice_icon", if (ref.head) dvui.entypo.check else if (ref.kind == .remote) dvui.entypo.cloud else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = ink } }, .{
-        .min_size_content = .{ .w = 12, .h = 12 },
-        .gravity_y = 0.5,
-        .margin = .{ .w = style.space.md },
-    });
-    var buf: [MAX_SHOWN_LINE]u8 = undefined;
-    dvui.label(@src(), "{s}", .{fitText(&buf, ref.name, style.small(), 220)}, .{
-        .font = if (ref.head) style.smallBold() else style.small(),
-        .color_text = .{ .color = if (ref.head) style.accent() else style.text() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .padding = dvui.Rect.all(0),
-    });
-    trackingMarks(ref.tracking, style.textFaint());
-    return mi.activeRect() != null;
-}
-
-/// The toolbar's branch button: a control's height.
-const BRANCH_BUTTON_H: f32 = 30;
-/// The branch menu's list, at most.
-const BRANCH_LIST_MAX_H: f32 = 360;
-
-/// The "s" a count past one takes: "1 file", "2 files".
-pub fn plural(n: anytype) []const u8 {
-    return if (n == 1) "" else "s";
-}
-
 // === Clone and create ===
 //
 // A window of their own, as in every other client: three things to fill in,
@@ -8359,7 +7904,7 @@ var identity_note: []const u8 = "";
 /// `git` rather than one each: on Windows starting it is most of the wait.
 /// Through `git`, not libgit2, which would not see the global config a test
 /// hands over in `run.env_override`. True when both are set.
-fn readIdentity(name: *std.ArrayList(u8), email: *std.ArrayList(u8)) bool {
+pub fn readIdentity(name: *std.ArrayList(u8), email: *std.ArrayList(u8)) bool {
     name.clearRetainingCapacity();
     email.clearRetainingCapacity();
     const answer = run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get-regexp", "^user\\.(name|email)$" }) catch return false;
@@ -8385,7 +7930,7 @@ fn identitySet() bool {
     return readIdentity(&name, &email);
 }
 
-fn openIdentity() void {
+pub fn openIdentity() void {
     identity_open = true;
     identity_rect = .{};
     identity_note = "";
@@ -8422,7 +7967,7 @@ fn fillFromGithub() bool {
     return true;
 }
 
-fn signInWithGithub() void {
+pub fn signInWithGithub() void {
     if (fillFromGithub()) {
         identity_note = "Filled in from your GitHub account.";
         return;
@@ -8451,7 +7996,7 @@ fn saveIdentity() void {
         }
     }
     identity_open = false;
-    me_loaded = false;
+    window_chrome.me_loaded = false;
 }
 
 fn identityDialog() void {
@@ -8505,7 +8050,7 @@ fn identityDialog() void {
     if (escapePressed()) identity_open = false;
 }
 
-fn openSettings(section: usize) void {
+pub fn openSettings(section: usize) void {
     settings_open = true;
     settings_rect = .{};
     signing_loaded = false;
@@ -8636,7 +8181,7 @@ fn settingsDialog() void {
             if (settingsSwitch(0, &on, "Use GitHub", "Pull requests, issues, checks and the account. Off: none of it, and nothing asked of GitHub")) tab_strip.setIntegrations(on);
             // Who Zit is connected as, and the way in or out.
             if (tab_strip.integrations) {
-                loadMe();
+                window_chrome.loadMe();
                 settingsField(@src(), "Account", "A code typed on github.com — the token it gives is kept readable by you alone");
                 var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
                     .expand = .horizontal,
@@ -8648,17 +8193,17 @@ fn settingsDialog() void {
                     .padding = dvui.Rect.all(style.space.md),
                 });
                 defer row.deinit();
-                dvui.icon(@src(), "gh_state", if (me_gh.items.len > 0) dvui.entypo.check else dvui.entypo.login, .{ .fill_color = .{ .color = if (me_gh.items.len > 0) style.success() else style.textFaint() } }, .{
+                dvui.icon(@src(), "gh_state", if (window_chrome.me_gh.items.len > 0) dvui.entypo.check else dvui.entypo.login, .{ .fill_color = .{ .color = if (window_chrome.me_gh.items.len > 0) style.success() else style.textFaint() } }, .{
                     .min_size_content = .{ .w = 14, .h = 14 },
                     .gravity_y = 0.5,
                     .margin = .{ .w = style.space.md },
                 });
-                if (me_gh.items.len > 0)
-                    dvui.label(@src(), "Connected as {s}", .{me_gh.items}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) })
+                if (window_chrome.me_gh.items.len > 0)
+                    dvui.label(@src(), "Connected as {s}", .{window_chrome.me_gh.items}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) })
                 else
                     dvui.label(@src(), "Not connected", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
-                if (me_gh.items.len > 0) {
-                    if (dialogButton(@src(), "Disconnect", false)) ask(.sign_out, me_gh.items);
+                if (window_chrome.me_gh.items.len > 0) {
+                    if (dialogButton(@src(), "Disconnect", false)) ask(.sign_out, window_chrome.me_gh.items);
                 } else if (dialogButton(@src(), "Connect GitHub", true)) openConnect();
             }
         }
@@ -8705,15 +8250,15 @@ fn settingsDialog() void {
         }
         if (SettingsCard.begin(1)) |card| {
             defer card.end();
-            loadMe();
-            const me = meAsCommit();
+            window_chrome.loadMe();
+            const me = window_chrome.meAsCommit();
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
             defer row.deinit();
             avatarSized(@src(), 0, me, null, null, 32);
             {
                 var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.xs } });
                 defer col.deinit();
-                const set = me_name.items.len > 0 and me_email.items.len > 0;
+                const set = window_chrome.me_name.items.len > 0 and window_chrome.me_email.items.len > 0;
                 dvui.label(@src(), "{s}", .{if (set) me.author else "Not set yet"}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
                 dvui.label(@src(), "{s}", .{if (set) me.email else "Commits need a name and an email"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0) });
                 dvui.label(@src(), "For every repository, in git's global config", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2 } });
@@ -8837,8 +8382,8 @@ fn settingsDialog() void {
 }
 
 /// Every key Zit answers to, from the footer's keyboard button.
-var keys_open = false;
-var keys_rect: dvui.Rect = .{};
+pub var keys_open = false;
+pub var keys_rect: dvui.Rect = .{};
 
 fn keysDialog() void {
     if (!keys_open) return;
@@ -9392,7 +8937,7 @@ fn repoSettings() void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false });
         defer row.deinit();
-        for ([_]*std.ArrayList(u8){ &repo_name_local, &repo_email_local }, [_][]const u8{ me_name.items, me_email.items }, 0..) |list, global, i| {
+        for ([_]*std.ArrayList(u8){ &repo_name_local, &repo_email_local }, [_][]const u8{ window_chrome.me_name.items, window_chrome.me_email.items }, 0..) |list, global, i| {
             var cell = dvui.box(@src(), .{}, .{ .id_extra = i, .expand = .horizontal, .background = false, .margin = .{ .w = if (i == 0) style.space.sm else 0 } });
             defer cell.deinit();
             const te = textField(@src(), .{
@@ -10203,9 +9748,9 @@ fn tabStrip() void {
 
     active_tab_foot = null;
     workspaceSwitcher();
-    tabList();
-    userMenu();
-    windowControls();
+    window_chrome.tabList();
+    window_chrome.userMenu();
+    window_chrome.windowControls();
 
     // The strip's hairline runs under every tab; the active one is joined to
     // the bar below, so it is rubbed out there. After the tabs, which the
@@ -10214,376 +9759,7 @@ fn tabStrip() void {
 }
 
 /// The strip's bottom hairline under the active tab, as last drawn.
-var active_tab_foot: ?dvui.Rect.Physical = null;
-
-// === The window's own frame ===
-//
-// Zit draws its own: the system's title bar is off, the tab strip takes its
-// place. A press on the strip's empty part moves the window and its edges
-// resize it, both answered by SDL's hit test before the press reaches us;
-// minimise, maximise and close are buttons at the strip's end.
-
-/// The strip's empty part, in SDL's window coordinates, as last drawn.
-var window_drag: dvui.Rect = .{};
-/// Asked for by the close button; the next frame closes, as a close from
-/// the window manager does.
-var close_requested = false;
-const RESIZE_EDGE: f32 = 6;
-
-fn sdlWindow() *dvui.backend.c.SDL_Window {
-    return dvui.currentWindow().backend.impl.window;
-}
-
-fn windowMaximized() bool {
-    const sdl = dvui.backend.c;
-    return sdl.SDL_GetWindowFlags(sdlWindow()) & sdl.SDL_WINDOW_MAXIMIZED != 0;
-}
-
-/// Where a press lands, for the system: an edge to resize by, the empty
-/// strip to move by, or ordinary content. Runs inside SDL's event pump, on
-/// the UI thread.
-fn hitTest(win: ?*dvui.backend.c.SDL_Window, area: [*c]const dvui.backend.c.SDL_Point, _: ?*anyopaque) callconv(.c) dvui.backend.c.SDL_HitTestResult {
-    const sdl = dvui.backend.c;
-    const x: f32 = @floatFromInt(area.*.x);
-    const y: f32 = @floatFromInt(area.*.y);
-    if (sdl.SDL_GetWindowFlags(win) & (sdl.SDL_WINDOW_MAXIMIZED | sdl.SDL_WINDOW_FULLSCREEN) == 0) {
-        var wi: c_int = 0;
-        var hi: c_int = 0;
-        _ = sdl.SDL_GetWindowSize(win, &wi, &hi);
-        const w: f32 = @floatFromInt(wi);
-        const h: f32 = @floatFromInt(hi);
-        const left = x < RESIZE_EDGE;
-        const right = x >= w - RESIZE_EDGE;
-        const top = y < RESIZE_EDGE;
-        const bottom = y >= h - RESIZE_EDGE;
-        if (top and left) return sdl.SDL_HITTEST_RESIZE_TOPLEFT;
-        if (top and right) return sdl.SDL_HITTEST_RESIZE_TOPRIGHT;
-        if (bottom and left) return sdl.SDL_HITTEST_RESIZE_BOTTOMLEFT;
-        if (bottom and right) return sdl.SDL_HITTEST_RESIZE_BOTTOMRIGHT;
-        if (top) return sdl.SDL_HITTEST_RESIZE_TOP;
-        if (bottom) return sdl.SDL_HITTEST_RESIZE_BOTTOM;
-        if (left) return sdl.SDL_HITTEST_RESIZE_LEFT;
-        if (right) return sdl.SDL_HITTEST_RESIZE_RIGHT;
-    }
-    const d = window_drag;
-    if (x >= d.x and x < d.x + d.w and y >= d.y and y < d.y + d.h) return sdl.SDL_HITTEST_DRAGGABLE;
-    return sdl.SDL_HITTEST_NORMAL;
-}
-
-/// `r`, in dvui's pixels, as the part of the window a press moves it by.
-/// SDL's window coordinates are pixels on some systems and points on
-/// others: the ratio of the two window sizes says which.
-fn setWindowDrag(r: dvui.Rect.Physical) void {
-    var wi: c_int = 0;
-    var hi: c_int = 0;
-    _ = dvui.backend.c.SDL_GetWindowSize(sdlWindow(), &wi, &hi);
-    const px = dvui.windowRectPixels();
-    if (px.w <= 0) return;
-    const k = @as(f32, @floatFromInt(wi)) / px.w;
-    window_drag = .{ .x = r.x * k, .y = r.y * k, .w = @max(0, r.w * k), .h = r.h * k };
-}
-
-/// Minimise, maximise or restore, close — at the strip's far end, where
-/// every desktop puts them.
-fn windowControls() void {
-    _ = dvui.separator(@src(), .{
-        .min_size_content = .{ .w = 1, .h = 16 },
-        .gravity_y = 0.5,
-        .margin = .{ .x = style.space.sm },
-        .color_fill = .{ .color = style.border() },
-    });
-    if (iconButtonTagged(@src(), "window_min", "Minimise", dvui.entypo.minus, style.textMuted(), "window:minimise")) {
-        _ = dvui.backend.c.SDL_MinimizeWindow(sdlWindow());
-    }
-    const maxed = windowMaximized();
-    if (iconButtonTagged(@src(), "window_max", if (maxed) "Restore" else "Maximise", if (maxed) dvui.entypo.resize_100 else dvui.entypo.resize_full_screen, style.textMuted(), "window:maximise")) {
-        _ = if (maxed) dvui.backend.c.SDL_RestoreWindow(sdlWindow()) else dvui.backend.c.SDL_MaximizeWindow(sdlWindow());
-    }
-    if (iconButtonTagged(@src(), "window_close", "Close", dvui.entypo.cross, style.textMuted(), "window:close")) {
-        close_requested = true;
-        dvui.refresh(null, @src(), null);
-    }
-}
-
-/// The tabs themselves, and the + after them.
-fn tabList() void {
-    // More tabs than width: they scroll sideways rather than squeeze.
-    var scroll = dvui.scrollArea(@src(), .{ .vertical = .none, .horizontal = .auto, .horizontal_bar = .auto_overlay }, .{
-        .expand = .horizontal,
-        .background = false,
-        .min_size_content = .{ .h = style.tab_height },
-        // Only the width the rest of the strip leaves: dvui asks for all of
-        // its content, which pushed the buttons after it out of the window.
-        .max_size_content = .width(0),
-    });
-    defer scroll.deinit();
-    // What the tabs leave of the strip moves the window. Before the scroll
-    // area closes, on what it held last frame.
-    defer {
-        const rs = scroll.data().contentRectScale();
-        const used = (scroll.si.virtual_size.w - scroll.si.viewport.x) * rs.s;
-        var r = rs.r;
-        r.x += used;
-        r.w -= used;
-        setWindowDrag(r);
-        // A tab let go there leaves its group for the end of the strip.
-        if (dvui.dragName(TAB_DRAG_NAME)) for (dvui.events()) |*e| {
-            if (e.evt != .mouse) continue;
-            const me = e.evt.mouse;
-            if (me.action != .release or !me.button.pointer() or !r.contains(me.p)) continue;
-            e.handle(@src(), scroll.data());
-            dvui.dragEnd(me.button);
-            requestTab(.{ .tab_end = tab_drag });
-        };
-    }
-    // The active tab's foot only where the strip shows the tab: scrolled
-    // part out of sight, the rest of it is under the buttons after the tabs.
-    defer if (active_tab_foot) |*foot| {
-        const view = scroll.data().contentRectScale().r;
-        const left = @max(foot.x, view.x);
-        foot.w = @max(0, @min(foot.x + foot.w, view.x + view.w) - left);
-        foot.x = left;
-    };
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false });
-    defer row.deinit();
-    const width = TAB_W;
-    // No rule before the first tab.
-    tab_prev_active = true;
-
-    // Only recorded here, run after the frame: selecting or closing one
-    // rebuilds the snapshots the rest of this frame is drawn from.
-    var flat: usize = 0;
-    for (tab_strip.groups.items, 0..) |group, g| {
-        if (group.ws != tab_strip.active_ws) continue;
-        const named = group.name.len > 0;
-        const hue = tab_strip.groupColor(group.color);
-        // A group is one run, as Chrome has it: a line in its colour from the
-        // label to its last tab, which goes up and over the active one —
-        // outlined in that colour — rather than under it.
-        var span = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .id_extra = g,
-            .expand = .vertical,
-            .background = false,
-            .margin = .{ .w = if (named) style.space.sm else 0 },
-        });
-        defer span.deinit();
-        if (named) {
-            const chip = groupChip(g, group, hue);
-            if (group.collapsed) {
-                flat += group.tabs.items.len;
-                continue;
-            }
-            group_line = .{ .from = chip.x, .to = chip.x + chip.w };
-        }
-        defer if (named) groupUnderline(span.data().contentRectScale(), hue);
-        for (group.tabs.items, 0..) |tab, t| {
-            const current = repo != null and g == tab_strip.active_group and t == tab_strip.active_tab;
-            const active = !new_tab_open and current;
-            var rect: dvui.Rect.Physical = .{};
-            switch (tabButton(@src(), flat, git.repoName(tab.path), tab.path, active, width, &rect, .{ .slot = .{ g, t }, .hue = if (named) hue else null })) {
-                .none => {},
-                // Back from its pull requests' tab: the repository is open
-                // already, only the view changes.
-                .select => if (current) {
-                    new_tab_open = false;
-                    active_view = .graph;
-                } else requestTab(.{ .select_in = .{ g, t } }),
-                .close => requestTab(.{ .close_in = .{ g, t } }),
-            }
-            if (active) revealTab(flat, rect);
-            if (named) {
-                group_line.to = rect.x + rect.w;
-                if (active) group_line.gap = rect;
-            }
-            tabMenu(g, t, flat, rect);
-            flat += 1;
-        }
-    }
-
-    // The page a new tab opens on, as a tab of its own while it is up.
-    if (new_tab_open) {
-        var rect: dvui.Rect.Physical = .{};
-        switch (tabButton(@src(), flat, "New tab", "Open, clone or create a repository", true, width, &rect, .{ .icon = dvui.entypo.plus })) {
-            .none, .select => {},
-            .close => new_tab_open = false,
-        }
-        revealTab(flat, rect);
-    }
-
-    if (iconButton(@src(), "tab_add", "New tab — Ctrl+T", dvui.entypo.plus, style.textMuted())) {
-        new_tab_open = true;
-    }
-
-    // What a drag was over this frame is lit on the next.
-    if (!std.meta.eql(tab_drop_over, tab_drop_seen)) dvui.refresh(null, @src(), null);
-    tab_drop_over = tab_drop_seen;
-    tab_drop_seen = null;
-}
-
-/// The run a group's underline covers, in physical pixels, and the active
-/// tab it leaves a gap for.
-var group_line: struct { from: f32 = 0, to: f32 = 0, gap: ?dvui.Rect.Physical = null } = .{};
-
-fn groupUnderline(rs: dvui.RectScale, hue: dvui.Color) void {
-    defer group_line = .{};
-    const s = rs.s;
-    const y = rs.r.y + rs.r.h - 2 * s;
-    const ends: [2][2]f32 = if (group_line.gap) |a|
-        .{ .{ group_line.from, a.x }, .{ a.x + a.w, group_line.to } }
-    else
-        .{ .{ group_line.from, group_line.to }, .{ 0, 0 } };
-    for (ends) |e| {
-        if (e[1] - e[0] < 2 * s) continue;
-        (dvui.Rect.Physical{ .x = e[0], .y = y, .w = e[1] - e[0], .h = 2 * s })
-            .fill(dvui.CornerRect.Physical.all(s), .{ .color = .{ .color = hue }, .fade = 0 });
-    }
-}
-
-/// Where in the strip the active tab was last scrolled into sight.
-var tab_revealed: ?usize = null;
-
-/// Scroll the strip to the active tab when it changes: one switched to out
-/// of sight — Ctrl+Tab, the palette, a repository opened — comes into view.
-/// Only then, so the strip scrolled by hand stays where it was put.
-fn revealTab(at: usize, rect: dvui.Rect.Physical) void {
-    if (tab_revealed == at or rect.w <= 0) return;
-    tab_revealed = at;
-    dvui.scrollTo(.{ .screen_rect = rect });
-}
-
-/// Who commits from this machine, as git's global config says: read once,
-/// and again after the identity is saved.
-var me_name: std.ArrayList(u8) = .empty;
-var me_email: std.ArrayList(u8) = .empty;
-/// The GitHub login Zit is connected as; empty when it is not.
-var me_gh: std.ArrayList(u8) = .empty;
-pub var me_loaded = false;
-
-fn loadMe() void {
-    if (me_loaded) return;
-    me_loaded = true;
-    _ = readIdentity(&me_name, &me_email);
-    // The login Zit's own sign-in saved, from the disk: no request per frame.
-    me_gh.clearRetainingCapacity();
-    if (!tab_strip.integrations) return;
-    github.login(&me_gh);
-}
-
-fn forgetMe() void {
-    me_name.deinit(gpa);
-    me_name = .empty;
-    me_email.deinit(gpa);
-    me_email = .empty;
-    me_gh.deinit(gpa);
-    me_gh = .empty;
-    me_loaded = false;
-}
-
-/// The person committing, as a commit the avatar can be drawn for.
-fn meAsCommit() git.Commit {
-    const name = std.mem.trim(u8, me_name.items, " \r\n");
-    return .{
-        .id = std.mem.zeroes(git.Oid),
-        .summary = "",
-        .author = if (name.len > 0) name else "?",
-        .email = std.mem.trim(u8, me_email.items, " \r\n"),
-        .time = 0,
-    };
-}
-
-/// At the strip's very end, the face of whoever commits here: one button for
-/// them and for Zit. A click drops who that is, then the settings, the keys,
-/// the theme, signing — and the GitHub account, with the integrations on.
-fn userMenu() void {
-    loadMe();
-    const me = meAsCommit();
-    const button = DropButton.begin(@src(), .{
-        .tag = "toolbar:user",
-        .expand = .vertical,
-        .background = false,
-        .padding = .{ .x = style.space.sm, .w = style.space.xs },
-    });
-    {
-        // The face, and the chevron that says it opens.
-        var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
-        defer face.deinit();
-        avatarSized(@src(), 0, me, null, null, 22);
-        dvui.icon(@src(), "user_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
-            .min_size_content = .{ .w = 12, .h = 12 },
-            .gravity_y = 0.5,
-        });
-    }
-    const menu = button.open();
-    defer button.end(menu);
-    const m = menu orelse return;
-
-    // Who: the avatar, the name, the address.
-    {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = false,
-            .min_size_content = .{ .w = MENU_MIN_W },
-            .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
-        });
-        defer head.deinit();
-        avatarSized(@src(), 1, me, null, null, 36);
-        var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.xs } });
-        defer col.deinit();
-        const set = me_name.items.len > 0 and me_email.items.len > 0;
-        dvui.label(@src(), "{s}", .{if (set) me.author else "No Git identity"}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-        dvui.label(@src(), "{s}", .{if (set) me.email else "Commits need a name and an email"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0) });
-    }
-    menuSeparator(0);
-    var pick: enum { none, settings, keys, signing, docs, about, sign_in, sign_out } = .none;
-    if (menuIcon(@src(), dvui.entypo.cog, "Settings — Ctrl+,", false)) pick = .settings;
-    if (menuIcon(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", false)) pick = .keys;
-    if (menuIcon(@src(), dvui.entypo.lock, "Commit signature", false)) pick = .signing;
-    menuSeparator(2);
-    if (menuIcon(@src(), dvui.entypo.book, "Documentation", false)) pick = .docs;
-    if (menuIcon(@src(), dvui.entypo.info_with_circle, "About Zit", false)) pick = .about;
-    // GitHub's account, only while Zit talks to GitHub at all.
-    if (tab_strip.integrations) {
-        menuSeparator(1);
-        if (me_gh.items.len > 0) {
-            var buf: [96]u8 = undefined;
-            const caption = std.fmt.bufPrint(&buf, "Sign out of GitHub ({s})", .{me_gh.items}) catch "Sign out of GitHub";
-            if (menuIcon(@src(), dvui.entypo.log_out, caption, true)) pick = .sign_out;
-        } else {
-            if (menuIcon(@src(), dvui.entypo.login, "Sign in with GitHub", false)) pick = .sign_in;
-        }
-    }
-    if (pick == .none) return;
-    m.close();
-    switch (pick) {
-        .none => {},
-        .settings => openSettings(5),
-        .keys => {
-            keys_open = true;
-            keys_rect = .{};
-        },
-        .signing => openSettings(6),
-        .docs => openUrl(SITE_URL),
-        .about => {
-            features_open = true;
-            features_rect = .{};
-        },
-        .sign_in => {
-            openIdentity();
-            signInWithGithub();
-        },
-        .sign_out => ask(.sign_out, me_gh.items),
-    }
-}
-
-/// Zit's token gone from this machine: the pull requests, issues and
-/// pictures that came through it stop until a sign-in. GitHub keeps the
-/// authorisation itself until it is revoked in its settings.
-fn signOutGithub(login: []const u8) void {
-    _ = login;
-    github.signOut();
-    me_loaded = false;
-    refreshRequests();
-}
+pub var active_tab_foot: ?dvui.Rect.Physical = null;
 
 // === Connecting GitHub ===
 //
@@ -10686,7 +9862,7 @@ fn pumpConnect(timer_id: dvui.Id) void {
                 // The token is on disk already: only the name it goes by.
                 github.saveUser(user.login) catch {};
                 connect_state = .done;
-                me_loaded = false;
+                window_chrome.me_loaded = false;
                 if (!tab_strip.integrations) tab_strip.setIntegrations(true) else refreshRequests();
                 avatars.setGithubRepo(githubRemote());
                 if (connect_fills_identity) {
@@ -10766,7 +9942,7 @@ fn connectDialog() void {
 /// A group's label: a dot in its colour, as Chrome marks a group with no
 /// name — and how many tabs, folded. A click folds or unfolds it; a
 /// right-click offers the rest.
-fn groupChip(g: usize, group: tab_strip.TabGroup, hue: dvui.Color) dvui.Rect.Physical {
+pub fn groupChip(g: usize, group: tab_strip.TabGroup, hue: dvui.Color) dvui.Rect.Physical {
     const lit = if (tab_drop_over) |o| o[0] == g and o[1] == std.math.maxInt(usize) else false;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
@@ -10923,7 +10099,7 @@ fn workspaceSwitcher() void {
     // On its own colour, the name dark on it, as a tab group's label was:
     // which workspace this is reads before its name does.
     const hue = tab_strip.groupColor(current.color);
-    const button = DropButton.begin(@src(), .{
+    const button = window_chrome.DropButton.begin(@src(), .{
         .tag = "workspace:switcher",
         .gravity_y = 0.5,
         .background = true,
@@ -11163,7 +10339,7 @@ fn workspaceDot(src: std.builtin.SourceLocation, id: usize, color: u8) void {
 
 /// A tab's right-click: into a group, out of one, to another workspace,
 /// closed.
-fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
+pub fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     const ctx = dvui.context(@src(), .{ .rect = rect }, .{ .id_extra = id });
     defer ctx.deinit();
     const cp = ctx.activePoint() orelse return;
@@ -11213,7 +10389,7 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
 const TabHit = enum { none, select, close };
 
 /// Each tab as wide as its name, up to this much, cut with "…" past it.
-const TAB_W: f32 = 200;
+pub const TAB_W: f32 = 200;
 
 /// What kind of tab: its icon.
 const TabLook = struct {
@@ -11224,12 +10400,12 @@ const TabLook = struct {
     hue: ?dvui.Color = null,
 };
 
-const TAB_DRAG_NAME = "zit-tab";
+pub const TAB_DRAG_NAME = "zit-tab";
 /// The tab being dragged, by group and index.
-var tab_drag: [2]usize = .{ 0, 0 };
+pub var tab_drag: [2]usize = .{ 0, 0 };
 /// The tab a drag was over last frame, lit this one.
-var tab_drop_over: ?[2]usize = null;
-var tab_drop_seen: ?[2]usize = null;
+pub var tab_drop_over: ?[2]usize = null;
+pub var tab_drop_seen: ?[2]usize = null;
 
 /// The tab on the move, under the cursor as a branch is: its badge and
 /// name, a little below and right of the pointer, deaf to the mouse.
@@ -11318,7 +10494,7 @@ fn tabDragStart(wd: *dvui.WidgetData, slot: [2]usize) void {
 
 /// A tab's name and its × are siblings, not nested, so the tab's own button
 /// never swallows the press meant for the ×.
-fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint: []const u8, active: bool, width: f32, rect_out: *dvui.Rect.Physical, look: TabLook) TabHit {
+pub fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint: []const u8, active: bool, width: f32, rect_out: *dvui.Rect.Physical, look: TabLook) TabHit {
     var hit: TabHit = .none;
     const lit = if (look.slot) |s| (if (tab_drop_over) |o| o[0] == s[0] and o[1] == s[1] else false) else false;
 
@@ -11419,7 +10595,7 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
 }
 
 /// Where the tab before this one was the raised one, for the rule between.
-var tab_prev_active = true;
+pub var tab_prev_active = true;
 /// The strip shows above a tab, and between two.
 const TAB_TOP: f32 = 4;
 const TAB_GAP: f32 = 4;
@@ -11482,7 +10658,7 @@ fn listedEarlier(group_index: usize, tab_index: usize, path: []const u8) bool {
 ///
 /// Without it the only sign is that ordinary commands start refusing to run,
 /// which is the single most confusing state a git GUI can leave you in.
-fn operationControls() void {
+pub fn operationControls() void {
     const h = history orelse return;
     if (h.state == .none) return;
 
@@ -11542,10 +10718,10 @@ fn opShort(buf: []u8) []const u8 {
     const n = conflictCount();
     const o = op_info;
     if (o.total > 0) return (if (n > 0)
-        std.fmt.bufPrint(buf, "{d}/{d} · {d} conflict{s}", .{ @min(o.step, o.total), o.total, n, plural(n) })
+        std.fmt.bufPrint(buf, "{d}/{d} · {d} conflict{s}", .{ @min(o.step, o.total), o.total, n, window_chrome.plural(n) })
     else
         std.fmt.bufPrint(buf, "{d}/{d} · resolved", .{ @min(o.step, o.total), o.total })) catch "";
-    return (if (n > 0) std.fmt.bufPrint(buf, "{d} conflict{s}", .{ n, plural(n) }) else std.fmt.bufPrint(buf, "resolved", .{})) catch "";
+    return (if (n > 0) std.fmt.bufPrint(buf, "{d} conflict{s}", .{ n, window_chrome.plural(n) }) else std.fmt.bufPrint(buf, "resolved", .{})) catch "";
 }
 
 /// The strip's one filled button: the next thing to do.
@@ -11609,7 +10785,7 @@ fn opDetail() []const u8 {
     if (out.items.len > 0) out.appendSlice(a, "  ·  ") catch {};
     const n = conflictCount();
     if (n > 0) {
-        out.print(a, "{d} conflicted file{s}", .{ n, plural(n) }) catch {};
+        out.print(a, "{d} conflicted file{s}", .{ n, window_chrome.plural(n) }) catch {};
     } else {
         out.appendSlice(a, "no conflict left") catch {};
     }
@@ -11877,7 +11053,7 @@ fn forcePushText(buf: []u8) []const u8 {
     const t = h.tracking;
     const upstream = t.upstream orelse return plain;
     if (t.behind == 0) return plain;
-    return std.fmt.bufPrint(buf, "Replace {s} with your branch? Its {d} commit{s} there give way to your {d}. Refused if it moved since your last fetch.", .{ upstream, t.behind, plural(t.behind), t.ahead }) catch plain;
+    return std.fmt.bufPrint(buf, "Replace {s} with your branch? Its {d} commit{s} there give way to your {d}. Refused if it moved since your last fetch.", .{ upstream, t.behind, window_chrome.plural(t.behind), t.ahead }) catch plain;
 }
 
 /// "Abort the rebase? …": what an abort puts back, and what it loses.
@@ -11946,7 +11122,7 @@ pub fn conflictCount() usize {
 fn graphBranchMenu(src: std.builtin.SourceLocation) void {
     const picked = graph_only.items.len;
 
-    const button = DropButton.begin(src, .{
+    const button = window_chrome.DropButton.begin(src, .{
         .tag = "branch_selector",
         .gravity_y = 0.5,
         // Lit while it narrows the graph: branches picked, or First-parent.
@@ -12049,10 +11225,10 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
 
 /// What the branch menu is narrowed to, and how many it shows at most.
 var branch_filter: std.ArrayList(u8) = .empty;
-const MAX_BRANCH_CHOICES = 60;
+pub const MAX_BRANCH_CHOICES = 60;
 
 /// A section title inside a dropdown — not a choice, just a label.
-fn dropHeading(src: std.builtin.SourceLocation, id: usize, caption: []const u8) void {
+pub fn dropHeading(src: std.builtin.SourceLocation, id: usize, caption: []const u8) void {
     dvui.label(src, "{s}", .{caption}, .{
         .id_extra = id,
         .font = style.section(),
@@ -12120,14 +11296,14 @@ const Tool = struct {
 };
 
 /// The icon alone; the caption is its hint, on hover.
-fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, t: Tool) bool {
+pub fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, t: Tool) bool {
     const enabled = repo != null and t.usable and !t.busy;
     const bare = true;
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = t.tag orelse frameTag("toolbar", caption),
-        .min_size_content = .{ .w = if (bare) TOOL_H else 0, .h = TOOL_H },
+        .min_size_content = .{ .w = if (bare) window_chrome.TOOL_H else 0, .h = window_chrome.TOOL_H },
         .gravity_y = 0.5,
         .background = false,
         .margin = .{ .x = 2, .w = 2 },
@@ -12203,12 +11379,12 @@ fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []cons
 ///
 /// `hint` is what the icon means, in words: an icon on its own is a guess
 /// until you have clicked it once, and some of these are not undoable.
-fn iconButton(src: std.builtin.SourceLocation, name: []const u8, hint: []const u8, icon: []const u8, color: dvui.Color) bool {
+pub fn iconButton(src: std.builtin.SourceLocation, name: []const u8, hint: []const u8, icon: []const u8, color: dvui.Color) bool {
     return iconButtonTagged(src, name, hint, icon, color, null);
 }
 
 /// As `iconButton`, findable by `tag` — for one that appears once.
-fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []const u8, icon: []const u8, color: dvui.Color, tag: ?[]const u8) bool {
+pub fn iconButtonTagged(src: std.builtin.SourceLocation, name: []const u8, hint: []const u8, icon: []const u8, color: dvui.Color, tag: ?[]const u8) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
@@ -12311,7 +11487,7 @@ fn textField(src: std.builtin.SourceLocation, init_opts: dvui.TextEntryWidget.In
 /// Not on its first frame: a floating window spends that one hidden while it
 /// measures itself, and a focus asked for then is dropped. Remembered per
 /// widget, so a click elsewhere is not undone the frame after.
-fn focusOnce(id: dvui.Id) void {
+pub fn focusOnce(id: dvui.Id) void {
     if (dvui.firstFrame(id)) return;
     if (dvui.dataGet(null, id, "_zit_focused", bool) != null) return;
     dvui.dataSet(null, id, "_zit_focused", true);
@@ -12527,7 +11703,7 @@ const OpInfo = struct {
     theirs_role: []const u8 = "",
 };
 
-var op_info: OpInfo = .{};
+pub var op_info: OpInfo = .{};
 /// What `op_info`'s words live in; emptied each time it is read.
 var op_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 
@@ -13431,7 +12607,7 @@ fn remoteHas(branch: []const u8) bool {
 /// A field that drops a list to pick from: what is picked on its face, or
 /// what to do when nothing is. `end` closes it.
 const Picker = struct {
-    button: DropButton,
+    button: window_chrome.DropButton,
     menu: ?*dvui.FloatingMenuWidget,
     id: usize,
 
@@ -13441,7 +12617,7 @@ const Picker = struct {
 };
 
 fn picker(id: usize, face: []const u8, placeholder: []const u8, tag: []const u8) Picker {
-    var button = DropButton.begin(@src(), .{
+    var button = window_chrome.DropButton.begin(@src(), .{
         .id_extra = id,
         .tag = tag,
         .expand = .horizontal,
@@ -13632,7 +12808,7 @@ fn peopleRows(list: *std.ArrayList(u8), reviewers: bool) ?[]const u8 {
     var shown: usize = 0;
     var toggled: ?[]const u8 = null;
     for (pr.meta.people, 0..) |person, i| {
-        if (reviewers and me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(person.login, me_gh.items)) continue;
+        if (reviewers and window_chrome.me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(person.login, window_chrome.me_gh.items)) continue;
         if (!pickShown(person.login, person.name)) continue;
         shown += 1;
         if (pickRow(i, person.login, person.name, listHas(list.items, person.login), null)) {
@@ -14574,8 +13750,8 @@ fn refMenu(
 /// A right-click menu: a raised card with a border, a little room inside.
 /// A menu's least width and its rows' padding above and below the caption:
 /// GitComet's comfortable menus — 260 wide, rows about 30 high.
-const MENU_MIN_W: f32 = 260;
-const MENU_ROW_PAD_Y: f32 = 7;
+pub const MENU_MIN_W: f32 = 260;
+pub const MENU_ROW_PAD_Y: f32 = 7;
 
 fn contextMenu(cp: dvui.Point.Natural) *dvui.FloatingMenuWidget {
     return dvui.floatingMenu(@src(), .{ .from = dvui.Rect.Natural.fromPoint(cp) }, .{
@@ -14603,7 +13779,7 @@ fn menuTitle(name: []const u8, kind: []const u8) void {
 
 /// A menu row with its icon; `danger` reads it in red — the ones that lose
 /// something.
-fn menuIcon(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8, danger: bool) bool {
+pub fn menuIcon(src: std.builtin.SourceLocation, icon: []const u8, caption: []const u8, danger: bool) bool {
     return menuIconId(src, 0, icon, caption, danger);
 }
 
@@ -14642,7 +13818,7 @@ fn menuIconId(src: std.builtin.SourceLocation, id: usize, icon: []const u8, capt
 }
 
 /// A hairline between groups of rows.
-fn menuSeparator(id: usize) void {
+pub fn menuSeparator(id: usize) void {
     var line = dvui.box(@src(), .{}, .{
         .id_extra = id,
         .expand = .horizontal,
@@ -14963,7 +14139,7 @@ fn authorByKey(key: []const u8) ?AuthorEntry {
 
 /// Whether `entry` is you, by the address git commits as here.
 fn isMe(entry: AuthorEntry) bool {
-    return me_email.items.len > 0 and std.ascii.eqlIgnoreCase(entry.email, me_email.items);
+    return window_chrome.me_email.items.len > 0 and std.ascii.eqlIgnoreCase(entry.email, window_chrome.me_email.items);
 }
 
 /// What the filter is, in words: the one author's name, or how many.
@@ -14991,7 +14167,7 @@ fn authorHeader() void {
     });
     defer cell.deinit();
     const picked = author_only.items.len;
-    var button = DropButton.begin(@src(), .{
+    var button = window_chrome.DropButton.begin(@src(), .{
         .tag = "header:author",
         .gravity_x = 0.5,
         .gravity_y = 0.5,
@@ -15404,7 +14580,7 @@ fn headerCell(src: std.builtin.SourceLocation, caption: []const u8, width: f32, 
 /// The history's search: a card floating over the middle of the list's top,
 /// opened by the toolbar's Search or Ctrl+F — out of the way the rest of the
 /// time, which gives the list its row back.
-var search_open: bool = false;
+pub var search_open: bool = false;
 
 fn floatingSearch() void {
     // A floating widget, a subwindow of its own over the list: drawn as a
@@ -15441,7 +14617,7 @@ fn floatingSearch() void {
     if (iconButtonTagged(@src(), "search_close", "Close the search — Esc", dvui.entypo.cross, style.textMuted(), "search:close")) closeSearch();
 }
 
-fn closeSearch() void {
+pub fn closeSearch() void {
     search_open = false;
     commit_filter.clearRetainingCapacity();
     clearFileHistory();
@@ -15480,7 +14656,7 @@ fn graphNotes() void {
         const caption = if (n == 0)
             std.fmt.allocPrint(dvui.currentWindow().arena(), "No commit by {s} — show all authors", .{who}) catch "Show all authors"
         else
-            std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} · {d} commit{s} — show all authors", .{ who, n, plural(n) }) catch "Show all authors";
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "{s} · {d} commit{s} — show all authors", .{ who, n, window_chrome.plural(n) }) catch "Show all authors";
         if (chipButton(@src(), dvui.entypo.users, caption, true)) clearAuthors();
     }
     if (file_history.items.len > 0) {
@@ -15833,7 +15009,7 @@ fn clearSearchHits() void {
     search_hits = .{};
 }
 
-fn changeCount() usize {
+pub fn changeCount() usize {
     const w = work orelse return 0;
     return w.staged.len + w.unstaged.len;
 }
@@ -16382,7 +15558,7 @@ fn avatarDot(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at:
 }
 
 /// As `avatar`, `d` across: the commit pane's is bigger than a graph node.
-fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color, d: f32) void {
+pub fn avatarSized(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color, d: f32) void {
     const name = commit.author;
     const rect: ?dvui.Rect = if (at) |p| .{ .x = p.x, .y = p.y, .w = d, .h = d } else null;
     const border: dvui.Rect = if (ring != null) dvui.Rect.all(1.5) else dvui.Rect.all(0);
@@ -16527,7 +15703,7 @@ fn moreRefs(src: std.builtin.SourceLocation, commit: git.Commit, hidden: usize, 
 
 /// Whether `ref` is a local branch and a remote branch of the same name, both
 /// at the same commit — what "pushed, nothing new on either side" looks like.
-fn sameOnRemote(h: git.History, ref: git.Ref) bool {
+pub fn sameOnRemote(h: git.History, ref: git.Ref) bool {
     if (ref.kind == .tag) return false;
     for (h.refs) |other| {
         if (other.kind == .tag or other.kind == ref.kind or !git.oidEql(other.target, ref.target)) continue;
@@ -16836,7 +16012,7 @@ fn inPickedRequest(id: git.Oid) bool {
 /// "↑2 ↓1" for a branch's distance from its upstream, nothing when level.
 /// Icons rather than arrow characters: the fonts are cut down to what the
 /// UI already used.
-fn trackingMarks(t: git.Tracking, ink: dvui.Color) void {
+pub fn trackingMarks(t: git.Tracking, ink: dvui.Color) void {
     for ([_]struct { usize, []const u8, []const u8 }{ .{ t.ahead, dvui.entypo.arrow_up, "ahead" }, .{ t.behind, dvui.entypo.arrow_down, "behind" } }, 0..) |mark, i| {
         if (mark[0] > 0) {
             dvui.icon(@src(), mark[2], mark[1], .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
@@ -17214,7 +16390,7 @@ fn relativeTime(buf: []u8, when: i64) []const u8 {
     return std.fmt.bufPrint(buf, "{d} {s}{s} ago", .{
         n,
         chosen.name,
-        plural(n),
+        window_chrome.plural(n),
     }) catch "a while ago";
 }
 
@@ -17846,7 +17022,7 @@ fn rebasePanel() void {
 
         dvui.label(@src(), "Replay {d} commit{s} onto {s}", .{
             rebase_steps.items.len,
-            plural(rebase_steps.items.len),
+            window_chrome.plural(rebase_steps.items.len),
             if (rebase_root) "the root" else rebase_base[0..@min(rebase_base_len, 7)],
         }, .{
             .font = style.smallBold(),
@@ -18031,7 +17207,7 @@ fn conflictOutput() void {
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
         });
-        dvui.label(@src(), "{d} conflict{s} left", .{ conflicts.len, plural(conflicts.len) }, .{
+        dvui.label(@src(), "{d} conflict{s} left", .{ conflicts.len, window_chrome.plural(conflicts.len) }, .{
             .font = style.tiny(),
             .color_text = .{ .color = if (conflicts.len == 0) style.success() else style.textFaint() },
             .gravity_y = 0.5,
@@ -18157,7 +17333,7 @@ fn safeBar(safe: usize) void {
     var bar = alertBox(@src(), 0, style.success(), dvui.entypo.check, .{ .x = style.space.md, .y = style.space.md, .w = style.space.md, .h = style.space.sm });
     defer bar.deinit();
     var text_buf: [160]u8 = undefined;
-    alertText(@src(), std.fmt.bufPrint(&text_buf, "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, plural(conflicts.len) }) catch "", style.success());
+    alertText(@src(), std.fmt.bufPrint(&text_buf, "{d} of {d} conflict{s} can be resolved safely: each keeps the side that changed it.", .{ safe, conflicts.len, window_chrome.plural(conflicts.len) }) catch "", style.success());
     var buf: [48]u8 = undefined;
     const caption = if (safe == 1) "Resolve it" else std.fmt.bufPrint(&buf, "Resolve these {d}", .{safe}) catch "Resolve them";
     if (alertButton(@src(), caption, style.success(), "conflict:resolve_safe")) requestAction(.resolve_safe);
@@ -18547,11 +17723,11 @@ fn diffLineRow(
             var buf: [32]u8 = undefined;
             if (n > 0) {
                 if (s == .unstaged) {
-                    const discard = std.fmt.bufPrint(&buf, "Discard {d} line{s}", .{ n, plural(n) }) catch "Discard lines";
+                    const discard = std.fmt.bufPrint(&buf, "Discard {d} line{s}", .{ n, window_chrome.plural(n) }) catch "Discard lines";
                     if (linkButton(@src(), discard, style.danger())) requestLines(file, line.hunk, s, true);
                 }
                 const verb = if (s == .unstaged) "Stage" else "Unstage";
-                const caption = std.fmt.bufPrint(&buf, "{s} {d} line{s}", .{ verb, n, plural(n) }) catch verb;
+                const caption = std.fmt.bufPrint(&buf, "{s} {d} line{s}", .{ verb, n, window_chrome.plural(n) }) catch verb;
                 if (linkButton(@src(), caption, style.accent())) requestLines(file, line.hunk, s, false);
                 return;
             }
@@ -19554,7 +18730,7 @@ fn compareDetail() void {
             .margin = .{ .y = style.space.xs },
         });
         const files = if (diff != null) diff_all.len else 0;
-        dvui.label(@src(), "{d} file{s} differ", .{ files, plural(files) }, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.xs } });
+        dvui.label(@src(), "{d} file{s} differ", .{ files, window_chrome.plural(files) }, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.xs } });
     }
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     defer scroll.deinit();
@@ -20996,7 +20172,7 @@ fn coAuthorMenu(src: std.builtin.SourceLocation) void {
 /// the window has no room below — never on top of it. Its list scrolls past
 /// a height.
 fn pillMenu(src: std.builtin.SourceLocation, tag: []const u8, icon: []const u8, margin: dvui.Rect, hint: []const u8) Picker {
-    var button = DropButton.begin(src, .{
+    var button = window_chrome.DropButton.begin(src, .{
         .tag = tag,
         .min_size_content = .{ .h = 26 },
         .gravity_y = 0.5,
@@ -21182,8 +20358,8 @@ fn statusBar() void {
 
 // === What Zit does ===
 
-var features_open = false;
-var features_rect: dvui.Rect = .{};
+pub var features_open = false;
+pub var features_rect: dvui.Rect = .{};
 
 const Feature = struct { icon: []const u8, title: []const u8, items: []const []const u8 };
 /// Every feature, grouped as a day of work goes: the history, the changes,
@@ -21370,7 +20546,7 @@ fn featuresDialog() void {
 var features_page: usize = 0;
 
 /// Where Zit is: its documentation, and its sources.
-const SITE_URL = "https://damienmonchaty.github.io/zit/";
+pub const SITE_URL = "https://damienmonchaty.github.io/zit/";
 const REPO_URL = "https://github.com/DamienMonchaty/zit";
 const PLATFORM = switch (@import("builtin").os.tag) {
     .windows => "Windows",
@@ -21477,8 +20653,8 @@ fn startScreen() void {
         });
         var words = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false });
         defer words.deinit();
-        loadMe();
-        const first = std.mem.sliceTo(std.mem.trim(u8, me_name.items, " "), ' ');
+        window_chrome.loadMe();
+        const first = std.mem.sliceTo(std.mem.trim(u8, window_chrome.me_name.items, " "), ' ');
         if (first.len > 0)
             dvui.label(@src(), "Hello, {s}", .{first}, .{ .font = style.title(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) })
         else
@@ -22056,7 +21232,7 @@ fn resetUiGlobals() void {
     ws_name.deinit(gpa);
     ws_name = .empty;
     ws_dialog = null;
-    tab_revealed = null;
+    window_chrome.tab_revealed = null;
     tab_strip.config_dir.deinit(gpa);
     tab_strip.config_dir = .empty;
 
@@ -22080,8 +21256,8 @@ fn resetUiGlobals() void {
     palette_text = .empty;
     branch_filter.deinit(gpa);
     branch_filter = .empty;
-    switch_filter.deinit(gpa);
-    switch_filter = .empty;
+    window_chrome.switch_filter.deinit(gpa);
+    window_chrome.switch_filter = .empty;
     author_filter.deinit(gpa);
     author_filter = .empty;
     clearNames(&author_only);
@@ -22138,7 +21314,7 @@ fn resetUiGlobals() void {
     identity_email.deinit(gpa);
     identity_email = .empty;
     identity_open = false;
-    forgetMe();
+    window_chrome.forgetMe();
     clearDrop();
     drag_source.deinit(gpa);
     drag_source = .empty;
@@ -23222,11 +22398,11 @@ test "after a rebase, Push is a force push that says what it replaces" {
     openRepo(down);
     defer closeRepo();
     defer clearCommandError();
-    try std.testing.expect(!rebasedSinceUpstream());
+    try std.testing.expect(!window_chrome.rebasedSinceUpstream());
 
     gitDo(&.{ "rebase", "main" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
-    try std.testing.expect(rebasedSinceUpstream());
+    try std.testing.expect(window_chrome.rebasedSinceUpstream());
     var buf: [512]u8 = undefined;
     const text = forcePushText(&buf);
     try std.testing.expect(std.mem.indexOf(u8, text, "origin/feat") != null);
@@ -25171,7 +24347,7 @@ test "the toolbar's branch menu filters and switches branches" {
 
     // A branch only the remote has: switched to, and tracked.
     try clickAt(try tagCenter("toolbar:branch"));
-    try std.testing.expectEqual(@as(usize, 0), switch_filter.items.len);
+    try std.testing.expectEqual(@as(usize, 0), window_chrome.switch_filter.items.len);
     try clickAt(try tagCenter("switch:origin/remote-only"));
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -25200,8 +24376,8 @@ test "the avatar's menu opens the signing card, and asks before signing out" {
     defer clearCommandError();
     defer clearConfirm();
     // Who the menu says is signed in, without asking GitHub.
-    me_loaded = true;
-    try me_gh.appendSlice(gpa, "tester");
+    window_chrome.me_loaded = true;
+    try window_chrome.me_gh.appendSlice(gpa, "tester");
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -25399,7 +24575,7 @@ test "a request's lists, run ids and checks read the way the commands want them"
 test "the request list's tabs and search let the right ones through" {
     gpa = std.testing.allocator;
     defer resetUiGlobals();
-    try me_gh.appendSlice(gpa, "me");
+    try window_chrome.me_gh.appendSlice(gpa, "me");
     const mine: pr.Request = .{ .number = 7, .title = "Add login", .branch = "PROJ-25", .author = "me", .draft = true };
     const asks: pr.Request = .{ .number = 12, .title = "API module", .branch = "PROJ-39", .author = "ann", .draft = false, .reviewers = &.{ "bo", "Me" } };
     const other: pr.Request = .{ .number = 30, .title = "Docs", .branch = "PROJ-33", .author = "bo", .draft = false };
@@ -25486,7 +24662,7 @@ test "a new pull request's reviewers, labels and type are picked from lists" {
     defer closeRepo();
     pr.host = .github;
     defer pr.host = .none;
-    me_loaded = true;
+    window_chrome.me_loaded = true;
     pr.meta = .{
         .people = &.{ .{ .login = "ann", .name = "Ann Lee" }, .{ .login = "bo" } },
         .labels = &.{ .{ .name = "bug", .color = "d73a4a" }, .{ .name = "good first issue", .color = "7057ff" } },
@@ -25558,7 +24734,7 @@ test "the request's sidebar picks its labels from a list, sent at once" {
     active_view = .pulls;
     pr.host = .github;
     defer pr.host = .none;
-    me_loaded = true;
+    window_chrome.me_loaded = true;
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1600, .h = 800 } });
     defer t.deinit();
     try style.applyEmbedded(gpa, true);
@@ -25698,7 +24874,7 @@ test "changes asked for: threads under their review, a suggestion applied from i
     active_view = .pulls;
     pr.host = .github;
     defer pr.host = .none;
-    me_loaded = true;
+    window_chrome.me_loaded = true;
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -25776,7 +24952,7 @@ test "a request's pane draws every tab" {
     // The pane is drawn only on a host; nothing is asked of it here.
     pr.host = .github;
     defer pr.host = .none;
-    me_loaded = true;
+    window_chrome.me_loaded = true;
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -25826,7 +25002,7 @@ test "the requests are walked from the keys, starting at the checked-out branch'
     defer pr.list = &.{};
     pr.host = .github;
     defer pr.host = .none;
-    me_loaded = true;
+    window_chrome.me_loaded = true;
     active_view = .pulls;
     defer pr_selected = null;
 
@@ -26047,7 +25223,7 @@ test "with the integrations off, no pull requests, issues or GitHub account" {
 
     pr.host = .github;
     defer pr.host = .none;
-    me_loaded = true;
+    window_chrome.me_loaded = true;
     active_view = .pulls;
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
@@ -28665,9 +27841,9 @@ test "docs screenshots" {
     section_collapsed = @splat(false);
     section_collapsed[@backingInt(Section.tags)] = true;
     stillUi();
-    try me_name.appendSlice(gpa, "Alice Martin");
-    try me_email.appendSlice(gpa, "alice@acme.dev");
-    me_loaded = true;
+    try window_chrome.me_name.appendSlice(gpa, "Alice Martin");
+    try window_chrome.me_email.appendSlice(gpa, "alice@acme.dev");
+    window_chrome.me_loaded = true;
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1440, .h = 900 }, .allocator = std.heap.c_allocator });
     defer t.deinit();
     const demo = "/tmp/acme-web";

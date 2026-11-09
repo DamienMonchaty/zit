@@ -6,6 +6,7 @@ const graph = @import("../git/graph.zig");
 const run = @import("../core/run.zig");
 const store = @import("../core/store.zig");
 const avatars = @import("../github/avatar.zig");
+const window_chrome = @import("window_chrome.zig");
 const app = @import("../main.zig");
 
 // === Tabs and groups ===
@@ -351,7 +352,7 @@ pub var integrations: bool = true;
 pub fn setIntegrations(on: bool) void {
     integrations = on;
     avatars.use_github.store(on, .release);
-    app.me_loaded = false;
+    window_chrome.me_loaded = false;
     if (!on and app.active_view == .pulls) app.closePulls();
     avatars.setGithubRepo(if (on) app.githubRemote() else null);
     app.refreshRequests();
