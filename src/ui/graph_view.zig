@@ -9,6 +9,7 @@ const window_chrome = @import("window_chrome.zig");
 const search_view = @import("search_view.zig");
 const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
+const commit_view = @import("commit_view.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -73,7 +74,7 @@ pub fn hasName(list: []const []u8, name: []const u8) bool {
 
 pub fn clearNames(list: *std.ArrayList([]u8)) void {
     if (list == &graph_hidden) hidden_set.clearRetainingCapacity();
-    if (list == &app.picked_changes) app.picked_set.clearRetainingCapacity();
+    if (list == &commit_view.picked_changes) commit_view.picked_set.clearRetainingCapacity();
     for (list.items) |n| app.gpa.free(n);
     list.clearRetainingCapacity();
 }
@@ -1237,12 +1238,12 @@ fn authorHeader() void {
     {
         var rows = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false });
         defer rows.deinit();
-        const in_sight = app.rowsInSight(rows.data(), listed.items.len, AUTHOR_ROW_H);
-        app.rowsSpacer(@src(), 0, in_sight.first, AUTHOR_ROW_H);
+        const in_sight = commit_view.rowsInSight(rows.data(), listed.items.len, AUTHOR_ROW_H);
+        commit_view.rowsSpacer(@src(), 0, in_sight.first, AUTHOR_ROW_H);
         for (listed.items[in_sight.first..in_sight.last], in_sight.first..) |l, i| {
             if (authorRow(i, l.entry, l.picked, l.has_commit)) |only| change = .{ .key = l.entry.key, .only = only };
         }
-        app.rowsSpacer(@src(), 1, listed.items.len - in_sight.last, AUTHOR_ROW_H);
+        commit_view.rowsSpacer(@src(), 1, listed.items.len - in_sight.last, AUTHOR_ROW_H);
     }
 
     if (app.search_entered == field) {

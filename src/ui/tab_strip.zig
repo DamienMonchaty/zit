@@ -9,6 +9,7 @@ const avatars = @import("../github/avatar.zig");
 const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
+const commit_view = @import("commit_view.zig");
 const app = @import("../main.zig");
 
 // === Tabs and groups ===
@@ -373,7 +374,7 @@ pub var show_avatars: bool = true;
 /// for the timer's own. Where git's own config says whether to prune — for
 /// this repository or everywhere — git decides.
 pub fn fetchAllArgs(quiet: bool) []const []const u8 {
-    if (app.git_fetch_prune_set) return if (quiet) &.{ "fetch", "--all", "--quiet" } else &.{ "fetch", "--all" };
+    if (commit_view.git_fetch_prune_set) return if (quiet) &.{ "fetch", "--all", "--quiet" } else &.{ "fetch", "--all" };
     return if (prune_on_fetch)
         (if (quiet) &.{ "fetch", "--all", "--prune", "--quiet" } else &.{ "fetch", "--all", "--prune" })
     else

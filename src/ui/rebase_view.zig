@@ -11,6 +11,7 @@ const tab_strip = @import("tab_strip.zig");
 const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
 const diff_view = @import("diff_view.zig");
+const commit_view = @import("commit_view.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -203,7 +204,7 @@ pub fn sidebarSection(src: std.builtin.SourceLocation, section: diff_view.Sectio
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .expand = .horizontal,
-        .min_size_content = .{ .h = app.SECTION_HEAD_H },
+        .min_size_content = .{ .h = commit_view.SECTION_HEAD_H },
         .background = false,
         .margin = dvui.Rect.all(0),
         .padding = dvui.Rect.all(0),
@@ -218,7 +219,7 @@ pub fn sidebarSection(src: std.builtin.SourceLocation, section: diff_view.Sectio
         });
         defer row.deinit();
 
-        app.sectionFace(collapsed.*, section.title(), all_hidden);
+        commit_view.sectionFace(collapsed.*, section.title(), all_hidden);
         if (all_hidden) dvui.icon(@src(), "section_hidden", app.eyeIcon(true), .{ .fill_color = .{ .color = style.textFaint() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
@@ -946,7 +947,7 @@ fn conflictOutput() void {
             .padding = dvui.Rect.all(0),
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (app.linkButton(@src(), "Open this file", style.textMuted())) app.openPath(app.selected_path.items);
+        if (app.linkButton(@src(), "Open this file", style.textMuted())) commit_view.openPath(app.selected_path.items);
     }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
@@ -1355,7 +1356,7 @@ pub fn diffFileRow(
     });
     defer box.deinit();
 
-    app.statusFlag(@src(), file.status);
+    commit_view.statusFlag(@src(), file.status);
     // Its folder faint, its name in full: the name is what is looked for.
     const slash = std.mem.lastIndexOfScalar(u8, file.path, '/');
     const folder = if (slash) |i| file.path[0 .. i + 1] else "";

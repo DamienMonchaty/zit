@@ -6,6 +6,7 @@ const graph = @import("../git/graph.zig");
 const run = @import("../core/run.zig");
 const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
+const commit_view = @import("commit_view.zig");
 const app = @import("../main.zig");
 
 // === Split diff ===
@@ -688,11 +689,11 @@ fn diffHeader() void {
             // only thing on offer for a binary file or a mode change.
             if (side == .unstaged) {
                 if (app.linkButton(@src(), "Stage file", style.accent())) {
-                    app.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), true);
+                    commit_view.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), true);
                 }
             } else {
                 if (app.linkButton(@src(), "Unstage file", style.accent())) {
-                    app.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), false);
+                    commit_view.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), false);
                 }
             }
         },
