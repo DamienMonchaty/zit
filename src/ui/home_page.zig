@@ -11,6 +11,7 @@ const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === What Zit does ===
@@ -347,7 +348,7 @@ pub fn startScreen() void {
     const arena = dvui.currentWindow().arena();
     var open_n: usize = 0;
     for (tab_strip.groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
-        if (app.listedEarlier(gi, ti, tab.path) or !startMatches(needle, tab.path)) continue;
+        if (github_connect.listedEarlier(gi, ti, tab.path) or !startMatches(needle, tab.path)) continue;
         shown.append(arena, tab.path) catch {};
         open_n += 1;
     };
@@ -489,7 +490,7 @@ fn recentRow(src: std.builtin.SourceLocation, id: usize, path: []const u8, open:
             // the names line up.
             var mark = dvui.box(@src(), .{}, .{ .min_size_content = .{ .w = 34 }, .max_size_content = .width(34), .gravity_y = 0.5, .background = false });
             defer mark.deinit();
-            app.tabBadge(git.repoName(path), open or picked);
+            github_connect.tabBadge(git.repoName(path), open or picked);
         }
 
         var text = dvui.box(@src(), .{ .dir = .vertical }, .{

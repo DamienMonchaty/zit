@@ -12,6 +12,7 @@ const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === Command palette ===
@@ -32,9 +33,9 @@ const Command = struct {
 };
 
 const commands = [_]Command{
-    .{ .name = "Continue the merge or rebase", .icon = dvui.entypo.controller_play, .keys = "Ctrl+Enter", .when = app.canContinue, .run = app.requestContinue },
-    .{ .name = "Skip the commit it stopped on", .icon = dvui.entypo.controller_next, .when = app.canSkip, .run = github_actions.requestSkipStep },
-    .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = app.midOperation, .run = github_actions.requestAbortOperation },
+    .{ .name = "Continue the merge or rebase", .icon = dvui.entypo.controller_play, .keys = "Ctrl+Enter", .when = github_connect.canContinue, .run = github_connect.requestContinue },
+    .{ .name = "Skip the commit it stopped on", .icon = dvui.entypo.controller_next, .when = github_connect.canSkip, .run = github_actions.requestSkipStep },
+    .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = github_connect.midOperation, .run = github_actions.requestAbortOperation },
     .{ .name = "Fetch all remotes", .icon = dvui.entypo.cw, .run = struct {
         fn f() void {
             repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
@@ -243,7 +244,7 @@ pub fn palette() void {
     for (tab_strip.groups.items, 0..) |group, gi| {
         for (group.tabs.items, 0..) |tab, ti| {
             if (n == PALETTE_ROWS) break;
-            if (app.listedEarlier(gi, ti, tab.path)) continue;
+            if (github_connect.listedEarlier(gi, ti, tab.path)) continue;
             const name = git.repoName(tab.path);
             if (!fuzzy(name, needle)) continue;
             items[n] = .{ .repo = .{ .group = gi, .tab = ti } };
@@ -404,7 +405,7 @@ pub fn tabStrip() void {
     defer strip.deinit();
 
     active_tab_foot = null;
-    app.workspaceSwitcher();
+    github_connect.workspaceSwitcher();
     window_chrome.tabList();
     window_chrome.userMenu();
     window_chrome.windowControls();

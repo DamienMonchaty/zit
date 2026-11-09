@@ -17,6 +17,7 @@ const identity_view = @import("identity_view.zig");
 const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -654,7 +655,7 @@ pub fn requestsError() void {
     // Not connected yet: the one thing to do.
     if (!github.signedIn()) {
         dvui.label(@src(), "Not connected to GitHub.", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
-        if (dialog_views.linkButton(@src(), "Connect", style.accent())) app.openConnect();
+        if (dialog_views.linkButton(@src(), "Connect", style.accent())) github_connect.openConnect();
         return;
     }
     // GitHub's answer for a private repository Zit has not been let into:
@@ -674,7 +675,7 @@ pub fn requestsError() void {
     });
     // The token turned down: only connecting again mends that.
     if (std.mem.startsWith(u8, pr.last_error.items, "GitHub no longer accepts")) {
-        if (dialog_views.linkButton(@src(), "Connect", style.accent())) app.openConnect();
+        if (dialog_views.linkButton(@src(), "Connect", style.accent())) github_connect.openConnect();
         return;
     }
     if (dialog_views.linkButton(@src(), "Try again", style.accent())) repo_io.refreshRequests();
@@ -1054,7 +1055,7 @@ fn conflictRegions() void {
         });
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
         defer row.deinit();
-        if (app.opButton(@src(), "Stage it and open the next — Enter", "conflict:stage_next")) repo_io.requestAction(.stage_next);
+        if (github_connect.opButton(@src(), "Stage it and open the next — Enter", "conflict:stage_next")) repo_io.requestAction(.stage_next);
         return;
     }
 

@@ -8,6 +8,7 @@ const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === Left: refs ===
@@ -121,7 +122,7 @@ fn mergeSidebar() void {
             .color_text = .{ .color = style.success() },
             .padding = dvui.Rect.all(0),
         });
-        if (app.canContinue()) dvui.label(@src(), "Continue from the bar above — Ctrl+Enter", .{}, .{
+        if (github_connect.canContinue()) dvui.label(@src(), "Continue from the bar above — Ctrl+Enter", .{}, .{
             .font = style.small(),
             .color_text = .{ .color = style.textMuted() },
             .margin = .{ .y = style.space.xs },
@@ -138,7 +139,7 @@ fn mergeSidebar() void {
 
 /// A conflicted file in the sidebar's card: lit while it is the one open.
 fn conflictFileRow(id: usize, path: []const u8) void {
-    const open = app.viewingConflict() and std.mem.eql(u8, app.selected_path.items, path);
+    const open = github_connect.viewingConflict() and std.mem.eql(u8, app.selected_path.items, path);
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .id_extra = id,

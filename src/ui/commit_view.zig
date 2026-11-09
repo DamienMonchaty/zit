@@ -15,6 +15,7 @@ const dialog_views = @import("dialog_views.zig");
 const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -2347,7 +2348,7 @@ fn pillFace(dd: *dvui.DropdownWidget, icon: []const u8, text: []const u8) void {
             .padding = dvui.Rect.all(0),
         });
     }
-    app.dropAffordance(dd, style.textFaint());
+    github_connect.dropAffordance(dd, style.textFaint());
 }
 
 fn pillInit(dd: *dvui.DropdownWidget, src: std.builtin.SourceLocation, tag: []const u8, margin: dvui.Rect) void {

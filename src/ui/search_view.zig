@@ -13,6 +13,7 @@ const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === Search through git ===
@@ -586,7 +587,7 @@ fn commitMenu(
     }
 
     graph_view.menuSeparator(2);
-    if (!app.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
+    if (!github_connect.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.flow_cascade, "Cherry-pick onto current branch", false)) {
         fw.close();
         // A merge, like a revert of one: its change is the diff against the
         // first parent, the branch it was merged into.
@@ -596,7 +597,7 @@ fn commitMenu(
             repo_io.request(&.{ "cherry-pick", sha });
         }
     }
-    if (!app.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
+    if (!github_connect.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.ccw, "Revert", false)) {
         fw.close();
         // A merge has no single change to undo until one parent is named; the
         // first is the branch it was merged into, which is what "undo this
@@ -607,7 +608,7 @@ fn commitMenu(
             repo_io.request(&.{ "revert", "--no-edit", sha });
         }
     }
-    if (!app.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
+    if (!github_connect.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
         fw.close();
         // The clicked commit is replayed too, so the list starts at its parent.
         github_actions.beginRebase(if (commit.parents.len > 0) commit.parents[0] else null);

@@ -14,6 +14,7 @@ const command_palette = @import("command_palette.zig");
 const home_page = @import("home_page.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -174,7 +175,7 @@ pub fn titlebar() void {
         // history, not over the window. And where a merge or a rebase under
         // way says so, as GitComet's action bar does.
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        app.operationControls();
+        github_connect.operationControls();
         // Finding a commit: not an action on the repository, so apart from
         // them, an icon on this side.
         if (dialog_views.toolButton(@src(), "Search", dvui.entypo.magnifying_glass, .{ .icon_only = true, .on = graph_view.search_open, .hint = "Search the commits — Ctrl+F" })) {
@@ -583,13 +584,13 @@ pub fn tabList() void {
         r.w -= used;
         setWindowDrag(r);
         // A tab let go there leaves its group for the end of the strip.
-        if (dvui.dragName(app.TAB_DRAG_NAME)) for (dvui.events()) |*e| {
+        if (dvui.dragName(github_connect.TAB_DRAG_NAME)) for (dvui.events()) |*e| {
             if (e.evt != .mouse) continue;
             const me = e.evt.mouse;
             if (me.action != .release or !me.button.pointer() or !r.contains(me.p)) continue;
             e.handle(@src(), scroll.data());
             dvui.dragEnd(me.button);
-            github_actions.requestTab(.{ .tab_end = app.tab_drag });
+            github_actions.requestTab(.{ .tab_end = github_connect.tab_drag });
         };
     }
     // The active tab's foot only where the strip shows the tab: scrolled
@@ -602,9 +603,9 @@ pub fn tabList() void {
     };
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical, .background = false });
     defer row.deinit();
-    const width = app.TAB_W;
+    const width = github_connect.TAB_W;
     // No rule before the first tab.
-    app.tab_prev_active = true;
+    github_connect.tab_prev_active = true;
 
     // Only recorded here, run after the frame: selecting or closing one
     // rebuilds the snapshots the rest of this frame is drawn from.
@@ -624,7 +625,7 @@ pub fn tabList() void {
         });
         defer span.deinit();
         if (named) {
-            const chip = app.groupChip(g, group, hue);
+            const chip = github_connect.groupChip(g, group, hue);
             if (group.collapsed) {
                 flat += group.tabs.items.len;
                 continue;
@@ -636,7 +637,7 @@ pub fn tabList() void {
             const current = app.repo != null and g == tab_strip.active_group and t == tab_strip.active_tab;
             const active = !app.new_tab_open and current;
             var rect: dvui.Rect.Physical = .{};
-            switch (app.tabButton(@src(), flat, git.repoName(tab.path), tab.path, active, width, &rect, .{ .slot = .{ g, t }, .hue = if (named) hue else null })) {
+            switch (github_connect.tabButton(@src(), flat, git.repoName(tab.path), tab.path, active, width, &rect, .{ .slot = .{ g, t }, .hue = if (named) hue else null })) {
                 .none => {},
                 // Back from its pull requests' tab: the repository is open
                 // already, only the view changes.
@@ -651,7 +652,7 @@ pub fn tabList() void {
                 group_line.to = rect.x + rect.w;
                 if (active) group_line.gap = rect;
             }
-            app.tabMenu(g, t, flat, rect);
+            github_connect.tabMenu(g, t, flat, rect);
             flat += 1;
         }
     }
@@ -659,7 +660,7 @@ pub fn tabList() void {
     // The page a new tab opens on, as a tab of its own while it is up.
     if (app.new_tab_open) {
         var rect: dvui.Rect.Physical = .{};
-        switch (app.tabButton(@src(), flat, "New tab", "Open, clone or create a repository", true, width, &rect, .{ .icon = dvui.entypo.plus })) {
+        switch (github_connect.tabButton(@src(), flat, "New tab", "Open, clone or create a repository", true, width, &rect, .{ .icon = dvui.entypo.plus })) {
             .none, .select => {},
             .close => app.new_tab_open = false,
         }
@@ -671,9 +672,9 @@ pub fn tabList() void {
     }
 
     // What a drag was over this frame is lit on the next.
-    if (!std.meta.eql(app.tab_drop_over, app.tab_drop_seen)) dvui.refresh(null, @src(), null);
-    app.tab_drop_over = app.tab_drop_seen;
-    app.tab_drop_seen = null;
+    if (!std.meta.eql(github_connect.tab_drop_over, github_connect.tab_drop_seen)) dvui.refresh(null, @src(), null);
+    github_connect.tab_drop_over = github_connect.tab_drop_seen;
+    github_connect.tab_drop_seen = null;
 }
 
 /// The run a group's underline covers, in physical pixels, and the active

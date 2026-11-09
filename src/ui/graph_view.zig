@@ -14,6 +14,7 @@ const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -418,7 +419,7 @@ pub fn branchDragStart(wd: *dvui.WidgetData, ref: git.Ref) void {
 /// the graph's, a little below and right of the pointer. Deaf to the mouse,
 /// so the release lands on the row beneath it.
 pub fn dragGhost() void {
-    if (dvui.dragName(app.TAB_DRAG_NAME)) return app.tabGhost();
+    if (dvui.dragName(github_connect.TAB_DRAG_NAME)) return github_connect.tabGhost();
     if (!dvui.dragName(DRAG_NAME) or drag_source.items.len == 0) return;
     const scale = dvui.windowNaturalScale();
     const at = dvui.currentWindow().mouse_pt;
@@ -569,7 +570,7 @@ pub fn refArg(buf: *[512]u8, name: []const u8, kind: git.Ref.Kind) []const u8 {
 
 pub fn runDrop() void {
     const d = drop orelse return;
-    if (app.midOperation()) {
+    if (github_connect.midOperation()) {
         clearDrop();
         return github_actions.setCommandError("Finish or abort what is under way first.");
     }
@@ -649,21 +650,21 @@ pub fn refMenu(
         };
 
         menuSeparator(1);
-        if (!app.midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge into current branch", false)) {
+        if (!github_connect.midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge into current branch", false)) {
             fw.close();
             repo_io.request(&.{ "merge", "--no-edit", refArg(&ref_buf, ref.name, ref.kind) });
         }
-        if (!app.midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge, always with a merge commit", false)) {
+        if (!github_connect.midOperation() and menuIcon(@src(), dvui.entypo.merge, "Merge, always with a merge commit", false)) {
             fw.close();
             repo_io.request(&.{ "merge", "--no-edit", "--no-ff", refArg(&ref_buf, ref.name, ref.kind) });
         }
         // Leaves the result staged and HEAD where it was: the commit that
         // follows is yours to write, which is the point of squashing.
-        if (!app.midOperation() and menuIcon(@src(), dvui.entypo.archive, "Squash into current branch, uncommitted", false)) {
+        if (!github_connect.midOperation() and menuIcon(@src(), dvui.entypo.archive, "Squash into current branch, uncommitted", false)) {
             fw.close();
             repo_io.request(&.{ "merge", "--squash", refArg(&ref_buf, ref.name, ref.kind) });
         }
-        if (!app.midOperation() and menuIcon(@src(), dvui.entypo.level_up, "Rebase current branch onto this", false)) {
+        if (!github_connect.midOperation() and menuIcon(@src(), dvui.entypo.level_up, "Rebase current branch onto this", false)) {
             fw.close();
             repo_io.request(&.{ "rebase", refArg(&ref_buf, ref.name, ref.kind) });
         }

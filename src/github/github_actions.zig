@@ -12,6 +12,7 @@ const rebase_view = @import("../ui/rebase_view.zig");
 const commit_view = @import("../ui/commit_view.zig");
 const identity_view = @import("../ui/identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_connect = @import("github_connect.zig");
 const app = @import("../main.zig");
 
 // === GitHub, acted on ===
@@ -264,7 +265,7 @@ pub fn jsonList(a: std.mem.Allocator, text: []const u8) []const u8 {
 pub fn checkoutRequest(number: u32, branch: []const u8, fork: bool) void {
     if (branch.len == 0) return setCommandError("GitHub did not say which branch that request is.");
     const remote = defaultRemote() orelse return setCommandError("There is no remote to fetch it from.");
-    if (app.midOperation()) return setCommandError("Finish or abort what is under way first.");
+    if (github_connect.midOperation()) return setCommandError("Finish or abort what is under way first.");
     if (fork) {
         var spec_buf: [32]u8 = undefined;
         repo_io.requestNetwork("Fetching", &.{ "fetch", remote, std.fmt.bufPrint(&spec_buf, "pull/{d}/head", .{number}) catch return });
@@ -298,7 +299,7 @@ fn queueRequestBranch(number: u32, branch: []const u8, remote: []const u8, fork:
 pub fn resolveRequestLocally(d: pr.Detail, rebase: bool) void {
     if (d.fork) return setCommandError("Its branch is in a fork: check it out and bring the base in by hand.");
     const remote = defaultRemote() orelse return setCommandError("There is no remote to fetch it from.");
-    if (app.midOperation()) return setCommandError("Finish or abort what is under way first.");
+    if (github_connect.midOperation()) return setCommandError("Finish or abort what is under way first.");
     if (app.work) |w| if (w.staged.len > 0 or hasTrackedChanges(w)) {
         return setCommandError("Commit or stash your changes first: the branch is about to change under them.");
     };
@@ -760,9 +761,9 @@ pub fn runTabAction() void {
         .tab_to => |m| tab_strip.moveTab(m[0], m[1], m[2]),
         .tab_at => |m| tab_strip.moveTabTo(m[0], m[1], m[2], m[3]),
         .tab_end => |m| tab_strip.tabToEnd(m[0], m[1]),
-        .select_ws => |w| app.selectWorkspace(w),
-        .close_ws => |w| app.deleteWorkspace(w),
-        .workspace_named => app.applyWorkspaceDialog(),
+        .select_ws => |w| github_connect.selectWorkspace(w),
+        .close_ws => |w| github_connect.deleteWorkspace(w),
+        .workspace_named => github_connect.applyWorkspaceDialog(),
         .tab_out => |gt| tab_strip.ungroupTab(gt[0], gt[1]),
         .open => |path| {
             defer app.gpa.free(path);

@@ -10,6 +10,7 @@ const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const home_page = @import("home_page.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === This repository's settings ===
@@ -125,7 +126,7 @@ pub fn knownRepos() []const []const u8 {
     var known: std.ArrayList([]const u8) = .empty;
     if (app.repo != null and !home_page.isOpenTab(app.repo_path.items)) known.append(a, app.repo_path.items) catch {};
     for (tab_strip.groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
-        if (!app.listedEarlier(gi, ti, tab.path)) known.append(a, tab.path) catch {};
+        if (!github_connect.listedEarlier(gi, ti, tab.path)) known.append(a, tab.path) catch {};
     };
     for (tab_strip.recent.items) |path| if (!home_page.isOpenTab(path)) known.append(a, path) catch {};
     return known.items;

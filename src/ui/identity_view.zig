@@ -13,6 +13,7 @@ const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_settings = @import("repo_settings.zig");
 const github_actions = @import("../github/github_actions.zig");
+const github_connect = @import("../github/github_connect.zig");
 const app = @import("../main.zig");
 
 // === Git identity ===
@@ -100,8 +101,8 @@ pub fn signInWithGithub() void {
         return;
     }
     // Not signed in: Zit's own sign-in, and the fields filled once it lands.
-    app.connect_fills_identity = true;
-    app.openConnect();
+    github_connect.connect_fills_identity = true;
+    github_connect.openConnect();
 }
 
 pub fn saveIdentity() void {
@@ -141,7 +142,7 @@ pub fn identityDialog() void {
     {
         var gh_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
         defer gh_row.deinit();
-        const busy = app.connect_open;
+        const busy = github_connect.connect_open;
         if (dialog_views.dialogButton(@src(), if (busy) "Waiting for GitHub…" else "Sign in with GitHub", true) and !busy) signInWithGithub();
         dvui.label(@src(), "or type them in", .{}, .{
             .font = style.small(),
@@ -331,7 +332,7 @@ pub fn settingsDialog() void {
                     dvui.label(@src(), "Not connected", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
                 if (window_chrome.me_gh.items.len > 0) {
                     if (dialog_views.dialogButton(@src(), "Disconnect", false)) github_actions.ask(.sign_out, window_chrome.me_gh.items);
-                } else if (dialog_views.dialogButton(@src(), "Connect GitHub", true)) app.openConnect();
+                } else if (dialog_views.dialogButton(@src(), "Connect GitHub", true)) github_connect.openConnect();
             }
         }
         if (SettingsCard.begin(0)) |card| {
@@ -786,7 +787,7 @@ fn settingsNav() void {
                 {
                     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
                     defer row.deinit();
-                    app.tabBadge(git.repoName(path), on);
+                    github_connect.tabBadge(git.repoName(path), on);
                     var fit: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
                     dvui.label(@src(), "{s}", .{graph_view.fitText(&fit, git.repoName(path), style.small(), 130)}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = if (on) style.text() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
                 }
