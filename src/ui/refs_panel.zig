@@ -3,6 +3,7 @@ const dvui = @import("dvui");
 const style = @import("style.zig");
 const git = @import("../git/git.zig");
 const window_chrome = @import("window_chrome.zig");
+const graph_view = @import("graph_view.zig");
 const app = @import("../main.zig");
 
 // === Left: refs ===
@@ -158,7 +159,7 @@ fn conflictFileRow(id: usize, path: []const u8) void {
             .margin = .{ .w = style.space.sm },
         });
         var buf: [app.MAX_SHOWN_LINE]u8 = undefined;
-        dvui.label(@src(), "{s}", .{app.fitText(&buf, path, style.small(), 170)}, .{
+        dvui.label(@src(), "{s}", .{graph_view.fitText(&buf, path, style.small(), 170)}, .{
             .font = style.small(),
             .color_text = .{ .color = if (open) style.accent() else style.text() },
             .gravity_y = 0.5,

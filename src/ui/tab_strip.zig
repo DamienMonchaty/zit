@@ -7,6 +7,7 @@ const run = @import("../core/run.zig");
 const store = @import("../core/store.zig");
 const avatars = @import("../github/avatar.zig");
 const window_chrome = @import("window_chrome.zig");
+const graph_view = @import("graph_view.zig");
 const app = @import("../main.zig");
 
 // === Tabs and groups ===
@@ -166,8 +167,8 @@ pub fn loadWorkspace() void {
     for (loaded.file.recent) |path| addRecent(path, false);
     app.commit_prefs = loaded.file.commit;
     auto_fetch_minutes = loaded.file.auto_fetch_minutes;
-    app.graph_show_remote = loaded.file.show_remote_branches;
-    app.graph_first_parent = loaded.file.first_parent;
+    graph_view.graph_show_remote = loaded.file.show_remote_branches;
+    graph_view.graph_first_parent = loaded.file.first_parent;
     app.graph_width = loaded.file.graph_width;
     app.branch_width = loaded.file.branch_width;
     zoom = zoomStep(loaded.file.zoom);
@@ -264,8 +265,8 @@ fn writeWorkspace() bool {
         .code_text = style.code_scale,
         .recent = recent.items,
         .auto_fetch_minutes = auto_fetch_minutes,
-        .show_remote_branches = app.graph_show_remote,
-        .first_parent = app.graph_first_parent,
+        .show_remote_branches = graph_view.graph_show_remote,
+        .first_parent = graph_view.graph_first_parent,
         .graph_width = app.graph_width,
         .branch_width = app.branch_width,
         .remember_tabs = remember_tabs,

@@ -5,6 +5,7 @@ const git = @import("../git/git.zig");
 const run = @import("../core/run.zig");
 const github = @import("../github/github.zig");
 const tab_strip = @import("tab_strip.zig");
+const graph_view = @import("graph_view.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -168,9 +169,9 @@ pub fn titlebar() void {
         app.operationControls();
         // Finding a commit: not an action on the repository, so apart from
         // them, an icon on this side.
-        if (app.toolButton(@src(), "Search", dvui.entypo.magnifying_glass, .{ .icon_only = true, .on = app.search_open, .hint = "Search the commits — Ctrl+F" })) {
-            if (app.search_open) app.closeSearch() else {
-                app.search_open = true;
+        if (app.toolButton(@src(), "Search", dvui.entypo.magnifying_glass, .{ .icon_only = true, .on = graph_view.search_open, .hint = "Search the commits — Ctrl+F" })) {
+            if (graph_view.search_open) graph_view.closeSearch() else {
+                graph_view.search_open = true;
                 app.active_view = .graph;
             }
         }
@@ -294,9 +295,9 @@ fn pullMenu(usable: bool) void {
     const m = menu orelse return;
     if (!enabled) return m.close();
     var args: ?[]const []const u8 = null;
-    if (app.menuIcon(@src(), dvui.entypo.merge, "Pull, merging", false)) args = &.{ "pull", "--no-rebase" };
-    if (app.menuIcon(@src(), dvui.entypo.flow_line, "Pull, rebasing local commits", false)) args = &.{ "pull", "--rebase" };
-    if (app.menuIcon(@src(), dvui.entypo.controller_fast_forward, "Pull, fast-forward only", false)) args = &.{ "pull", "--ff-only" };
+    if (graph_view.menuIcon(@src(), dvui.entypo.merge, "Pull, merging", false)) args = &.{ "pull", "--no-rebase" };
+    if (graph_view.menuIcon(@src(), dvui.entypo.flow_line, "Pull, rebasing local commits", false)) args = &.{ "pull", "--rebase" };
+    if (graph_view.menuIcon(@src(), dvui.entypo.controller_fast_forward, "Pull, fast-forward only", false)) args = &.{ "pull", "--ff-only" };
     if (args) |a| {
         m.close();
         app.requestNetwork("Pulling", a);
@@ -358,7 +359,7 @@ fn branchSwitcher() void {
         // Its name, and under it where Pull and Push go — or that they have
         // nowhere yet.
         var names = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false });
-        dvui.label(@src(), "{s}", .{app.fitText(&buf, head, style.bodyBold(), room)}, .{
+        dvui.label(@src(), "{s}", .{graph_view.fitText(&buf, head, style.bodyBold(), room)}, .{
             .font = style.bodyBold(),
             .color_text = .{ .color = style.text() },
             .padding = dvui.Rect.all(0),
@@ -366,7 +367,7 @@ fn branchSwitcher() void {
         if (app.history) |h| if (h.head != null) {
             var up_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
             const upstream = h.tracking.upstream orelse "no upstream";
-            dvui.label(@src(), "{s}", .{app.fitText(&up_buf, upstream, style.tiny(), room)}, .{
+            dvui.label(@src(), "{s}", .{graph_view.fitText(&up_buf, upstream, style.tiny(), room)}, .{
                 .font = style.tiny(),
                 .color_text = .{ .color = if (h.tracking.upstream != null) style.textMuted() else style.textFaint() },
                 .padding = dvui.Rect.all(0),
@@ -430,7 +431,7 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
         .expand = .horizontal,
         .corners = style.radius.input,
         .color_fill_hover = .{ .color = style.accentDim() },
-        .padding = .{ .x = style.space.md, .y = app.MENU_ROW_PAD_Y, .w = style.space.md, .h = app.MENU_ROW_PAD_Y },
+        .padding = .{ .x = style.space.md, .y = graph_view.MENU_ROW_PAD_Y, .w = style.space.md, .h = graph_view.MENU_ROW_PAD_Y },
     });
     defer mi.deinit();
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -442,7 +443,7 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
         .margin = .{ .w = style.space.md },
     });
     var buf: [app.MAX_SHOWN_LINE]u8 = undefined;
-    dvui.label(@src(), "{s}", .{app.fitText(&buf, ref.name, style.small(), 220)}, .{
+    dvui.label(@src(), "{s}", .{graph_view.fitText(&buf, ref.name, style.small(), 220)}, .{
         .font = if (ref.head) style.smallBold() else style.small(),
         .color_text = .{ .color = if (ref.head) style.accent() else style.text() },
         .gravity_y = 0.5,
@@ -769,7 +770,7 @@ pub fn userMenu() void {
         var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .background = false,
-            .min_size_content = .{ .w = app.MENU_MIN_W },
+            .min_size_content = .{ .w = graph_view.MENU_MIN_W },
             .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
         });
         defer head.deinit();
@@ -780,23 +781,23 @@ pub fn userMenu() void {
         dvui.label(@src(), "{s}", .{if (set) me.author else "No Git identity"}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
         dvui.label(@src(), "{s}", .{if (set) me.email else "Commits need a name and an email"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0) });
     }
-    app.menuSeparator(0);
+    graph_view.menuSeparator(0);
     var pick: enum { none, settings, keys, signing, docs, about, sign_in, sign_out } = .none;
-    if (app.menuIcon(@src(), dvui.entypo.cog, "Settings — Ctrl+,", false)) pick = .settings;
-    if (app.menuIcon(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", false)) pick = .keys;
-    if (app.menuIcon(@src(), dvui.entypo.lock, "Commit signature", false)) pick = .signing;
-    app.menuSeparator(2);
-    if (app.menuIcon(@src(), dvui.entypo.book, "Documentation", false)) pick = .docs;
-    if (app.menuIcon(@src(), dvui.entypo.info_with_circle, "About Zit", false)) pick = .about;
+    if (graph_view.menuIcon(@src(), dvui.entypo.cog, "Settings — Ctrl+,", false)) pick = .settings;
+    if (graph_view.menuIcon(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", false)) pick = .keys;
+    if (graph_view.menuIcon(@src(), dvui.entypo.lock, "Commit signature", false)) pick = .signing;
+    graph_view.menuSeparator(2);
+    if (graph_view.menuIcon(@src(), dvui.entypo.book, "Documentation", false)) pick = .docs;
+    if (graph_view.menuIcon(@src(), dvui.entypo.info_with_circle, "About Zit", false)) pick = .about;
     // GitHub's account, only while Zit talks to GitHub at all.
     if (tab_strip.integrations) {
-        app.menuSeparator(1);
+        graph_view.menuSeparator(1);
         if (me_gh.items.len > 0) {
             var buf: [96]u8 = undefined;
             const caption = std.fmt.bufPrint(&buf, "Sign out of GitHub ({s})", .{me_gh.items}) catch "Sign out of GitHub";
-            if (app.menuIcon(@src(), dvui.entypo.log_out, caption, true)) pick = .sign_out;
+            if (graph_view.menuIcon(@src(), dvui.entypo.log_out, caption, true)) pick = .sign_out;
         } else {
-            if (app.menuIcon(@src(), dvui.entypo.login, "Sign in with GitHub", false)) pick = .sign_in;
+            if (graph_view.menuIcon(@src(), dvui.entypo.login, "Sign in with GitHub", false)) pick = .sign_in;
         }
     }
     if (pick == .none) return;
