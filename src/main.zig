@@ -25,6 +25,7 @@ const diff_view = @import("ui/diff_view.zig");
 const rebase_view = @import("ui/rebase_view.zig");
 const commit_view = @import("ui/commit_view.zig");
 const dialog_views = @import("ui/dialog_views.zig");
+const identity_view = @import("ui/identity_view.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -124,7 +125,7 @@ pub const std_options: std.Options = .{
 
 /// From `build.zig.zon`, through `build.zig`; printed so that it is
 /// zero-terminated, as SDL takes it and as a literal would be.
-const APP_VERSION = std.fmt.comptimePrint("{s}", .{@import("build_options").version});
+pub const APP_VERSION = std.fmt.comptimePrint("{s}", .{@import("build_options").version});
 
 /// How often the working tree is re-read, so a file you changed in your editor
 /// shows up without you asking.
@@ -963,7 +964,7 @@ fn appInit(win: *dvui.Window) !void {
     // fail, so say so before the first one does. Read once, for the avatar's
     // menu as well.
     window_chrome.loadMe();
-    if (window_chrome.me_name.items.len == 0 or window_chrome.me_email.items.len == 0) openIdentity();
+    if (window_chrome.me_name.items.len == 0 or window_chrome.me_email.items.len == 0) identity_view.openIdentity();
 }
 
 /// The app was called Zync, and its tabs, settings and pictures live under
@@ -981,7 +982,7 @@ fn migrateFromZync(dir: []const u8, tail: []const u8) void {
 
 /// Put the chosen theme on. Split out of `appInit` because the settings menu
 /// calls it too, and a failure means the same thing in both places.
-fn applyTheme() void {
+pub fn applyTheme() void {
     dark_theme = style.themes[theme_index].dark;
     style.applyTheme(gpa, theme_index) catch |err| {
         // Only reachable if the compiled-in JSON is malformed, which is a build
@@ -1079,8 +1080,8 @@ fn appDeinit(win: *dvui.Window) void {
     tab_strip.editor_cmd.deinit(gpa);
     tab_strip.terminal_cmd.deinit(gpa);
     diff_view.clearImagePair();
-    signing_key.deinit(gpa);
-    if (signing_job) |j| j.deinit(app_io);
+    identity_view.signing_key.deinit(gpa);
+    if (identity_view.signing_job) |j| j.deinit(app_io);
     if (repo_prefs_job) |j| j.deinit(app_io);
     repo_name_local.deinit(gpa);
     repo_email_local.deinit(gpa);
@@ -1092,8 +1093,8 @@ fn appDeinit(win: *dvui.Window) void {
     tab_strip.clearRecent();
     tab_strip.recent.deinit(gpa);
     dialog_views.clearForget();
-    identity_name.deinit(gpa);
-    identity_email.deinit(gpa);
+    identity_view.identity_name.deinit(gpa);
+    identity_view.identity_email.deinit(gpa);
     window_chrome.forgetMe();
     graph_view.clearDrop();
     graph_view.drag_source.deinit(gpa);
@@ -3292,7 +3293,7 @@ var commit_sent: std.ArrayList(u8) = .empty;
 fn commitLanded() void {
     // git's own words for an identity it does not have.
     if (tab_strip.command_error) |message| {
-        if (std.mem.indexOf(u8, message, "tell me who you are") != null or std.mem.indexOf(u8, message, "user.email") != null) openIdentity();
+        if (std.mem.indexOf(u8, message, "tell me who you are") != null or std.mem.indexOf(u8, message, "user.email") != null) identity_view.openIdentity();
         return;
     }
     // Typed into while the commit ran: that is the next message, not this one.
@@ -3411,11 +3412,11 @@ fn appFrame() !dvui.App.Result {
 
     palette();
     dialog_views.repoDialog();
-    identityDialog();
+    identity_view.identityDialog();
     connectDialog();
     workspaceDialog();
-    settingsDialog();
-    keysDialog();
+    identity_view.settingsDialog();
+    identity_view.keysDialog();
     prEditDialog();
     prCreateDialog();
     featuresDialog();
@@ -4698,7 +4699,7 @@ fn requestComposer() void {
             .placeholder = "Leave a comment — Markdown reads as on the host",
             .multiline = true,
             .break_lines = true,
-        }, settingsInput().override(.{ .tag = "pr:comment", .min_size_content = .{ .h = 84 }, .margin = .{ .h = style.space.sm } }));
+        }, identity_view.settingsInput().override(.{ .tag = "pr:comment", .min_size_content = .{ .h = 84 }, .margin = .{ .h = style.space.sm } }));
         te.deinit();
     }
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
@@ -4948,9 +4949,9 @@ fn prEditDialog() void {
     dialog_views.centerModal(fw.data(), win, null);
     var num: [12]u8 = undefined;
     var title_buf: [48]u8 = undefined;
-    dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
+    identity_view.dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
 
-    var body = dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
+    var body = identity_view.dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
 
     // As the create dialog has it: where it goes — where it comes from is
     // fixed once it is made — its words, who and what, its type.
@@ -4969,7 +4970,7 @@ fn prEditDialog() void {
             .multiline = true,
             .break_lines = true,
             .placeholder = "Why, and how to try it",
-        }, settingsInput().override(.{ .tag = "pr_edit:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
+        }, identity_view.settingsInput().override(.{ .tag = "pr_edit:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
         te.deinit();
     }
     {
@@ -4981,7 +4982,7 @@ fn prEditDialog() void {
     }
     body.deinit();
     {
-        var line = dialogFooter(@src());
+        var line = identity_view.dialogFooter(@src());
         defer line.deinit();
         typePicker(5, &pr_edit_draft, "pr_edit:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -6285,7 +6286,7 @@ fn shortcuts() void {
             if (pressed(ke, .p, true)) break :blk openPalette;
             if (pressed(ke, .comma, true)) break :blk struct {
                 fn f() void {
-                    openSettings(5);
+                    identity_view.openSettings(5);
                 }
             }.f;
             if (pressed(ke, .b, true)) break :blk struct {
@@ -6558,926 +6559,17 @@ fn updateWindowTitle() void {
     cw.backend.title(cw, text);
 }
 
-// === Git identity ===
-//
-// The name and email every commit is signed with, which git refuses to commit
-// without. Typed in, or taken from the GitHub account Zit is connected as —
-// connecting it on the way if need be.
-
-var identity_open: bool = false;
-var identity_rect: dvui.Rect = .{};
-var identity_name: std.ArrayList(u8) = .empty;
-var identity_email: std.ArrayList(u8) = .empty;
-var identity_note: []const u8 = "";
-
-/// git's global `user.name` and `user.email`, into `name` and `email`, by one
-/// `git` rather than one each: on Windows starting it is most of the wait.
-/// Through `git`, not libgit2, which would not see the global config a test
-/// hands over in `run.env_override`. True when both are set.
-pub fn readIdentity(name: *std.ArrayList(u8), email: *std.ArrayList(u8)) bool {
-    name.clearRetainingCapacity();
-    email.clearRetainingCapacity();
-    const answer = run.capture(gpa, app_io, ".", &.{ "git", "config", "--global", "--get-regexp", "^user\\.(name|email)$" }) catch return false;
-    defer gpa.free(answer.out);
-    if (!answer.ok) return false;
-    var lines = std.mem.splitScalar(u8, answer.out, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
-        const out = if (std.mem.eql(u8, line[0..space], "user.name")) name else if (std.mem.eql(u8, line[0..space], "user.email")) email else continue;
-        // Said twice, the last one holds.
-        out.clearRetainingCapacity();
-        out.appendSlice(gpa, std.mem.trim(u8, line[space + 1 ..], " ")) catch return false;
-    }
-    return name.items.len > 0 and email.items.len > 0;
-}
-
-fn identitySet() bool {
-    var name: std.ArrayList(u8) = .empty;
-    defer name.deinit(gpa);
-    var email: std.ArrayList(u8) = .empty;
-    defer email.deinit(gpa);
-    return readIdentity(&name, &email);
-}
-
-pub fn openIdentity() void {
-    identity_open = true;
-    identity_rect = .{};
-    identity_note = "";
-    _ = readIdentity(&identity_name, &identity_email);
-}
-
-/// Fill the fields from the signed-in GitHub account. The noreply address
-/// where the account keeps its email private: commits still link to it.
-/// A request to GitHub, on this thread: a click's worth of wait.
-fn fillFromGithub() bool {
-    if (!github.signedIn()) return false;
-    const got = github.call("GET", "/user", null) catch return false;
-    defer got.deinit();
-    const answer = got.answer();
-    if (!answer.ok()) return false;
-    var a: std.heap.ArenaAllocator = .init(gpa);
-    defer a.deinit();
-    const user = std.json.parseFromSliceLeaky(struct {
-        login: []const u8 = "",
-        id: u64 = 0,
-        name: ?[]const u8 = null,
-        email: ?[]const u8 = null,
-    }, a.allocator(), answer.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return false;
-    if (user.login.len == 0) return false;
-
-    identity_name.clearRetainingCapacity();
-    identity_name.appendSlice(gpa, user.name orelse user.login) catch {};
-    identity_email.clearRetainingCapacity();
-    if (user.email) |email| {
-        identity_email.appendSlice(gpa, email) catch {};
-    } else {
-        identity_email.print(gpa, "{d}+{s}@users.noreply.github.com", .{ user.id, user.login }) catch {};
-    }
-    return true;
-}
-
-pub fn signInWithGithub() void {
-    if (fillFromGithub()) {
-        identity_note = "Filled in from your GitHub account.";
-        return;
-    }
-    // Not signed in: Zit's own sign-in, and the fields filled once it lands.
-    connect_fills_identity = true;
-    openConnect();
-}
-
-fn saveIdentity() void {
-    const name = std.mem.trim(u8, identity_name.items, " ");
-    const email = std.mem.trim(u8, identity_email.items, " ");
-    if (name.len == 0 or email.len == 0) {
-        identity_note = "Both a name and an email are needed.";
-        return;
-    }
-    for ([_][2][]const u8{ .{ "user.name", name }, .{ "user.email", email } }) |kv| {
-        var outcome = run.git(gpa, app_io, ".", &.{ "config", "--global", kv[0], kv[1] }) catch {
-            identity_note = "Could not run git. Is it installed?";
-            return;
-        };
-        defer outcome.deinit(gpa);
-        if (!outcome.ok) {
-            identity_note = "git would not save it.";
-            return;
-        }
-    }
-    identity_open = false;
-    window_chrome.me_loaded = false;
-}
-
-fn identityDialog() void {
-    if (!identity_open) return;
-
-    const win = dvui.windowRect();
-    var fw = dialog_views.modalWindow(@src(), &identity_rect, &identity_open, style.surface(), 480, dvui.Rect.all(0));
-    defer fw.deinit();
-    dialog_views.centerModal(fw.data(), win, null);
-
-    dialogHeader(@src(), dvui.entypo.user, "Who are you, to git?", "Every commit carries a name and an email. Set once, for every repository", &identity_open);
-
-    var body = dialogBody(@src(), null);
-
-    {
-        var gh_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
-        defer gh_row.deinit();
-        const busy = connect_open;
-        if (dialog_views.dialogButton(@src(), if (busy) "Waiting for GitHub…" else "Sign in with GitHub", true) and !busy) signInWithGithub();
-        dvui.label(@src(), "or type them in", .{}, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.textFaint() },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.md },
-            .padding = dvui.Rect.all(0),
-        });
-    }
-
-    var entered = false;
-    _ = dialog_views.dialogField(@src(), 10, "Name", &identity_name, "Ada Lovelace", identity_name.items.len == 0, &entered);
-    _ = dialog_views.dialogField(@src(), 11, "Email", &identity_email, "ada@example.com", false, &entered);
-
-    if (identity_note.len > 0) {
-        dvui.label(@src(), "{s}", .{identity_note}, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.accent() },
-            .margin = .{ .h = style.space.lg },
-            .padding = dvui.Rect.all(0),
-        });
-    }
-
-    body.deinit();
-    {
-        var foot = dialogFooter(@src());
-        defer foot.deinit();
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (dialog_views.dialogButton(@src(), "Later", false)) identity_open = false;
-        if (dialog_views.dialogButton(@src(), "Save", true) or entered) saveIdentity();
-    }
-
-    if (dialog_views.escapePressed()) identity_open = false;
-}
-
-pub fn openSettings(section: usize) void {
-    settings_open = true;
-    settings_rect = .{};
-    signing_loaded = false;
-    repo_prefs_loaded = false;
-    editors_loaded = false;
-    // The repository whose settings show: the one open, to start with.
-    if (repo != null) {
-        repo_settings_path.clearRetainingCapacity();
-        repo_settings_path.appendSlice(gpa, repo_path.items) catch {};
-    }
-    settings_page = section;
-}
-
-/// The settings, in one dialog: the sections down the left, grouped by what
-/// they are about — Zit itself, then the commits made from it — and the one
-/// picked on the right. Everything is saved as it is changed.
-var settings_open = false;
-var settings_rect: dvui.Rect = .{};
-/// The section shown, by id.
-var settings_page: usize = 5;
-
-const SettingsPage = struct { id: usize, icon: []const u8, title: []const u8, hint: []const u8 };
-/// In the order the list shows them; a null is the next group's caption.
-const settings_pages = [_]?SettingsPage{
-    null,
-    .{ .id = 5, .icon = dvui.entypo.cog, .title = "General", .hint = "Tabs, new repositories, fetching" },
-    .{ .id = 3, .icon = dvui.entypo.merge, .title = "Integrations", .hint = "GitHub: pull requests, issues, checks and the account" },
-    .{ .id = 0, .icon = dvui.entypo.palette, .title = "Appearance", .hint = "The theme, the size of the text, the pictures" },
-    null,
-    .{ .id = 1, .icon = dvui.entypo.user, .title = "Git identity", .hint = "The name and email your commits carry" },
-    .{ .id = 2, .icon = dvui.entypo.pencil, .title = "Commit messages", .hint = "Ticket, conventional commits, template" },
-    .{ .id = 6, .icon = dvui.entypo.lock, .title = "Commit signing", .hint = "GPG or SSH, for commits and tags" },
-    null,
-    .{ .id = REPO_PAGE, .icon = dvui.entypo.folder, .title = "Repositories", .hint = "Its own identity, pull and signing — in its .git/config" },
-};
-const settings_groups = [_][]const u8{ "Zit", "Commits", "Repositories" };
-/// The page of one repository's settings, which it the nav lists by name.
-const REPO_PAGE = 7;
-
-fn settingsDialog() void {
-    if (!settings_open) return;
-    const win = dvui.windowRect();
-    var fw = dialog_views.modalWindow(@src(), &settings_rect, &settings_open, style.surface(), 0, dvui.Rect.all(0));
-    defer fw.deinit();
-    dialog_views.centerModal(fw.data(), win, null);
-
-    dialogHeader(@src(), dvui.entypo.cog, "Settings", "Zit " ++ APP_VERSION ++ " · everything is saved as you change it", &settings_open);
-
-    // One size whichever section shows, so the dialog does not jump.
-    const w: f32 = @min(860, win.w - 80);
-    const h: f32 = @max(240, @min(520, win.h - 240));
-    {
-        var split = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = w, .h = h },
-            .max_size_content = .size(.{ .w = w, .h = h }),
-            .background = false,
-        });
-        defer split.deinit();
-        settingsNav();
-        // Its ground the dialog's: dvui's scroll container paints its own,
-        // the window's darker one, under whatever it holds.
-        var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false, .color_fill = .{ .color = style.surface() } });
-        defer scroll.deinit();
-        // On the dialog's ground, over the scroll container's darker one.
-        var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surface() },
-            .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.xl },
-        });
-        defer body.deinit();
-
-        if (SettingsCard.begin(5)) |card| {
-            defer card.end();
-            var section = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .horizontal,
-                .background = false,
-                .padding = settings_body_pad,
-            });
-            defer section.deinit();
-
-            var changed = settingsSwitch(0, &tab_strip.remember_tabs, "Reopen your tabs", "Start where you left off, rather than on the start page");
-
-            settingsField(@src(), "Default branch", "The first branch of a repository made here");
-            const branch = dialog_views.textField(@src(), .{
-                .text = .{ .array_list = .{ .backing = &tab_strip.default_branch, .allocator = gpa, .limit = 128 } },
-                .placeholder = "main",
-            }, settingsInput().override(.{
-                .tag = "default_branch",
-            }));
-            if (branch.text_changed) changed = true;
-            branch.deinit();
-
-            settingsField(@src(), "External editor", "What a file from a diff opens with");
-            if (editorChoice()) changed = true;
-
-            settingsField(@src(), "Terminal", "What Terminal opens, in the repository's folder");
-            if (terminalChoice()) changed = true;
-
-            settingsField(@src(), "Fetch in the background", "Every remote, quietly — the counts on Pull and Push stay true");
-            {
-                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-                defer row.deinit();
-                for ([_]u32{ 0, 5, 10, 30 }, 0..) |minutes, i| {
-                    var buf: [16]u8 = undefined;
-                    const caption = if (minutes == 0) "Never" else std.fmt.bufPrint(&buf, "every {d} min", .{minutes}) catch "?";
-                    var chip = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false });
-                    defer chip.deinit();
-                    if (dialog_views.chipButton(@src(), if (tab_strip.auto_fetch_minutes == minutes) dvui.entypo.check else dvui.entypo.clock, caption, tab_strip.auto_fetch_minutes == minutes)) {
-                        tab_strip.auto_fetch_minutes = minutes;
-                        changed = true;
-                    }
-                }
-            }
-            changed = settingsSwitch(1, &tab_strip.prune_on_fetch, "Prune when fetching", "Drop the remote branches deleted on the remote") or changed;
-
-            if (changed) tab_strip.saveWorkspace();
-        }
-        if (SettingsCard.begin(3)) |card| {
-            defer card.end();
-            var section = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .horizontal,
-                .background = false,
-                .padding = settings_body_pad,
-            });
-            defer section.deinit();
-            var on = tab_strip.integrations;
-            if (settingsSwitch(0, &on, "Use GitHub", "Pull requests, issues, checks and the account. Off: none of it, and nothing asked of GitHub")) tab_strip.setIntegrations(on);
-            // Who Zit is connected as, and the way in or out.
-            if (tab_strip.integrations) {
-                window_chrome.loadMe();
-                settingsField(@src(), "Account", "A code typed on github.com — the token it gives is kept readable by you alone");
-                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                    .expand = .horizontal,
-                    .background = true,
-                    .color_fill = .{ .color = style.surface() },
-                    .border = dvui.Rect.all(1),
-                    .color_border = .{ .color = style.border() },
-                    .corners = style.radius.row,
-                    .padding = dvui.Rect.all(style.space.md),
-                });
-                defer row.deinit();
-                dvui.icon(@src(), "gh_state", if (window_chrome.me_gh.items.len > 0) dvui.entypo.check else dvui.entypo.login, .{ .fill_color = .{ .color = if (window_chrome.me_gh.items.len > 0) style.success() else style.textFaint() } }, .{
-                    .min_size_content = .{ .w = 14, .h = 14 },
-                    .gravity_y = 0.5,
-                    .margin = .{ .w = style.space.md },
-                });
-                if (window_chrome.me_gh.items.len > 0)
-                    dvui.label(@src(), "Connected as {s}", .{window_chrome.me_gh.items}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) })
-                else
-                    dvui.label(@src(), "Not connected", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
-                if (window_chrome.me_gh.items.len > 0) {
-                    if (dialog_views.dialogButton(@src(), "Disconnect", false)) ask(.sign_out, window_chrome.me_gh.items);
-                } else if (dialog_views.dialogButton(@src(), "Connect GitHub", true)) openConnect();
-            }
-        }
-        if (SettingsCard.begin(0)) |card| {
-            defer card.end();
-            // Three a row: Zit's own, then Catppuccin's.
-            for (0..(style.themes.len + 2) / 3) |r| {
-                var cards = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{
-                    .id_extra = r,
-                    .expand = .horizontal,
-                    .background = false,
-                    .padding = settings_body_pad,
-                });
-                defer cards.deinit();
-                for (r * 3..@min(r * 3 + 3, style.themes.len)) |i| {
-                    if (themeCard(@src(), i) and i != theme_index) pickTheme(i);
-                }
-            }
-            {
-                var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
-                defer section.deinit();
-                settingsField(@src(), "Text size", "The app's words, apart from the zoom");
-                const ui_steps = [_]f32{ 0.9, 1, 1.08, 1.16 };
-                if (choiceChips(10, &.{ "Small", "Default", "Large", "Larger" }, nearestStep(&ui_steps, style.ui_scale))) |i| {
-                    style.ui_scale = ui_steps[i];
-                    tab_strip.saveWorkspace();
-                }
-                settingsField(@src(), "Editor text size", "The code of a diff or a blame");
-                const code_steps = [_]f32{ 10.0 / 11.0, 1, 12.0 / 11.0, 13.0 / 11.0, 14.0 / 11.0 };
-                if (choiceChips(11, &.{ "10", "11", "12", "13", "14" }, nearestStep(&code_steps, style.code_scale))) |i| {
-                    style.code_scale = code_steps[i];
-                    tab_strip.saveWorkspace();
-                }
-            }
-            {
-                var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
-                defer section.deinit();
-                if (settingsSwitch(0, &tab_strip.show_avatars, "Pictures in the graph", "Each commit its author's picture. Off: a dot")) tab_strip.saveWorkspace();
-            }
-        }
-        if (SettingsCard.begin(REPO_PAGE)) |card| {
-            defer card.end();
-            repoSettings();
-        }
-        if (SettingsCard.begin(1)) |card| {
-            defer card.end();
-            window_chrome.loadMe();
-            const me = window_chrome.meAsCommit();
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-            defer row.deinit();
-            search_view.avatarSized(@src(), 0, me, null, null, 32);
-            {
-                var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.xs } });
-                defer col.deinit();
-                const set = window_chrome.me_name.items.len > 0 and window_chrome.me_email.items.len > 0;
-                dvui.label(@src(), "{s}", .{if (set) me.author else "Not set yet"}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-                dvui.label(@src(), "{s}", .{if (set) me.email else "Commits need a name and an email"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0) });
-                dvui.label(@src(), "For every repository, in git's global config", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2 } });
-            }
-            if (dialog_views.dialogButton(@src(), "Edit…", false)) openIdentity();
-        }
-        if (SettingsCard.begin(2)) |card| {
-            defer card.end();
-            var section = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .horizontal,
-                .background = false,
-                .padding = settings_body_pad,
-            });
-            defer section.deinit();
-
-            var changed = false;
-            changed = settingsSwitch(0, &commit_prefs.ticket, "Ticket from the branch", "PROJ-80-Back-Login puts PROJ-80 in the message") or changed;
-            if (commit_prefs.ticket) {
-                changed = settingsSwitch(1, &commit_prefs.ticket_footer, "Ticket as a trailer", "Refs: PROJ-80 at the end, rather than at the head of the summary") or changed;
-            }
-            changed = settingsSwitch(2, &commit_prefs.conventional, "Conventional commits", "A type and a scope before the summary: feat(api): …") or changed;
-            changed = settingsSwitch(3, &commit_prefs.wrap_body, "Wrap the description", "Long lines broken at 72 columns, as git log expects") or changed;
-            changed = settingsSwitch(4, &commit_prefs.signoff, "Sign off", "A Signed-off-by line on every commit") or changed;
-
-            dvui.label(@src(), "Template", .{}, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.text() },
-                .margin = .{ .y = style.space.md },
-                .padding = dvui.Rect.all(0),
-            });
-            dvui.label(@src(), "Used when git's commit.template names none. The first line is the summary.", .{}, .{
-                .font = style.tiny(),
-                .color_text = .{ .color = style.textFaint() },
-                .margin = .{ .h = style.space.sm },
-                .padding = dvui.Rect.all(0),
-            });
-            const te = dialog_views.textField(@src(), .{
-                .text = .{ .array_list = .{ .backing = &commit_template, .allocator = gpa, .limit = 4096 } },
-                .multiline = true,
-                .break_lines = true,
-                .placeholder = "e.g. a summary line, then the sections every description should have",
-            }, settingsInput().override(.{
-                .tag = "commit_template",
-                .min_size_content = .{ .h = 72 },
-            }));
-            if (te.text_changed) changed = true;
-            te.deinit();
-
-            if (changed) tab_strip.saveWorkspace();
-        }
-        if (SettingsCard.begin(6)) |card| {
-            defer card.end();
-            var section = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .horizontal,
-                .background = false,
-                .padding = settings_body_pad,
-            });
-            defer section.deinit();
-            loadSigning();
-
-            // Whether anything can sign at all, before the switches that ask it to.
-            {
-                const loading = !signing_loaded;
-                const ready = signing_key.items.len > 0;
-                var note = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                    .expand = .horizontal,
-                    .background = true,
-                    .color_fill = .{ .color = if (loading) style.surfaceRaised() else if (ready) style.success().lerp(style.background(), 0.88) else style.get().orange.lerp(style.background(), 0.86) },
-                    .corners = style.radius.input,
-                    .padding = dvui.Rect.all(style.space.md),
-                    .margin = .{ .h = style.space.md },
-                });
-                defer note.deinit();
-                dvui.icon(@src(), "sign_state", if (loading) dvui.entypo.cycle else if (ready) dvui.entypo.check else dvui.entypo.warning, .{ .fill_color = .{ .color = if (loading) style.textMuted() else if (ready) style.success() else style.get().orange } }, .{
-                    .min_size_content = .{ .w = 14, .h = 14 },
-                    .gravity_y = 0.5,
-                    .margin = .{ .w = style.space.md },
-                });
-                dvui.label(@src(), "{s}", .{if (loading) "Reading git's configuration…" else if (ready) "A signing key is set: commits and tags can be signed." else "No signing key set yet: git cannot sign until one is."}, .{
-                    .font = style.small(),
-                    .color_text = .{ .color = style.text() },
-                    .gravity_y = 0.5,
-                    .padding = dvui.Rect.all(0),
-                });
-            }
-
-            var changed = settingsSwitch(0, &commit_prefs.sign, "Sign every commit", "-S on each commit made here; git's own commit.gpgsign signs the rest");
-            changed = settingsSwitch(1, &commit_prefs.sign_tags, "Sign tags", "The tags made here are annotated and signed") or changed;
-            if (changed) tab_strip.saveWorkspace();
-
-            settingsField(@src(), "Format", "Saved in git's global config, gpg.format");
-            {
-                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-                defer row.deinit();
-                for ([_]struct { []const u8, []const u8 }{ .{ "GPG", "openpgp" }, .{ "SSH", "ssh" } }, 0..) |format, i| {
-                    var chip = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false });
-                    defer chip.deinit();
-                    const on = std.mem.eql(u8, signing_format, format[1]);
-                    if (dialog_views.chipButton(@src(), if (on) dvui.entypo.check else dvui.entypo.lock, format[0], on)) setGlobalConfig("gpg.format", format[1]);
-                }
-            }
-
-            settingsField(@src(), "Signing key", "A GPG key id, or the path to an SSH public key — user.signingkey");
-            {
-                var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-                defer row.deinit();
-                const key = dialog_views.textField(@src(), .{
-                    .text = .{ .array_list = .{ .backing = &signing_key, .allocator = gpa, .limit = 512 } },
-                    .placeholder = if (std.mem.eql(u8, signing_format, "ssh")) "~/.ssh/id_ed25519.pub" else "e.g. 3AA5C34371567BD2",
-                }, settingsInput().override(.{
-                    .tag = "signing_key",
-                    .margin = .{ .w = style.space.sm },
-                }));
-                key.deinit();
-                if (dialog_views.dialogButton(@src(), "Save", true)) setGlobalConfig("user.signingkey", std.mem.trim(u8, signing_key.items, " "));
-            }
-        }
-    }
-
-    if (dialog_views.escapePressed()) settings_open = false;
-}
-
-/// Every key Zit answers to, from the footer's keyboard button.
-pub var keys_open = false;
-pub var keys_rect: dvui.Rect = .{};
-
-fn keysDialog() void {
-    if (!keys_open) return;
-    const win = dvui.windowRect();
-    var fw = dialog_views.modalWindow(@src(), &keys_rect, &keys_open, style.surface(), 0, dvui.Rect.all(0));
-    defer fw.deinit();
-    dialog_views.centerModal(fw.data(), win, null);
-
-    dialogHeader(@src(), dvui.entypo.keyboard, "Keyboard shortcuts", "Everything here is a key away", &keys_open);
-    // No taller than most of the window: the list scrolls under its head.
-    var scroll = dvui.scrollArea(@src(), .{}, .{
-        .min_size_content = .{ .w = 520 + 2 * style.space.xl, .h = @min(560, win.h * 0.7) },
-        .max_size_content = .height(@min(560, win.h * 0.7)),
-        .background = false,
-        .color_fill = .{ .color = style.surface() },
-    });
-    defer scroll.deinit();
-    var body = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = 520 },
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .padding = .{ .x = style.space.xl, .y = style.space.xs, .w = style.space.xl, .h = style.space.xl },
-    });
-    defer body.deinit();
-    settingsGroup(@src(), 0, "Anywhere");
-    {
-        var card = shortcutCard(@src(), 0);
-        defer card.deinit();
-        shortcutRow(@src(), "Ctrl+P", "Command palette: any action, branch or repo");
-        shortcutRow(@src(), "Ctrl+T", "New tab: open, clone or create");
-        shortcutRow(@src(), "Ctrl+O", "Open a folder");
-        shortcutRow(@src(), "Ctrl+W", "Close this tab");
-        shortcutRow(@src(), "Ctrl+Tab, Ctrl+PgDn", "Next tab (Shift+Tab, PgUp: previous)");
-        shortcutRow(@src(), "Ctrl+,", "Settings");
-        shortcutRow(@src(), "Ctrl+Shift+T", "A terminal in this repository's folder");
-        shortcutRow(@src(), "F5", "Refresh");
-    }
-    settingsGroup(@src(), 0, "History");
-    {
-        var card = shortcutCard(@src(), 1);
-        defer card.deinit();
-        shortcutRow(@src(), "↑ ↓", "Previous / next commit");
-        shortcutRow(@src(), "Ctrl+F", "Search the commits");
-        shortcutRow(@src(), "Ctrl+Z", "Undo the last commit, checkout, merge…");
-        shortcutRow(@src(), "Ctrl+Shift+Z, Ctrl+Y", "Redo what was just undone");
-        shortcutRow(@src(), "Esc", "Back to the graph, or cancel the bar");
-    }
-    settingsGroup(@src(), 0, "Changes");
-    {
-        var card = shortcutCard(@src(), 2);
-        defer card.deinit();
-        shortcutRow(@src(), "Ctrl+Enter", "Commit what is staged");
-        shortcutRow(@src(), "Ctrl+Enter", "Continue a merge or rebase, its conflicts resolved");
-    }
-    settingsGroup(@src(), 0, "Conflicts");
-    {
-        var card = shortcutCard(@src(), 5);
-        defer card.deinit();
-        shortcutRow(@src(), "↑ ↓, F2 F3", "Previous / next conflict in the file");
-        shortcutRow(@src(), "1, 2, 3", "Keep the left side, the right one, or both");
-        shortcutRow(@src(), "U, Ctrl+Z", "Take the last pick back");
-        shortcutRow(@src(), "Enter", "Stage a resolved file and open the next");
-        shortcutRow(@src(), "F4", "Next conflicted file");
-    }
-    settingsGroup(@src(), 0, "Pull requests");
-    {
-        var card = shortcutCard(@src(), 6);
-        defer card.deinit();
-        shortcutRow(@src(), "↑ ↓, K J", "Previous / next request in the list");
-        shortcutRow(@src(), "1, 2, 3, 4", "Conversation, commits, files, checks");
-        shortcutRow(@src(), "Ctrl+F", "Search the requests");
-        shortcutRow(@src(), "Ctrl+Enter", "Send what is in the review box, as a comment");
-    }
-    settingsGroup(@src(), 0, "Panels");
-    {
-        var card = shortcutCard(@src(), 3);
-        defer card.deinit();
-        shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
-        shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
-        shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
-        shortcutRow(@src(), "Ctrl+Plus, Ctrl+Minus", "Zoom in / out, from 70 to 200 %");
-        shortcutRow(@src(), "Ctrl+0", "Back to 100 %");
-    }
-
-    if (dialog_views.escapePressed()) keys_open = false;
-}
-
-/// The card a run of shortcuts sits on.
-fn shortcutCard(src: std.builtin.SourceLocation, id: usize) *dvui.BoxWidget {
-    return dvui.box(src, .{ .dir = .vertical }, .{
-        .id_extra = id,
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = style.border() },
-        .corners = style.radius.row,
-        .padding = .{ .x = style.space.md, .y = style.space.xs, .w = style.space.md, .h = style.space.xs },
-    });
-}
-
-/// Light or dark, from a key or a menu: Zit's own of either.
-fn setTheme(dark: bool) void {
-    pickTheme(if (dark) 0 else 1);
-}
-
-fn pickTheme(index: usize) void {
-    theme_index = index;
-    applyTheme();
-    tab_strip.saveWorkspace();
-}
-
-const settings_body_pad: dvui.Rect = .{ .x = 0, .y = style.space.xs, .w = 0, .h = style.space.sm };
-
-/// A dialog's head: its icon on a tile, its title and a line under it, and
-/// the × that closes it.
-pub fn dialogHeader(src: std.builtin.SourceLocation, icon: []const u8, title: []const u8, hint: []const u8, open: *bool) void {
-    // The dialog's own ground, said outright: dvui fills a box with a border
-    // on one side in the theme's darker colour unless told.
-    var head = dvui.box(src, .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .border = .{ .h = 1 },
-        .color_border = .{ .color = style.border() },
-        .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.lg, .h = style.space.lg },
-    });
-    defer head.deinit();
-    iconTile(@src(), icon, 40, 18);
-    {
-        var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
-        defer col.deinit();
-        dvui.label(@src(), "{s}", .{title}, .{ .font = style.title(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-        dvui.label(@src(), "{s}", .{hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2 } });
-    }
-    if (dialog_views.iconButton(@src(), "dialog_close", "Close — Esc", dvui.entypo.cross, style.textMuted())) open.* = false;
-}
-
-/// A dialog's body, under its header: every dialog's padding, `width` wide
-/// when it is not null.
-pub fn dialogBody(src: std.builtin.SourceLocation, width: ?f32) *dvui.BoxWidget {
-    return dvui.box(src, .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .min_size_content = if (width) |w| .{ .w = w } else null,
-        .max_size_content = if (width) |w| .width(w) else null,
-        .background = false,
-        .padding = dvui.Rect.all(style.space.xl),
-    });
-}
-
-/// A dialog's foot: across the whole dialog under a rule. What goes on the
-/// left first, then a spacer, then Cancel and the button that answers it.
-pub fn dialogFooter(src: std.builtin.SourceLocation) *dvui.BoxWidget {
-    return dvui.box(src, .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .border = .{ .y = 1 },
-        .color_border = .{ .color = style.border() },
-        .padding = .{ .x = style.space.xl, .y = style.space.lg, .w = style.space.xl, .h = style.space.lg },
-    });
-}
-
-/// The eye that shows or hides a ref in the graph: drawn here, an outline
-/// with its pupil, and struck through for hidden — entypo's are a filled
-/// blot at this size. Turned into TinyVG once, on first use.
-pub fn eyeIcon(hidden: bool) []const u8 {
-    const slot = if (hidden) &eye_tvg[1] else &eye_tvg[0];
-    if (slot.*) |bytes| return bytes;
-    // Kept for the whole run, so not from `gpa`: two small icons, never freed.
-    const bytes = dvui.svgToTvg(std.heap.page_allocator, if (hidden) EYE_OFF_SVG else EYE_SVG) catch
-        return if (hidden) dvui.entypo.eye_with_line else dvui.entypo.eye;
-    slot.* = bytes;
-    return bytes;
-}
-var eye_tvg: [2]?[]const u8 = .{ null, null };
-
-const EYE_PATHS =
-    \\<path fill-rule="evenodd" d="M12 5C6.5 5 2.7 8.6 1 12c1.7 3.4 5.5 7 11 7s9.3-3.6 11-7c-1.7-3.4-5.5-7-11-7zM12 7c-4.2 0-7.3 2.6-8.8 5 1.5 2.4 4.6 5 8.8 5s7.3-2.6 8.8-5c-1.5-2.4-4.6-5-8.8-5zM15 12C15 13.66 13.66 15 12 15C10.34 15 9 13.66 9 12C9 10.34 10.34 9 12 9C13.66 9 15 10.34 15 12z"/>
-;
-const EYE_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">" ++ EYE_PATHS ++ "</svg>";
-const EYE_OFF_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">" ++ EYE_PATHS ++
-    "<path d=\"M3.7 2.3L21.7 20.3L20.3 21.7L2.3 3.7Z\"/></svg>";
-
-/// An icon on a rounded tile of the accent's tint.
-fn iconTile(src: std.builtin.SourceLocation, icon: []const u8, side: f32, glyph: f32) void {
-    var tile = dvui.box(src, .{}, .{
-        .background = true,
-        .color_fill = .{ .color = style.accentDim() },
-        .corners = style.radius.row,
-        .min_size_content = .{ .w = side, .h = side },
-        .max_size_content = .size(.{ .w = side, .h = side }),
-        .gravity_y = 0.5,
-        .padding = dvui.Rect.all(0),
-    });
-    defer tile.deinit();
-    dvui.icon(@src(), "tile_icon", icon, .{ .fill_color = .{ .color = style.accent() } }, .{
-        .min_size_content = .{ .w = glyph, .h = glyph },
-        .gravity_x = 0.5,
-        .gravity_y = 0.5,
-    });
-}
-
-/// A settings text field: flush with the text over it, framed, roomy.
-fn settingsInput() dvui.Options {
-    return .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceInput() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = style.border() },
-        .corners = style.radius.input,
-        .margin = dvui.Rect.all(0),
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm },
-        .font = style.small(),
-    };
-}
-
-/// The small caps over a run of settings cards.
-fn settingsGroup(src: std.builtin.SourceLocation, id: usize, title: []const u8) void {
-    var buf: [32]u8 = undefined;
-    const caps = std.ascii.upperString(&buf, title[0..@min(title.len, buf.len)]);
-    dvui.label(src, "{s}", .{caps}, .{
-        .id_extra = id,
-        .font = style.section(),
-        .color_text = .{ .color = style.textFaint() },
-        .margin = .{ .x = style.space.xs, .y = style.space.lg, .h = style.space.sm },
-        .padding = dvui.Rect.all(0),
-    });
-}
-
-/// The sections, down the left: a group's caption, then its sections, the
-/// one shown lit.
-fn settingsNav() void {
-    var nav = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .min_size_content = .{ .w = 200 },
-        .expand = .vertical,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .border = .{ .w = 1 },
-        .color_border = .{ .color = style.border() },
-        .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.sm },
-    });
-    defer nav.deinit();
-    var group: usize = 0;
-    for (settings_pages, 0..) |entry, i| {
-        const page = entry orelse {
-            settingsGroup(@src(), group, settings_groups[group]);
-            group += 1;
-            continue;
-        };
-        // The repositories' group: an entry for each, its badge for an icon.
-        if (page.id == REPO_PAGE) {
-            const known = knownRepos();
-            if (known.len == 0) dvui.label(@src(), "None yet", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.sm, .y = style.space.sm } });
-            for (known, 0..) |path, r| {
-                const on = settings_page == REPO_PAGE and std.mem.eql(u8, path, repo_settings_path.items);
-                var rb: dvui.ButtonWidget = undefined;
-                rb.init(@src(), .{ .draw_focus = false }, .{
-                    .id_extra = 1000 + r,
-                    .tag = dialog_views.frameTag("settings_repo", git.repoName(path)),
-                    .expand = .horizontal,
-                    .background = true,
-                    .color_fill = .{ .color = if (on) style.accentDim() else style.surface() },
-                    .color_fill_hover = .{ .color = if (on) style.accentDim() else style.rowHover() },
-                    .corners = style.radius.input,
-                    .margin = .{ .h = 2 },
-                    .padding = .{ .x = style.space.sm, .y = style.space.xs, .w = style.space.sm, .h = style.space.xs },
-                });
-                rb.processEvents();
-                rb.drawBackground();
-                {
-                    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-                    defer row.deinit();
-                    tabBadge(git.repoName(path), on);
-                    var fit: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
-                    dvui.label(@src(), "{s}", .{graph_view.fitText(&fit, git.repoName(path), style.small(), 130)}, .{ .font = if (on) style.smallBold() else style.small(), .color_text = .{ .color = if (on) style.text() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-                }
-                if (rb.hovered()) dvui.tooltip(@src(), .{ .active_rect = rb.data().borderRectScale().r, .position = .horizontal, .delay = 400_000 }, "{s}", .{path}, .{ .font = style.small() });
-                if (rb.clicked()) {
-                    settings_page = REPO_PAGE;
-                    repo_settings_path.clearRetainingCapacity();
-                    repo_settings_path.appendSlice(gpa, path) catch {};
-                    repo_prefs_loaded = false;
-                }
-                rb.deinit();
-            }
-            continue;
-        }
-        const shown = settings_page == page.id;
-        var bw: dvui.ButtonWidget = undefined;
-        bw.init(@src(), .{ .draw_focus = false }, .{
-            .id_extra = i,
-            .tag = dialog_views.frameTag("settings", page.title),
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = if (shown) style.accentDim() else style.surface() },
-            .color_fill_hover = .{ .color = if (shown) style.accentDim() else style.rowHover() },
-            .corners = style.radius.input,
-            .margin = .{ .h = 2 },
-            .padding = .{ .x = style.space.sm, .y = style.space.sm, .w = style.space.sm, .h = style.space.sm },
-        });
-        bw.processEvents();
-        bw.drawBackground();
-        {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
-            defer row.deinit();
-            dvui.icon(@src(), "page_icon", page.icon, .{ .fill_color = .{ .color = if (shown) style.accent() else style.textMuted() } }, .{
-                .min_size_content = .{ .w = 14, .h = 14 },
-                .gravity_y = 0.5,
-                .margin = .{ .w = style.space.md },
-            });
-            dvui.label(@src(), "{s}", .{page.title}, .{ .font = if (shown) style.smallBold() else style.small(), .color_text = .{ .color = if (shown) style.text() else style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-        }
-        if (bw.clicked()) {
-            settings_page = page.id;
-            signing_loaded = false;
-            repo_prefs_loaded = false;
-        }
-        bw.deinit();
-    }
-}
-
-/// One section of the settings, drawn only while it is the one picked: its
-/// head — icon, title, what is in it — then whatever the caller fills in
-/// before `end`.
-const SettingsCard = struct {
-    inner: *dvui.BoxWidget,
-
-    fn begin(id: usize) ?SettingsCard {
-        if (settings_page != id) return null;
-        const page = for (settings_pages) |entry| {
-            if (entry) |p| if (p.id == id) break p;
-        } else return null;
-        {
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.md } });
-            defer row.deinit();
-            iconTile(@src(), page.icon, 32, 16);
-            var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
-            defer col.deinit();
-            // A repository's page goes by its name, its folder under it.
-            const one = id == REPO_PAGE and repo_settings_path.items.len > 0;
-            dvui.label(@src(), "{s}", .{if (one) git.repoName(repo_settings_path.items) else page.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-            dvui.label(@src(), "{s}", .{if (one) repo_settings_path.items else page.hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 1 } });
-        }
-        return .{ .inner = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surface() },
-            .border = .{ .y = 1 },
-            .color_border = .{ .color = style.border() },
-            .padding = .{ .y = style.space.sm },
-        }) };
-    }
-
-    fn end(self: SettingsCard) void {
-        self.inner.deinit();
-    }
-};
-
-/// A setting's name and what it does, over the control the caller draws.
-fn settingsField(src: std.builtin.SourceLocation, title: []const u8, hint: []const u8) void {
-    var col = dvui.box(src, .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = style.space.md, .h = style.space.sm } });
-    defer col.deinit();
-    dvui.label(@src(), "{s}", .{title}, .{ .font = style.small(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-    dvui.label(@src(), "{s}", .{hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2 } });
-}
-
-/// What git's global config says about signing, read when the section is
-/// opened rather than every frame.
-var signing_loaded = false;
-var signing_format: []const u8 = "openpgp";
-var signing_key: std.ArrayList(u8) = .empty;
-
-/// The signing settings come from one `git` process on another thread: on
-/// Windows, starting git takes long enough that waiting for it here froze the
-/// window. Until it answers `signing_loaded` is false, and the page says so.
-var signing_job: ?*run.Capture = null;
-
-fn loadSigning() void {
-    if (signing_loaded) return;
-    const job_now = signing_job orelse blk: {
-        const started = run.Capture.start(gpa, app_io, ".", &.{ "git", "config", "--global", "--get-regexp", "^(user\\.signingkey|gpg\\.format)$" }) catch {
-            // Nothing to show, and no use asking again every frame.
-            signing_loaded = true;
-            return;
-        };
-        signing_job = started;
-        break :blk started;
-    };
-    if (!job_now.finished()) return;
-    signing_job = null;
-    defer job_now.deinit(app_io);
-
-    signing_loaded = true;
-    signing_key.clearRetainingCapacity();
-    signing_format = "openpgp";
-    if (!job_now.ok) return;
-    var lines = std.mem.splitScalar(u8, job_now.out, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
-        const value = std.mem.trim(u8, line[space + 1 ..], " ");
-        if (std.mem.eql(u8, line[0..space], "user.signingkey")) {
-            signing_key.clearRetainingCapacity();
-            signing_key.appendSlice(gpa, value) catch {};
-        } else if (std.mem.eql(u8, line[0..space], "gpg.format")) {
-            signing_format = if (std.mem.eql(u8, value, "ssh")) "ssh" else "openpgp";
-        }
-    }
-}
-
 // === This repository's settings ===
 //
 // What git keeps in the repository's own .git/config: read when the page is
 // opened, written as it is changed, so git — and any other tool — goes by
 // them too. Unset, the global ones hold.
 
-var repo_prefs_loaded = false;
+pub var repo_prefs_loaded = false;
 var repo_prefs_job: ?*run.Capture = null;
 /// Which repository's settings the page shows, picked from every one Zit
 /// knows; owned.
-var repo_settings_path: std.ArrayList(u8) = .empty;
+pub var repo_settings_path: std.ArrayList(u8) = .empty;
 var repo_name_local: std.ArrayList(u8) = .empty;
 var repo_email_local: std.ArrayList(u8) = .empty;
 /// How `git pull` joins what it fetched: as set everywhere, or here.
@@ -7550,7 +6642,7 @@ fn setLocalConfig(key: []const u8, value: []const u8) void {
 
 /// Which of `steps` `value` is closest to: a saved factor read back as the
 /// chip it was picked from.
-fn nearestStep(steps: []const f32, value: f32) usize {
+pub fn nearestStep(steps: []const f32, value: f32) usize {
     var best: usize = 0;
     for (steps, 0..) |v, i| if (@abs(v - value) < @abs(steps[best] - value)) {
         best = i;
@@ -7559,7 +6651,7 @@ fn nearestStep(steps: []const f32, value: f32) usize {
 }
 
 /// One choice out of a few, as a row of chips: the one picked ticked.
-fn choiceChips(id: usize, options: []const []const u8, current: usize) ?usize {
+pub fn choiceChips(id: usize, options: []const []const u8, current: usize) ?usize {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .background = false });
     defer row.deinit();
     var picked: ?usize = null;
@@ -7575,7 +6667,7 @@ fn choiceChips(id: usize, options: []const []const u8, current: usize) ?usize {
 /// commits are signed — each "as everywhere" until set.
 /// Every repository Zit knows: the one open, its tabs, then the ones it
 /// remembers — each once.
-fn knownRepos() []const []const u8 {
+pub fn knownRepos() []const []const u8 {
     const a = dvui.currentWindow().arena();
     var known: std.ArrayList([]const u8) = .empty;
     if (repo != null and !isOpenTab(repo_path.items)) known.append(a, repo_path.items) catch {};
@@ -7586,8 +6678,8 @@ fn knownRepos() []const []const u8 {
     return known.items;
 }
 
-fn repoSettings() void {
-    var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
+pub fn repoSettings() void {
+    var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = identity_view.settings_body_pad });
     defer section.deinit();
 
     const known = knownRepos();
@@ -7603,7 +6695,7 @@ fn repoSettings() void {
         return;
     }
 
-    settingsField(@src(), "Name and email here", "Commits in this repository only — work or personal. Empty: the global ones");
+    identity_view.settingsField(@src(), "Name and email here", "Commits in this repository only — work or personal. Empty: the global ones");
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false });
         defer row.deinit();
@@ -7613,7 +6705,7 @@ fn repoSettings() void {
             const te = dialog_views.textField(@src(), .{
                 .text = .{ .array_list = .{ .backing = list, .allocator = gpa, .limit = 256 } },
                 .placeholder = if (global.len > 0) global else if (i == 0) "Name" else "Email",
-            }, settingsInput().override(.{ .tag = if (i == 0) "repo:name" else "repo:email" }));
+            }, identity_view.settingsInput().override(.{ .tag = if (i == 0) "repo:name" else "repo:email" }));
             te.deinit();
         }
     }
@@ -7627,7 +6719,7 @@ fn repoSettings() void {
         }
     }
 
-    settingsField(@src(), "Pull", "How Pull joins what it fetched — pull.rebase and pull.ff");
+    identity_view.settingsField(@src(), "Pull", "How Pull joins what it fetched — pull.rebase and pull.ff");
     if (choiceChips(0, &.{ "As everywhere", "Merge", "Rebase", "Fast-forward only" }, @backingInt(repo_pull))) |i| {
         switch (i) {
             0 => {
@@ -7649,7 +6741,7 @@ fn repoSettings() void {
         }
     }
 
-    settingsField(@src(), "Prune when fetching", "Drop the remote branches deleted on the remote — fetch.prune");
+    identity_view.settingsField(@src(), "Prune when fetching", "Drop the remote branches deleted on the remote — fetch.prune");
     if (choiceChips(1, &.{ "As everywhere", "On", "Off" }, @backingInt(repo_prune))) |i| {
         setLocalConfig("fetch.prune", switch (i) {
             0 => "",
@@ -7660,7 +6752,7 @@ fn repoSettings() void {
         if (repo != null and std.mem.eql(u8, repo_settings_path.items, repo_path.items)) commit_view.startRepoConfig();
     }
 
-    settingsField(@src(), "Sign commits", "Every commit made here signed with your key — commit.gpgsign");
+    identity_view.settingsField(@src(), "Sign commits", "Every commit made here signed with your key — commit.gpgsign");
     if (choiceChips(2, &.{ "As everywhere", "On", "Off" }, @backingInt(repo_sign))) |i| {
         setLocalConfig("commit.gpgsign", switch (i) {
             0 => "",
@@ -7707,7 +6799,7 @@ const known_terminals = if (@import("builtin").os.tag == .windows) [_]struct { [
 /// Which of them this machine has, found once the settings open.
 var editors_found: [known_editors.len]bool = @splat(false);
 var terminals_found: [known_terminals.len]bool = @splat(false);
-var editors_loaded = false;
+pub var editors_loaded = false;
 var editors_job: ?*run.Capture = null;
 
 /// Each known editor whose command is on the PATH, one name a line: one
@@ -7757,7 +6849,7 @@ fn loadEditors() void {
 
 /// The editor setting, as a select: the system's choice, or each editor
 /// found here. True when it changed.
-fn editorChoice() bool {
+pub fn editorChoice() bool {
     loadEditors();
     const current = std.mem.trim(u8, tab_strip.editor_cmd.items, " ");
     var face: []const u8 = if (current.len == 0) "System default" else current;
@@ -7785,7 +6877,7 @@ fn editorChoice() bool {
 
 /// The terminal setting, as a select: the first found, or one of those
 /// installed here. True when it changed.
-fn terminalChoice() bool {
+pub fn terminalChoice() bool {
     loadEditors();
     const current = std.mem.trim(u8, tab_strip.terminal_cmd.items, " ");
     var face: []const u8 = "Automatic";
@@ -7833,19 +6925,19 @@ pub fn openInEditor(path: []const u8) void {
 
 /// `git config --global key value` — the empty value unsets it — then read
 /// back, so what is shown is what git has.
-fn setGlobalConfig(key: []const u8, value: []const u8) void {
+pub fn setGlobalConfig(key: []const u8, value: []const u8) void {
     var outcome = (if (value.len == 0)
         run.git(gpa, app_io, ".", &.{ "config", "--global", "--unset", key })
     else
         run.git(gpa, app_io, ".", &.{ "config", "--global", key, value })) catch return setCommandError("Could not run git. Is it on your PATH?");
     defer outcome.deinit(gpa);
     if (!outcome.ok and value.len > 0) setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
-    signing_loaded = false;
+    identity_view.signing_loaded = false;
 }
 
 /// One setting: what it is and what it does, its switch on the right.
 /// True when it was flipped.
-fn settingsSwitch(id: usize, value: *bool, title: []const u8, hint: []const u8) bool {
+pub fn settingsSwitch(id: usize, value: *bool, title: []const u8, hint: []const u8) bool {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .id_extra = id,
         .expand = .horizontal,
@@ -7875,7 +6967,7 @@ fn settingsHeading(src: std.builtin.SourceLocation, caption: []const u8) void {
 
 /// A theme to pick, drawn in its own colours: a strip of background, a
 /// surface and an accent, so it is chosen by looking rather than by name.
-fn themeCard(src: std.builtin.SourceLocation, id: usize) bool {
+pub fn themeCard(src: std.builtin.SourceLocation, id: usize) bool {
     const t = style.themes[id];
     const caption = t.name;
     const selected = id == theme_index;
@@ -7993,7 +7085,7 @@ pub fn toggle(src: std.builtin.SourceLocation, on: bool) bool {
     return bw.clicked();
 }
 
-fn shortcutRow(src: std.builtin.SourceLocation, keys: []const u8, what: []const u8) void {
+pub fn shortcutRow(src: std.builtin.SourceLocation, keys: []const u8, what: []const u8) void {
     var row = dvui.box(src, .{ .dir = .horizontal }, .{
         .expand = .horizontal,
         .background = false,
@@ -8173,21 +7265,21 @@ const commands = [_]Command{
         }
     }.f },
     .{ .name = "Create a pull request for this branch", .icon = dvui.entypo.merge, .run = rebase_view.requestCreateRequest },
-    .{ .name = "Git identity: name, email, GitHub sign-in", .icon = dvui.entypo.user, .needs_repo = false, .run = openIdentity },
+    .{ .name = "Git identity: name, email, GitHub sign-in", .icon = dvui.entypo.user, .needs_repo = false, .run = identity_view.openIdentity },
     .{ .name = "Settings", .icon = dvui.entypo.cog, .needs_repo = false, .run = struct {
         fn f() void {
-            openSettings(5);
+            identity_view.openSettings(5);
         }
     }.f },
     .{ .name = "Keyboard shortcuts", .icon = dvui.entypo.keyboard, .needs_repo = false, .run = struct {
         fn f() void {
-            keys_open = true;
-            keys_rect = .{};
+            identity_view.keys_open = true;
+            identity_view.keys_rect = .{};
         }
     }.f },
     .{ .name = "Switch theme, light or dark", .icon = dvui.entypo.light_up, .needs_repo = false, .run = struct {
         fn f() void {
-            setTheme(!dark_theme);
+            identity_view.setTheme(!dark_theme);
         }
     }.f },
 };
@@ -8437,7 +7529,7 @@ pub var active_tab_foot: ?dvui.Rect.Physical = null;
 // browser opens on github.com/login/device with the code in the clipboard,
 // and once it is approved there the token comes back to Zit's asking.
 
-var connect_open = false;
+pub var connect_open = false;
 var connect_rect: dvui.Rect = .{};
 var connect_job: ?*run.Capture = null;
 var connect_state: enum { asking, waiting, user, done, failed } = .asking;
@@ -8448,7 +7540,7 @@ var connect_uri: std.ArrayList(u8) = .empty;
 var connect_interval_s: u32 = 5;
 var connect_note: std.ArrayList(u8) = .empty;
 /// Asked from the identity dialog: its fields filled once connected.
-var connect_fills_identity = false;
+pub var connect_fills_identity = false;
 
 /// The dialog, and OAuth's device flow under way: a code from GitHub, typed
 /// on its page in the browser. Also its Try again.
@@ -8537,7 +7629,7 @@ fn pumpConnect(timer_id: dvui.Id) void {
                 avatars.setGithubRepo(githubRemote());
                 if (connect_fills_identity) {
                     connect_fills_identity = false;
-                    identity_note = if (fillFromGithub()) "Filled in from your GitHub account." else "Connected.";
+                    identity_view.identity_note = if (identity_view.fillFromGithub()) "Filled in from your GitHub account." else "Connected.";
                 }
                 // Nothing left to say: the account shows in Settings and the
                 // pull requests come in behind it.
@@ -8559,9 +7651,9 @@ fn connectDialog() void {
     defer fw.deinit();
     dialog_views.centerModal(fw.data(), win, null);
     pumpConnect(fw.data().id);
-    dialogHeader(@src(), dvui.entypo.login, "Connect GitHub", "Pull requests, issues and checks, as your account", &connect_open);
+    identity_view.dialogHeader(@src(), dvui.entypo.login, "Connect GitHub", "Pull requests, issues and checks, as your account", &connect_open);
 
-    var body = dialogBody(@src(), null);
+    var body = identity_view.dialogBody(@src(), null);
     const text = switch (connect_state) {
         .asking => "Asking GitHub for a code…",
         .waiting => "Type this code on the GitHub page that just opened — it is in your clipboard — and approve Zit.",
@@ -8599,7 +7691,7 @@ fn connectDialog() void {
     }
     body.deinit();
     {
-        var foot = dialogFooter(@src());
+        var foot = identity_view.dialogFooter(@src());
         defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialog_views.dialogButton(@src(), "Cancel", false)) closeConnect();
@@ -8926,13 +8018,13 @@ fn workspaceDialog() void {
     dialog_views.centerModal(fw.data(), win, null);
     const is_group = kind == .group or kind == .group_rename;
     if (kind == .group)
-        dialogHeader(@src(), dvui.entypo.plus, "New group", "The tab under a coloured dot, with the ones you add to it", &open)
+        identity_view.dialogHeader(@src(), dvui.entypo.plus, "New group", "The tab under a coloured dot, with the ones you add to it", &open)
     else if (kind == .group_rename)
-        dialogHeader(@src(), dvui.entypo.pencil, "Rename the group", "Its name beside its dot; none leaves the dot alone", &open)
+        identity_view.dialogHeader(@src(), dvui.entypo.pencil, "Rename the group", "Its name beside its dot; none leaves the dot alone", &open)
     else
-        dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of groups and tabs, switched to in this window", &open);
+        identity_view.dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of groups and tabs, switched to in this window", &open);
 
-    var body = dialogBody(@src(), null);
+    var body = identity_view.dialogBody(@src(), null);
     var entered = false;
     // A group's name is optional: without one, the group is its dot.
     _ = dialog_views.dialogField(@src(), 0, if (is_group) "Name (optional)" else "Name", &ws_name, "e.g. Client work", true, &entered);
@@ -8942,7 +8034,7 @@ fn workspaceDialog() void {
     const named = is_group or std.mem.trim(u8, ws_name.items, " \t").len > 0;
     body.deinit();
     {
-        var line = dialogFooter(@src());
+        var line = identity_view.dialogFooter(@src());
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialog_views.dialogButton(@src(), "Cancel", false)) open = false;
@@ -9271,7 +8363,7 @@ const TAB_TOP: f32 = 4;
 const TAB_GAP: f32 = 4;
 
 /// A repository's initials on a rounded square, before its name in a tab.
-fn tabBadge(name: []const u8, active: bool) void {
+pub fn tabBadge(name: []const u8, active: bool) void {
     var badge = dvui.box(@src(), .{}, .{
         .background = true,
         .color_fill = .{ .color = if (active) style.accentDim() else style.border() },
@@ -9782,11 +8874,11 @@ fn prCreateDialog() void {
     var fw = dialog_views.modalWindow(@src(), &pr_new_rect, &pr_new_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     dialog_views.centerModal(fw.data(), win, null);
-    dialogHeader(@src(), dvui.entypo.merge, "New pull request", h.head orelse "", &pr_new_open);
+    identity_view.dialogHeader(@src(), dvui.entypo.merge, "New pull request", h.head orelse "", &pr_new_open);
 
     // A fixed width: the description comes filled in with the template and
     // the commits, and its longest line would otherwise set the dialog's.
-    var body = dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
+    var body = identity_view.dialogBody(@src(), @min(PR_CREATE_W, win.w - 80));
 
     // The two branches, as GitHub's compare bar has them: into, from.
     {
@@ -9825,7 +8917,7 @@ fn prCreateDialog() void {
             .multiline = true,
             .break_lines = true,
             .placeholder = "Why, and how to try it",
-        }, settingsInput().override(.{ .tag = "pr_new:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
+        }, identity_view.settingsInput().override(.{ .tag = "pr_new:body", .min_size_content = .{ .h = 160 }, .max_size_content = .size(.{ .w = 0, .h = 260 }), .margin = .{ .h = style.space.lg } }));
         te.deinit();
     }
 
@@ -9846,7 +8938,7 @@ fn prCreateDialog() void {
     body.deinit();
 
     {
-        var line = dialogFooter(@src());
+        var line = identity_view.dialogFooter(@src());
         defer line.deinit();
         typePicker(5, &pr_new_draft, "pr_new:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -10526,7 +9618,7 @@ pub fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
             .gravity_y = 0.5,
             .margin = .{ .x = (rebase_view.SIDE_GUTTER - 11) / 2, .w = (rebase_view.SIDE_GUTTER - 11) / 2 },
         });
-    } else if (dialog_views.iconButtonTagged(@src(), "ref_eye", if (hidden) "Show in the graph" else "Hide from the graph", eyeIcon(hidden), if (hidden) style.textMuted() else if (hover) style.textFaint() else dvui.Color.transparent, dialog_views.frameTag("eye", ref.name))) {
+    } else if (dialog_views.iconButtonTagged(@src(), "ref_eye", if (hidden) "Show in the graph" else "Hide from the graph", identity_view.eyeIcon(hidden), if (hidden) style.textMuted() else if (hover) style.textFaint() else dvui.Color.transparent, dialog_views.frameTag("eye", ref.name))) {
         graph_view.toggleHidden(ref);
     }
 
@@ -10691,9 +9783,9 @@ fn statusBar() void {
     }
 
     // The keys, then the changes panel's fold, on its side.
-    if (dialog_views.iconButtonTagged(@src(), "status_keys", "Keyboard shortcuts", dvui.entypo.keyboard, if (keys_open) style.accent() else style.textMuted(), "status:keys")) {
-        keys_open = true;
-        keys_rect = .{};
+    if (dialog_views.iconButtonTagged(@src(), "status_keys", "Keyboard shortcuts", dvui.entypo.keyboard, if (identity_view.keys_open) style.accent() else style.textMuted(), "status:keys")) {
+        identity_view.keys_open = true;
+        identity_view.keys_rect = .{};
     }
     panelToggle(@src(), &show_detail, dvui.entypo.align_right, "Changes panel — Ctrl+J", "status:detail");
 
@@ -10796,7 +9888,7 @@ fn featuresDialog() void {
     var fw = dialog_views.modalWindow(@src(), &features_rect, &features_open, style.surface(), 0, dvui.Rect.all(0));
     defer fw.deinit();
     dialog_views.centerModal(fw.data(), win, null);
-    dialogHeader(@src(), dvui.entypo.info_with_circle, "About Zit", "Version " ++ APP_VERSION ++ " · " ++ PLATFORM, &features_open);
+    identity_view.dialogHeader(@src(), dvui.entypo.info_with_circle, "About Zit", "Version " ++ APP_VERSION ++ " · " ++ PLATFORM, &features_open);
 
     const w: f32 = @min(780, win.w - 80);
     // The app itself: its mark, what it is, where to read more.
@@ -10878,7 +9970,7 @@ fn featuresDialog() void {
         {
             var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .margin = .{ .h = style.space.md } });
             defer head.deinit();
-            iconTile(@src(), feature.icon, 32, 16);
+            identity_view.iconTile(@src(), feature.icon, 32, 16);
             dvui.label(@src(), "{s}", .{feature.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md }, .padding = dvui.Rect.all(0) });
         }
         for (feature.items, 0..) |item, i| {
@@ -11446,9 +10538,9 @@ fn resetUiGlobals() void {
     graph_view.graph_only = .empty;
     graph_view.graph_pinned.deinit(gpa);
     graph_view.graph_pinned = .empty;
-    settings_open = false;
-    settings_page = 5;
-    keys_open = false;
+    identity_view.settings_open = false;
+    identity_view.settings_page = 5;
+    identity_view.keys_open = false;
     features_open = false;
     active_view = .graph;
     left_squeezed = false;
@@ -11501,9 +10593,9 @@ fn resetUiGlobals() void {
     tab_strip.terminal_cmd.deinit(gpa);
     tab_strip.terminal_cmd = .empty;
     diff_view.clearImagePair();
-    signing_key.deinit(gpa);
-    signing_key = .empty;
-    signing_loaded = false;
+    identity_view.signing_key.deinit(gpa);
+    identity_view.signing_key = .empty;
+    identity_view.signing_loaded = false;
     if (repo_prefs_job) |j| j.deinit(app_io);
     repo_prefs_job = null;
     repo_prefs_loaded = false;
@@ -11516,8 +10608,8 @@ fn resetUiGlobals() void {
     if (editors_job) |j| j.deinit(app_io);
     editors_job = null;
     editors_loaded = false;
-    if (signing_job) |j| j.deinit(app_io);
-    signing_job = null;
+    if (identity_view.signing_job) |j| j.deinit(app_io);
+    identity_view.signing_job = null;
     if (commit_view.repo_config_job) |j| j.deinit(app_io);
     commit_view.repo_config_job = null;
     commit_view.git_template_path.deinit(gpa);
@@ -11538,11 +10630,11 @@ fn resetUiGlobals() void {
     pr_cards_all = null;
     conflict_focus = 0;
     dialog_views.clearForget();
-    identity_name.deinit(gpa);
-    identity_name = .empty;
-    identity_email.deinit(gpa);
-    identity_email = .empty;
-    identity_open = false;
+    identity_view.identity_name.deinit(gpa);
+    identity_view.identity_name = .empty;
+    identity_view.identity_email.deinit(gpa);
+    identity_view.identity_email = .empty;
+    identity_view.identity_open = false;
     window_chrome.forgetMe();
     graph_view.clearDrop();
     graph_view.drag_source.deinit(gpa);
@@ -14615,15 +13707,15 @@ test "the avatar's menu opens the signing card, and asks before signing out" {
 
     try clickAt(try tagCenter("toolbar:user"));
     try clickAt(try tagCenter("menu:Commit signature"));
-    try std.testing.expect(settings_open);
-    try std.testing.expectEqual(@as(usize, 6), settings_page);
+    try std.testing.expect(identity_view.settings_open);
+    try std.testing.expectEqual(@as(usize, 6), identity_view.settings_page);
     // Another section from the list, and back.
     try clickAt(try tagCenter("settings:Integrations"));
-    try std.testing.expectEqual(@as(usize, 3), settings_page);
+    try std.testing.expectEqual(@as(usize, 3), identity_view.settings_page);
     try clickAt(try tagCenter("settings:Commit signing"));
-    try std.testing.expectEqual(@as(usize, 6), settings_page);
+    try std.testing.expectEqual(@as(usize, 6), identity_view.settings_page);
     try pressFrame(.escape, .none);
-    try std.testing.expect(!settings_open);
+    try std.testing.expect(!identity_view.settings_open);
 
     try clickAt(try tagCenter("toolbar:user"));
     try clickAt(try tagCenter("menu:Sign out of GitHub (tester)"));
@@ -17368,25 +16460,25 @@ test "the identity dialog saves a name and email to the global config" {
     run.env_override = &env;
     defer run.env_override = null;
 
-    try std.testing.expect(!identitySet());
-    openIdentity();
-    try std.testing.expect(identity_open);
+    try std.testing.expect(!identity_view.identitySet());
+    identity_view.openIdentity();
+    try std.testing.expect(identity_view.identity_open);
 
     // Half of it is refused, and the dialog stays.
-    try identity_name.appendSlice(gpa, "Ada Lovelace");
-    saveIdentity();
-    try std.testing.expect(identity_open);
+    try identity_view.identity_name.appendSlice(gpa, "Ada Lovelace");
+    identity_view.saveIdentity();
+    try std.testing.expect(identity_view.identity_open);
 
-    try identity_email.appendSlice(gpa, "ada@example.com");
-    saveIdentity();
-    try std.testing.expect(!identity_open);
-    try std.testing.expect(identitySet());
+    try identity_view.identity_email.appendSlice(gpa, "ada@example.com");
+    identity_view.saveIdentity();
+    try std.testing.expect(!identity_view.identity_open);
+    try std.testing.expect(identity_view.identitySet());
 
     var name: std.ArrayList(u8) = .empty;
     defer name.deinit(gpa);
     var email: std.ArrayList(u8) = .empty;
     defer email.deinit(gpa);
-    try std.testing.expect(readIdentity(&name, &email));
+    try std.testing.expect(identity_view.readIdentity(&name, &email));
     try std.testing.expectEqualStrings("Ada Lovelace", name.items);
     try std.testing.expectEqualStrings("ada@example.com", email.items);
 }
@@ -17759,18 +16851,18 @@ test "audit: the main controls do what they say when clicked" {
     // Settings from the menu on the face: switch to the light theme, Esc out.
     try clickAt(try tagCenter("toolbar:user"));
     try clickAt(try tagCenter("menu:Settings — Ctrl+,"));
-    try std.testing.expect(settings_open);
+    try std.testing.expect(identity_view.settings_open);
     try clickAt(try tagCenter("settings:Appearance"));
     try clickAt(try tagCenter("theme:Zit Light"));
     try std.testing.expect(!dark_theme);
     try pressFrame(.escape, .none);
-    try std.testing.expect(!settings_open);
+    try std.testing.expect(!identity_view.settings_open);
 
     // The keys, from the footer.
     try clickAt(try tagCenter("status:keys"));
-    try std.testing.expect(keys_open);
+    try std.testing.expect(identity_view.keys_open);
     try pressFrame(.escape, .none);
-    try std.testing.expect(!keys_open);
+    try std.testing.expect(!identity_view.keys_open);
 
     // Tabs: the other one, then its × — closed, and remembered.
     try clickAt(try tagCenter("tab:0"));
@@ -18114,13 +17206,13 @@ test "docs screenshots" {
         palette_open = true;
         try docShot("palette", sfx);
         palette_open = false;
-        openSettings(0);
+        identity_view.openSettings(0);
         try docShot("settings-appearance", sfx);
-        settings_open = false;
+        identity_view.settings_open = false;
         try docShot("zz", sfx);
-        openSettings(REPO_PAGE);
+        identity_view.openSettings(identity_view.REPO_PAGE);
         try docShot("settings-repository", sfx);
-        settings_open = false;
+        identity_view.settings_open = false;
         features_open = true;
         features_page = 0;
         try docShot("about", sfx);

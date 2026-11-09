@@ -9,6 +9,7 @@ const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const identity_view = @import("identity_view.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -713,7 +714,7 @@ pub var me_loaded = false;
 pub fn loadMe() void {
     if (me_loaded) return;
     me_loaded = true;
-    _ = app.readIdentity(&me_name, &me_email);
+    _ = identity_view.readIdentity(&me_name, &me_email);
     // The login Zit's own sign-in saved, from the disk: no request per frame.
     me_gh.clearRetainingCapacity();
     if (!tab_strip.integrations) return;
@@ -807,20 +808,20 @@ pub fn userMenu() void {
     m.close();
     switch (pick) {
         .none => {},
-        .settings => app.openSettings(5),
+        .settings => identity_view.openSettings(5),
         .keys => {
-            app.keys_open = true;
-            app.keys_rect = .{};
+            identity_view.keys_open = true;
+            identity_view.keys_rect = .{};
         },
-        .signing => app.openSettings(6),
+        .signing => identity_view.openSettings(6),
         .docs => app.openUrl(app.SITE_URL),
         .about => {
             app.features_open = true;
             app.features_rect = .{};
         },
         .sign_in => {
-            app.openIdentity();
-            app.signInWithGithub();
+            identity_view.openIdentity();
+            identity_view.signInWithGithub();
         },
         .sign_out => app.ask(.sign_out, me_gh.items),
     }

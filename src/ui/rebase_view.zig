@@ -13,6 +13,7 @@ const graph_view = @import("graph_view.zig");
 const diff_view = @import("diff_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const identity_view = @import("identity_view.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -221,7 +222,7 @@ pub fn sidebarSection(src: std.builtin.SourceLocation, section: diff_view.Sectio
         defer row.deinit();
 
         commit_view.sectionFace(collapsed.*, section.title(), all_hidden);
-        if (all_hidden) dvui.icon(@src(), "section_hidden", app.eyeIcon(true), .{ .fill_color = .{ .color = style.textFaint() } }, .{
+        if (all_hidden) dvui.icon(@src(), "section_hidden", identity_view.eyeIcon(true), .{ .fill_color = .{ .color = style.textFaint() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
             .margin = .{ .x = style.space.sm },
@@ -580,7 +581,7 @@ fn sectionMenu(
         };
         var buf: [64]u8 = undefined;
         const caption = std.fmt.bufPrint(&buf, "{s} all the {s} {s} the graph", .{ if (hd.shown) "Hide" else "Show", what, if (hd.shown) "from" else "in" }) catch "";
-        if (graph_view.menuIcon(@src(), app.eyeIcon(hd.shown), caption, false)) {
+        if (graph_view.menuIcon(@src(), identity_view.eyeIcon(hd.shown), caption, false)) {
             fw.close();
             hideAll(hd.kind, hd.shown);
         }

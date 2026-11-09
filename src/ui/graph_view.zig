@@ -11,6 +11,7 @@ const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const identity_view = @import("identity_view.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -693,7 +694,7 @@ pub fn refMenu(
             toggleGraphPref(&graph_pinned, "zit.pinned", ref.name);
         }
         const hidden = isHidden(ref.name);
-        if (menuIcon(@src(), app.eyeIcon(!hidden), if (hidden) "Show in the graph" else "Hide from the graph", false)) {
+        if (menuIcon(@src(), identity_view.eyeIcon(!hidden), if (hidden) "Show in the graph" else "Hide from the graph", false)) {
             fw.close();
             toggleHidden(ref);
         }
@@ -1638,7 +1639,7 @@ fn graphNotes() void {
     // Hidden ones: say so, and bring them back in one click.
     if (hidden) {
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "{d} hidden — show all", .{graph_hidden.items.len}) catch "Show all";
-        if (dialog_views.chipButton(@src(), app.eyeIcon(true), caption, false)) unhideAll();
+        if (dialog_views.chipButton(@src(), identity_view.eyeIcon(true), caption, false)) unhideAll();
     }
     // Narrowed to authors: who, how many of the commits shown are theirs,
     // and back to everyone in one click — or, with none of theirs here,

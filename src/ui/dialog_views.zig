@@ -12,6 +12,7 @@ const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
+const identity_view = @import("identity_view.zig");
 const app = @import("../main.zig");
 
 // === Folder picker ===
@@ -260,9 +261,9 @@ pub fn repoDialog() void {
     defer fw.deinit();
     centerModal(fw.data(), win, null);
 
-    app.dialogHeader(@src(), if (cloning) dvui.entypo.download else dvui.entypo.plus, if (cloning) "Clone a repository" else "Start a new repository", if (cloning) "Copy one from GitHub, GitLab or any git server onto this computer" else "An empty repository, in a folder of its own", &open);
+    identity_view.dialogHeader(@src(), if (cloning) dvui.entypo.download else dvui.entypo.plus, if (cloning) "Clone a repository" else "Start a new repository", if (cloning) "Copy one from GitHub, GitLab or any git server onto this computer" else "An empty repository, in a folder of its own", &open);
 
-    var body = app.dialogBody(@src(), null);
+    var body = identity_view.dialogBody(@src(), null);
 
     var entered = false;
     if (cloning) {
@@ -328,7 +329,7 @@ pub fn repoDialog() void {
 
     body.deinit();
     {
-        var foot = app.dialogFooter(@src());
+        var foot = identity_view.dialogFooter(@src());
         defer foot.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -551,14 +552,14 @@ pub fn promptDialog() void {
     defer fw.deinit();
     centerModal(fw.data(), win, null);
     var hint_buf: [160]u8 = undefined;
-    app.dialogHeader(@src(), app.Prompt.icon(p.kind), app.Prompt.caption(p.kind), app.Prompt.hint(p.kind, p.arg, &hint_buf), &open);
+    identity_view.dialogHeader(@src(), app.Prompt.icon(p.kind), app.Prompt.caption(p.kind), app.Prompt.hint(p.kind, p.arg, &hint_buf), &open);
 
-    var body = app.dialogBody(@src(), PROMPT_W);
+    var body = identity_view.dialogBody(@src(), PROMPT_W);
     var entered = false;
     _ = dialogField(@src(), 0, app.Prompt.label(p.kind), &app.prompt_text, app.Prompt.placeholder(p.kind), true, &entered);
     body.deinit();
     {
-        var line = app.dialogFooter(@src());
+        var line = identity_view.dialogFooter(@src());
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
@@ -1216,9 +1217,9 @@ pub fn forgetDialog() void {
     centerModal(fw.data(), win, null);
 
     var title_buf: [160]u8 = undefined;
-    app.dialogHeader(@src(), dvui.entypo.trash, std.fmt.bufPrint(&title_buf, "Remove {s} from Zit?", .{git.repoName(path)}) catch "Remove it from Zit?", path, &open);
+    identity_view.dialogHeader(@src(), dvui.entypo.trash, std.fmt.bufPrint(&title_buf, "Remove {s} from Zit?", .{git.repoName(path)}) catch "Remove it from Zit?", path, &open);
 
-    var body = app.dialogBody(@src(), null);
+    var body = identity_view.dialogBody(@src(), null);
     // Two lines: a label does not wrap.
     for ([_][]const u8{ "It leaves the recent list and any tab it is open in.", "The folder and everything in it stay where they are." }, 0..) |line, i| {
         dvui.label(@src(), "{s}", .{line}, .{
@@ -1230,7 +1231,7 @@ pub fn forgetDialog() void {
     }
     body.deinit();
 
-    var foot = app.dialogFooter(@src());
+    var foot = identity_view.dialogFooter(@src());
     defer foot.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (dialogButton(@src(), "Cancel", false)) open = false;
