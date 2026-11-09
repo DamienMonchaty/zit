@@ -7,6 +7,7 @@ const run = @import("../core/run.zig");
 const tab_strip = @import("tab_strip.zig");
 const window_chrome = @import("window_chrome.zig");
 const search_view = @import("search_view.zig");
+const diff_view = @import("diff_view.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -304,7 +305,7 @@ pub fn collectHistoryLoad() bool {
         load.history = null;
         load.lanes = null;
         history_seq +%= 1;
-        app.dropStaleSelection();
+        diff_view.dropStaleSelection();
         app.readOpInfo();
         if (file_history.items.len > 0) markFileHistory();
         app.trimHeap();

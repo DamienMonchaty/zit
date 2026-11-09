@@ -4,6 +4,7 @@ const style = @import("style.zig");
 const git = @import("../git/git.zig");
 const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
+const diff_view = @import("diff_view.zig");
 const app = @import("../main.zig");
 
 // === Left: refs ===
@@ -81,7 +82,7 @@ fn refsSidebar() void {
     // these refs point into.
     var chosen: ?git.Ref = null;
 
-    for (std.enums.values(app.Section), 0..) |section, i| {
+    for (std.enums.values(diff_view.Section), 0..) |section, i| {
         if (app.sidebarSection(@src(), section, i)) |ref| chosen = ref;
     }
 

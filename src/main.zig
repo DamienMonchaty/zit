@@ -21,6 +21,7 @@ const tab_strip = @import("ui/tab_strip.zig");
 const window_chrome = @import("ui/window_chrome.zig");
 const graph_view = @import("ui/graph_view.zig");
 const search_view = @import("ui/search_view.zig");
+const diff_view = @import("ui/diff_view.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -461,7 +462,7 @@ var compare_from: git.Oid = undefined;
 var compare_to: git.Oid = undefined;
 /// "develop → PROJ-80": what is being compared, for the headers.
 var compare_label_buf: [256]u8 = undefined;
-var compare_label: []const u8 = "";
+pub var compare_label: []const u8 = "";
 
 /// What `to` has that `from` has not: the diff from where they last met,
 /// as GitHub shows a pull request.
@@ -482,8 +483,8 @@ pub var selected_path: std.ArrayList(u8) = .empty;
 /// The diff for `selection`, read lazily. `diff_stale` is set by whatever
 /// invalidates it rather than re-reading on the spot: a burst of staging then
 /// costs one read instead of one per command.
-var diff: ?git.Diff = null;
-var diff_stale: bool = false;
+pub var diff: ?git.Diff = null;
+pub var diff_stale: bool = false;
 /// Every file of `diff`'s commit or comparison, in its arena, for the list on
 /// the right: `diff` itself is narrowed to the one file the pane shows.
 var diff_all: []git.FileDiff = &.{};
@@ -492,8 +493,8 @@ var diff_all: []git.FileDiff = &.{};
 var file_at: ?git.Diff = null;
 /// Rows in `diff`: one per file header plus one per line. Fixed height, so the
 /// visible range is arithmetic — the same trick the graph uses.
-var diff_rows: usize = 0;
-var diff_scroll: dvui.ScrollInfo = .{ .vertical = .given };
+pub var diff_rows: usize = 0;
+pub var diff_scroll: dvui.ScrollInfo = .{ .vertical = .given };
 /// Lines of the selected change picked for staging one by one, a flag per line
 /// of its file. Empty until one is clicked.
 var picked_lines: std.ArrayList(bool) = .empty;
@@ -524,7 +525,7 @@ var conflict_reveal = false;
 /// changed was before it: U and Ctrl+Z take the last one back. The span, not
 /// the file: 500 picks in a 1.3 MB lockfile kept whole copies of it, 628 MB;
 /// as spans, 50 KB.
-var resolve_undo: std.ArrayList(git.Splice) = .empty;
+pub var resolve_undo: std.ArrayList(git.Splice) = .empty;
 /// Picks that can be taken back; past it the oldest goes. A bound, not a
 /// size anyone reaches by hand.
 const MAX_RESOLVE_UNDO = 1000;
@@ -539,8 +540,8 @@ fn clearResolveUndo() void {
 const MAX_CONFLICT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Who last touched each line of the blamed file.
-var blame_view: ?git.Blame = null;
-var blame_scroll: dvui.ScrollInfo = .{ .vertical = .given };
+pub var blame_view: ?git.Blame = null;
+pub var blame_scroll: dvui.ScrollInfo = .{ .vertical = .given };
 
 /// The rebase being composed, newest first — the order the graph shows, which
 /// is the reverse of the order git replays them in.
@@ -589,7 +590,7 @@ fn diffOpen() bool {
 
 /// Back to the graph from a diff: a commit's file goes back to the commit,
 /// anything else to nothing selected.
-fn closeDiff() void {
+pub fn closeDiff() void {
     switch (selection) {
         .commit => |id| selectCommit(id),
         else => clearSelection(),
@@ -603,7 +604,7 @@ pub fn selectCommit(id: git.Oid) void {
     diff_scroll.viewport.y = 0;
 }
 
-fn selectBlame(path: []const u8) void {
+pub fn selectBlame(path: []const u8) void {
     // `path` is routinely `selected_path.items` itself — the Blame button sits
     // in the header of the very file it blames — and clearing first would then
     // copy a buffer over itself.
@@ -669,7 +670,7 @@ fn clearConflicts() void {
 
 /// Status of the selected path on its side, from the work snapshot. Null once
 /// the file is clean, which is how a resolved conflict stops being one.
-fn selectedStatus(side: git.DiffSide) ?git.Status {
+pub fn selectedStatus(side: git.DiffSide) ?git.Status {
     const w = work orelse return null;
     const list = if (side == .staged) w.staged else w.unstaged;
     for (list) |change| {
@@ -775,7 +776,7 @@ fn loadConflicts() void {
 
 /// A conflict answered by picking a whole file — a binary one, or one a side
 /// deleted — rather than region by region.
-fn wholeFileConflict() bool {
+pub fn wholeFileConflict() bool {
     return conflict_binary or conflict_kind == .deleted_by_us or conflict_kind == .deleted_by_them;
 }
 
@@ -788,7 +789,7 @@ fn safeConflicts() usize {
 
 /// Re-read the diff if what it was taken from is gone. Called at the top of the
 /// diff pane, so a selection nobody is looking at costs nothing.
-fn ensureDiff() void {
+pub fn ensureDiff() void {
     if (!diff_stale) return;
     diff_stale = false;
     // Indices into a diff that is about to be replaced. A working-tree file
@@ -866,13 +867,13 @@ fn ensureDiff() void {
     if (diff == null or !sameDiff(diff.?, next)) picked_lines.clearRetainingCapacity();
 
     var rows: usize = 0;
-    for (next.files) |f| rows += FILE_ROWS + f.lines.len;
+    for (next.files) |f| rows += diff_view.FILE_ROWS + f.lines.len;
 
     if (diff) |*d| d.deinit();
     diff = next;
     diff_all = all;
     diff_rows = rows;
-    buildSplitRows();
+    diff_view.buildSplitRows();
 }
 
 /// The lines a commit's or a range's diff is read with: the file open, or
@@ -892,269 +893,6 @@ fn sameDiff(a: git.Diff, b: git.Diff) bool {
     }
     return true;
 }
-
-// === Split diff ===
-//
-// The same diff as two columns, old on the left and new on the right, with
-// each run of removed lines set against the run of added lines that replaced
-// it — the layout a change is easiest to read in. Only the row plan is new:
-// the lines, the hunk buttons and the line picking are the unified view's.
-
-var diff_split: bool = false;
-
-const NO_LINE = std.math.maxInt(u32);
-
-/// A file's header in the diff: two lines high, room for its name and its
-/// buttons.
-const FILE_ROWS = 2;
-
-const SplitRow = struct {
-    /// `pad`: the header's second line, drawn by the first.
-    kind: enum { file, pad, hunk, pair },
-    file: u32,
-    /// Indices into that file's lines; NO_LINE where the side has nothing.
-    left: u32 = NO_LINE,
-    right: u32 = NO_LINE,
-};
-
-var split_rows: std.ArrayList(SplitRow) = .empty;
-
-/// A buffer that grew for one big diff gives the room back once a smaller one
-/// replaces it, rather than keeping its peak for the rest of the run.
-fn shrinkSpare(comptime T: type, list: *std.ArrayList(T)) void {
-    if (list.capacity > 4 * list.items.len + 4096 / @sizeOf(T)) list.shrinkAndFree(gpa, list.items.len);
-}
-
-fn buildSplitRows() void {
-    split_rows.clearRetainingCapacity();
-    defer shrinkSpare(SplitRow, &split_rows);
-    const d = diff orelse return;
-    for (d.files, 0..) |file, fi_usize| {
-        const fi: u32 = @intCast(fi_usize);
-        split_rows.append(gpa, .{ .kind = .file, .file = fi }) catch return;
-        split_rows.append(gpa, .{ .kind = .pad, .file = fi }) catch return;
-        var dels: std.ArrayList(u32) = .empty;
-        defer dels.deinit(gpa);
-        var adds: std.ArrayList(u32) = .empty;
-        defer adds.deinit(gpa);
-
-        for (file.lines, 0..) |line, li_usize| {
-            const li: u32 = @intCast(li_usize);
-            switch (line.kind) {
-                .deletion => {
-                    // A deletion after additions starts a new run.
-                    if (adds.items.len > 0) flushRun(fi, &dels, &adds);
-                    dels.append(gpa, li) catch return;
-                },
-                .addition => adds.append(gpa, li) catch return,
-                .hunk_header => {
-                    flushRun(fi, &dels, &adds);
-                    split_rows.append(gpa, .{ .kind = .hunk, .file = fi, .left = li }) catch return;
-                },
-                .context, .no_newline => {
-                    flushRun(fi, &dels, &adds);
-                    split_rows.append(gpa, .{ .kind = .pair, .file = fi, .left = li, .right = li }) catch return;
-                },
-            }
-        }
-        flushRun(fi, &dels, &adds);
-    }
-}
-
-/// Set a run of removed lines against the added ones that follow it, line
-/// for line; the longer side runs on alone.
-fn flushRun(fi: u32, dels: *std.ArrayList(u32), adds: *std.ArrayList(u32)) void {
-    const n = @max(dels.items.len, adds.items.len);
-    for (0..n) |i| {
-        split_rows.append(gpa, .{
-            .kind = .pair,
-            .file = fi,
-            .left = if (i < dels.items.len) dels.items[i] else NO_LINE,
-            .right = if (i < adds.items.len) adds.items[i] else NO_LINE,
-        }) catch return;
-    }
-    dels.clearRetainingCapacity();
-    adds.clearRetainingCapacity();
-}
-
-/// One half of a split row: a line, or the blank where that side has none.
-fn splitHalf(
-    src: std.builtin.SourceLocation,
-    id: usize,
-    file: git.FileDiff,
-    line_index: u32,
-    x: f32,
-    y: f32,
-    w: f32,
-    rh: f32,
-    side: ?git.DiffSide,
-    pick: bool,
-) void {
-    const present = line_index != NO_LINE;
-    const line: ?git.DiffLine = if (present) file.lines[line_index] else null;
-    const kind: git.DiffLine.Kind = if (line) |l| l.kind else .context;
-    const pickable = pick and side != null and present and (kind == .addition or kind == .deletion);
-    const picked = pickable and isPicked(line_index);
-
-    const fill: ?dvui.Color = if (!present)
-        style.rowHover()
-    else if (picked)
-        style.accentDim()
-    else switch (kind) {
-        .addition => style.diffAddedFill(),
-        .deletion => style.diffRemovedFill(),
-        else => null,
-    };
-
-    var box = dvui.box(src, .{ .dir = .horizontal }, .{
-        .id_extra = id,
-        .rect = .{ .x = x, .y = y, .w = w, .h = rh },
-        .background = true,
-        .color_fill = .{ .color = fill orelse style.background() },
-        .padding = .{ .x = style.space.sm, .w = style.space.sm },
-    });
-    defer box.deinit();
-
-    const l = line orelse return;
-    lineNumber(@src(), if (kind == .addition) l.new_no else if (kind == .deletion) l.old_no else if (x > 0) l.new_no else l.old_no);
-    codeLine(file, line_index);
-
-    if (pickable and dvui.clicked(box.data(), .{})) togglePicked(line_index, file.lines.len);
-}
-
-/// How the diff is read: whitespace counted or not, and how much context
-/// around each change. Either one reads it again.
-fn diffReadControls() void {
-    const o = &git.diff_options;
-    if (chipButton(@src(), if (o.ignore_whitespace) dvui.entypo.check else dvui.entypo.erase, "Ignore whitespace", o.ignore_whitespace)) {
-        o.ignore_whitespace = !o.ignore_whitespace;
-        diff_stale = true;
-    }
-    var box = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.sm, .w = style.space.md } });
-    defer box.deinit();
-    if (iconButton(@src(), "context_less", "Less context", dvui.entypo.minus, style.textMuted()) and o.context > 1) {
-        o.context = if (o.context > 10) 10 else if (o.context > 3) 3 else o.context - 1;
-        diff_stale = true;
-    }
-    dvui.label(@src(), "{d} lines", .{o.context}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-    if (iconButton(@src(), "context_more", "More context", dvui.entypo.plus, style.textMuted()) and o.context < 25) {
-        o.context = if (o.context < 3) o.context + 1 else if (o.context < 10) 10 else 25;
-        diff_stale = true;
-    }
-}
-
-/// Unified or split: two halves of one control, as the Path / Tree one.
-fn diffModeToggle(src: std.builtin.SourceLocation) void {
-    var track = dvui.box(src, .{ .dir = .horizontal }, .{
-        .gravity_y = 0.5,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceInput() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = style.border() },
-        .corners = style.radius.input,
-        .padding = dvui.Rect.all(2),
-        .margin = .{ .x = style.space.sm, .w = style.space.lg },
-    });
-    defer track.deinit();
-    for ([_]bool{ false, true }, 0..) |split, i| {
-        var bw: dvui.ButtonWidget = undefined;
-        bw.init(@src(), .{ .draw_focus = false }, .{
-            .id_extra = i,
-            .tag = if (split) "diff:split" else "diff:unified",
-            .background = false,
-            .margin = dvui.Rect.all(0),
-            .padding = dvui.Rect.all(0),
-        });
-        bw.processEvents();
-        const selected = diff_split == split;
-        {
-            var cell = dvui.box(@src(), .{}, .{
-                .background = selected or bw.hovered(),
-                .color_fill = .{ .color = if (selected) style.accentDim() else style.rowHover() },
-                .corners = style.radius.input,
-                .padding = .{ .x = style.space.md, .w = style.space.md, .y = style.space.xs, .h = style.space.xs },
-            });
-            defer cell.deinit();
-            dvui.label(@src(), "{s}", .{if (split) "Split" else "Unified"}, .{
-                .font = if (selected) style.smallBold() else style.small(),
-                .color_text = .{ .color = if (selected) style.accent() else style.textFaint() },
-                .padding = dvui.Rect.all(0),
-            });
-        }
-        if (bw.clicked()) {
-            diff_split = split;
-            diff_scroll.viewport.y = 0;
-        }
-        bw.deinit();
-    }
-}
-
-/// The sidebar's sections, in the order it shows them: what is on disk
-/// first — the branches, the worktrees, the stashes — then the host's pull
-/// requests and issues, the tags last.
-pub const Section = enum(u8) {
-    local,
-    /// Each remote with its branches under it, the way GitKraken nests them.
-    remotes,
-    worktrees,
-    stashes,
-    pulls,
-    issues,
-    tags,
-
-    fn label(self: Section) []const u8 {
-        return switch (self) {
-            .local => "LOCAL",
-            .remotes => "REMOTES",
-            .stashes => "STASHES",
-            .tags => "TAGS",
-            .worktrees => "WORKTREES",
-            .pulls => "PULL REQUESTS",
-            .issues => "ISSUES",
-        };
-    }
-
-    /// The name on its header, as GitComet writes it; `label` stays the
-    /// section's tag.
-    fn title(self: Section) []const u8 {
-        return switch (self) {
-            .local => "Local",
-            .remotes => "Remotes",
-            .stashes => "Stashes",
-            .tags => "Tags",
-            .worktrees => "Worktrees",
-            .pulls => "Pull requests",
-            .issues => "Issues",
-        };
-    }
-
-    /// What an open section with nothing in it says, in its place.
-    fn empty(self: Section) ?[]const u8 {
-        return switch (self) {
-            .local => "No branches",
-            .remotes => "No remotes",
-            .stashes => "No stashes",
-            .tags => "No tags",
-            .worktrees => "No worktrees",
-            // Their own notes: loading, failed, none open.
-            .pulls, .issues => null,
-        };
-    }
-
-    /// The kind of ref this section lists, or null for the three that list
-    /// something that is not a ref.
-    fn refKind(self: Section) ?git.Ref.Kind {
-        return switch (self) {
-            .local => .local,
-            .tags => .tag,
-            .remotes, .stashes, .worktrees, .pulls, .issues => null,
-        };
-    }
-};
-
-/// All folded to begin with: the headers and their counts are the overview,
-/// and a section is opened for what is in it.
-var section_collapsed: [@typeInfo(Section).@"enum".field_names.len]bool = @splat(true);
 
 // === Lifecycle ===
 
@@ -1337,7 +1075,7 @@ fn appDeinit(win: *dvui.Window) void {
     tab_strip.default_branch.deinit(gpa);
     tab_strip.editor_cmd.deinit(gpa);
     tab_strip.terminal_cmd.deinit(gpa);
-    clearImagePair();
+    diff_view.clearImagePair();
     signing_key.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
     if (repo_prefs_job) |j| j.deinit(app_io);
@@ -1365,7 +1103,7 @@ fn appDeinit(win: *dvui.Window) void {
     pr_filter = .open;
     pr_reply.deinit(gpa);
     pr_reply_id.deinit(gpa);
-    split_rows.deinit(gpa);
+    diff_view.split_rows.deinit(gpa);
     for ([_]*std.ArrayList(u8){ &dialog_url, &dialog_parent, &dialog_name, &dialog_branch }) |list| list.deinit(gpa);
     freeViews();
     if (action_input) |patch| gpa.free(patch);
@@ -1966,7 +1704,7 @@ pub fn reloadHistory() void {
     _ = &next_history;
     _ = &next_lanes;
     graph_view.history_seq +%= 1;
-    dropStaleSelection();
+    diff_view.dropStaleSelection();
     readOpInfo();
 
     if (graph_view.file_history.items.len > 0) graph_view.markFileHistory();
@@ -3601,7 +3339,7 @@ fn hasTrackedChange(path: []const u8) bool {
 
 /// Where the change at `path` was renamed from; `path` itself for anything
 /// that was not renamed, or is no longer listed.
-fn oldPathOf(side: git.DiffSide, path: []const u8) []const u8 {
+pub fn oldPathOf(side: git.DiffSide, path: []const u8) []const u8 {
     const w = work orelse return path;
     for (if (side == .staged) w.staged else w.unstaged) |change| {
         if (std.mem.eql(u8, change.path, path)) return change.old_path;
@@ -4178,7 +3916,7 @@ pub var active_view: View = .graph;
 fn contentPane() void {
     switch (selection) {
         .rebase => return rebasePanel(),
-        .blame => return blamePanel(),
+        .blame => return diff_view.blamePanel(),
         else => {},
     }
 
@@ -6814,7 +6552,7 @@ fn graphView() void {
     // A file's diff takes the graph's place, and the panel on the right —
     // where it was picked — stays put for the next one.
     if (split.showFirst()) {
-        if (diffOpen()) diffPanel() else graph_view.graphPanel();
+        if (diffOpen()) diff_view.diffPanel() else graph_view.graphPanel();
     }
     if (show_detail and split.showSecond()) detailPanel();
 }
@@ -8813,7 +8551,7 @@ const TERMINAL_PICKER = 51;
 
 /// `path` — the repository's file — in the editor the settings name, or the
 /// system's choice for it.
-fn openInEditor(path: []const u8) void {
+pub fn openInEditor(path: []const u8) void {
     if (repo == null) return;
     const a = dvui.currentWindow().arena();
     const full = std.fs.path.join(a, &.{ repo_path.items, path }) catch return;
@@ -11303,13 +11041,13 @@ fn chipButtonTagged(src: std.builtin.SourceLocation, icon: []const u8, caption: 
 }
 
 /// Small text button, for the "Stage all" / "Unstage all" kind of action.
-fn linkButton(src: std.builtin.SourceLocation, caption: []const u8, color: dvui.Color) bool {
+pub fn linkButton(src: std.builtin.SourceLocation, caption: []const u8, color: dvui.Color) bool {
     return linkButtonTagged(src, caption, color, null);
 }
 
 /// As `linkButton`, findable by `tag` — for the ones that appear once, which
 /// is not all of them: a hunk's buttons repeat down a diff.
-fn linkButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, color: dvui.Color, tag: ?[]const u8) bool {
+pub fn linkButtonTagged(src: std.builtin.SourceLocation, caption: []const u8, color: dvui.Color, tag: ?[]const u8) bool {
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = tag,
@@ -11466,7 +11204,7 @@ fn refNameAt(a: std.mem.Allocator, id: git.Oid) []const u8 {
 /// the reverse of what the words suggest.
 const SideNames = struct { ours: []const u8, theirs: []const u8, ours_role: []const u8, theirs_role: []const u8 };
 
-fn sideNames() SideNames {
+pub fn sideNames() SideNames {
     const h = history orelse return .{ .ours = "ours", .theirs = "theirs", .ours_role = "already on this branch", .theirs_role = "coming in" };
     return switch (h.state) {
         .rebase => .{ .ours = op_info.ours, .theirs = op_info.theirs, .ours_role = "the base, rebased onto", .theirs_role = op_info.theirs_role },
@@ -11496,10 +11234,10 @@ fn isDoubleClick(id: dvui.Id) bool {
 }
 
 /// One fold-away group of refs. Returns the ref the user asked to check out.
-pub fn sidebarSection(src: std.builtin.SourceLocation, section: Section, id: usize) ?git.Ref {
+pub fn sidebarSection(src: std.builtin.SourceLocation, section: diff_view.Section, id: usize) ?git.Ref {
     // Only on a host that has them.
     if ((section == .pulls or section == .issues) and pr.host == .none) return null;
-    const collapsed = &section_collapsed[@backingInt(section)];
+    const collapsed = &diff_view.section_collapsed[@backingInt(section)];
 
     const count: usize = blk: {
         const h = history orelse break :blk 0;
@@ -11672,10 +11410,10 @@ const SIDE_GUTTER: f32 = 22 + 2 * style.space.xxs;
 /// Inside a ref line's button, before its name.
 const SIDE_REF_PAD: f32 = style.space.xs;
 const SECTION_ICON_LIFT: f32 = 4;
-var section_scroll: [@typeInfo(Section).@"enum".field_names.len]dvui.ScrollInfo = @splat(.{});
+var section_scroll: [@typeInfo(diff_view.Section).@"enum".field_names.len]dvui.ScrollInfo = @splat(.{});
 
 /// An open section's rows. Returns the ref the user asked to check out.
-fn sectionRows(section: Section, id: usize, h: git.History, si: *const dvui.ScrollInfo) ?git.Ref {
+fn sectionRows(section: diff_view.Section, id: usize, h: git.History, si: *const dvui.ScrollInfo) ?git.Ref {
     // The three sections that list something other than a ref never reach the
     // loop below.
     if (section == .stashes) {
@@ -11815,7 +11553,7 @@ fn stashDo(verb: []const u8, hex: []const u8) void {
 /// rather than act on something already listed.
 fn sectionMenu(
     src: std.builtin.SourceLocation,
-    section: Section,
+    section: diff_view.Section,
     id: usize,
     rect: dvui.Rect.Physical,
     /// Where the header's ⋯ was clicked, to open there as a right-click would.
@@ -13021,596 +12759,6 @@ pub fn openContextAt(ctx: *dvui.ContextWidget, at: ?dvui.Point.Physical) void {
     ctx.activePt = p.toNatural();
 }
 
-// === Centre: the diff ===
-
-/// The centre pane when something is selected: the diff a commit introduced, or
-/// one file of the working tree.
-///
-/// It takes the graph's place rather than adding a fourth pane, so the file
-/// list you stage from stays visible beside it.
-fn diffPanel() void {
-    ensureDiff();
-
-    var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = true,
-        .color_fill = .{ .color = style.background() },
-        .padding = dvui.Rect.all(0),
-        .margin = dvui.Rect.all(0),
-    });
-    defer panel.deinit();
-
-    diffHeader();
-
-    // A conflicted file has no diff worth reading — it is a file full of
-    // markers — so it gets the regions instead.
-    if (isConflictView()) return conflictBody();
-
-    const d = diff orelse {
-        emptyState(@src(), "Nothing to show.");
-        return;
-    };
-    if (d.files.len == 0) {
-        emptyState(@src(), "This commit changed no files.");
-        return;
-    }
-    // A picture is shown, not said to be binary.
-    if (d.files.len == 1 and isImagePath(d.files[0].path)) return imagePreview(d.files[0]);
-
-    // Hunk buttons only mean something against the working tree: a commit's
-    // diff is history, not something to stage.
-    // Nor against a diff read ignoring whitespace: its hunks are not the
-    // file's, and a patch built from them would not apply. Nor for a rename:
-    // the diff is read under the new name only, so a hunk of it would move
-    // half the rename; the whole-file buttons take both names.
-    const side: ?git.DiffSide = if (git.diff_options.ignore_whitespace) null else switch (selection) {
-        .change => |s| if (selectedStatus(s) == .renamed) null else s,
-        else => null,
-    };
-
-    // Taller with a larger editor text, never shorter.
-    const rh = style.diff_row * @max(1, style.code_scale);
-    const total_rows = if (diff_split) split_rows.items.len else diff_rows;
-    diff_scroll.virtual_size.h = @as(f32, @floatFromInt(total_rows)) * rh;
-
-    // Drawn once the scroll area is done, over its right edge.
-    var marker_area: ?dvui.RectScale = null;
-    defer if (marker_area) |area| diffMarkers(area, d, total_rows);
-
-    var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &diff_scroll }, .{
-        .expand = .both,
-        .background = false,
-        .padding = dvui.Rect.all(0),
-    });
-    defer scroll.deinit();
-    marker_area = scroll.data().borderRectScale();
-
-    const width = @max(diff_scroll.viewport.w, 320);
-
-    // Only the rows on screen are built, exactly as in the graph: a real diff
-    // is routinely thousands of lines, and each line is several widgets.
-    const top = @max(0, diff_scroll.viewport.y);
-    const first = @as(usize, @intFromFloat(@floor(top / rh))) -| 1;
-    const last = first + @as(usize, @intFromFloat(@ceil(diff_scroll.viewport.h / rh))) + 3;
-
-    if (diff_split) {
-        const end = @min(last, split_rows.items.len);
-        for (@min(first, end)..end) |r| {
-            const sr = split_rows.items[r];
-            const file = d.files[sr.file];
-            const pick = sr.file == 0;
-            switch (sr.kind) {
-                .file => diffFileRow(@src(), file, r, r, width, rh),
-                .pad => {},
-                .hunk => diffLineRow(@src(), file, file.lines[sr.left], r, width, rh, side, if (pick) sr.left else null),
-                .pair => {
-                    const y = @as(f32, @floatFromInt(r)) * rh;
-                    splitHalf(@src(), r * 2, file, sr.left, 0, y, width / 2, rh, side, pick);
-                    splitHalf(@src(), r * 2 + 1, file, sr.right, width / 2, y, width - width / 2, rh, side, pick);
-                },
-            }
-        }
-        return;
-    }
-
-    var row: usize = 0;
-    for (d.files, 0..) |file, fi| {
-        // Its second line too, so a header scrolled half out is still drawn.
-        if (row + 1 >= first and row < last) diffFileRow(@src(), file, fi, row, width, rh);
-        row += FILE_ROWS;
-
-        for (file.lines, 0..) |line, li| {
-            if (row >= first and row < last) {
-                // Only one file is on screen when it is a change, which is the
-                // only time a line can be picked.
-                diffLineRow(@src(), file, line, row, width, rh, side, if (fi == 0) li else null);
-            }
-            row += 1;
-        }
-    }
-}
-
-/// A file whose bytes dvui can draw.
-fn isImagePath(path: []const u8) bool {
-    const ext = std.fs.path.extension(path);
-    for ([_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga" }) |e| {
-        if (std.ascii.eqlIgnoreCase(ext, e)) return true;
-    }
-    return false;
-}
-
-/// The two versions of a picture the diff is about, read once per file
-/// shown: before — the parent's, or HEAD's for a change — and after — the
-/// commit's, or the working tree's. Owned.
-var image_pair: struct {
-    key: u64 = 0,
-    before: ?[]u8 = null,
-    after: ?[]u8 = null,
-} = .{};
-
-fn clearImagePair() void {
-    if (image_pair.before) |b| gpa.free(b);
-    if (image_pair.after) |b| gpa.free(b);
-    image_pair = .{};
-}
-
-fn loadImagePair(file: git.FileDiff) void {
-    const r = repo orelse return;
-    var key = std.hash.Wyhash.init(0);
-    key.update(std.mem.asBytes(&selection));
-    key.update(file.path);
-    if (key.final() == image_pair.key) return;
-    clearImagePair();
-    image_pair.key = key.final();
-    switch (selection) {
-        .commit => |id| {
-            if (file.status != .deleted) image_pair.after = r.blobAt(gpa, id, file.path);
-            if (file.status != .added) if (commitAt(id)) |c| if (c.parents.len > 0) {
-                image_pair.before = r.blobAt(gpa, c.parents[0], file.old_path);
-            };
-        },
-        .change => {
-            const full = std.fs.path.join(gpa, &.{ repo_path.items, file.path }) catch return;
-            defer gpa.free(full);
-            image_pair.after = std.Io.Dir.cwd().readFileAlloc(app_io, full, gpa, .limited(64 << 20)) catch null;
-            if (history) |h| if (h.head_oid) |head| {
-                image_pair.before = r.blobAt(gpa, head, file.path);
-            };
-        },
-        else => {},
-    }
-}
-
-/// The picture, before and after side by side — or the one there is — each
-/// at most its half of the pane, on a framed ground.
-fn imagePreview(file: git.FileDiff) void {
-    loadImagePair(file);
-    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false, .color_fill = .{ .color = style.background() } });
-    defer scroll.deinit();
-    var row = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(style.space.xl) });
-    defer row.deinit();
-    const sides = [_]struct { []const u8, ?[]u8, dvui.Color }{
-        .{ "Before", image_pair.before, style.danger() },
-        .{ "After", image_pair.after, style.success() },
-    };
-    var shown: usize = 0;
-    for (sides, 0..) |side, i| {
-        const bytes = side[1] orelse continue;
-        shown += 1;
-        var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .id_extra = i, .expand = .horizontal, .background = false, .margin = .{ .x = style.space.sm, .w = style.space.sm } });
-        defer col.deinit();
-        // Only one side: no word needed over it.
-        if (image_pair.before != null and image_pair.after != null) dvui.label(@src(), "{s}", .{side[0]}, .{ .font = style.smallBold(), .color_text = .{ .color = side[2] }, .padding = dvui.Rect.all(0), .margin = .{ .h = style.space.sm } });
-        var frame = dvui.box(@src(), .{}, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surfaceInput() },
-            .border = dvui.Rect.all(1),
-            .color_border = .{ .color = style.border() },
-            .corners = style.radius.input,
-            .padding = dvui.Rect.all(style.space.md),
-        });
-        defer frame.deinit();
-        _ = dvui.image(@src(), .{
-            .source = .{ .imageFile = .{ .bytes = bytes, .name = if (i == 0) "before" else "after" } },
-            .shrink = .ratio,
-        }, .{
-            .gravity_x = 0.5,
-            .max_size_content = .size(.{ .w = 900, .h = 600 }),
-            .label = .{ .text = file.path },
-        });
-    }
-    if (shown == 0) emptyState(@src(), "This picture could not be read.");
-}
-
-/// Where the diff changes, along the right edge of its scroll area: a red
-/// mark for removed lines, a green one for added, each at its place in the
-/// whole — the overview VS Code keeps in its scrollbar. Runs of the same kind
-/// are one mark.
-fn diffMarkers(area: dvui.RectScale, d: git.Diff, total_rows: usize) void {
-    if (total_rows == 0) return;
-    const s = area.s;
-    const strip_w = 4 * s;
-    const x = area.r.x + area.r.w - strip_w - 1 * s;
-    const scale = area.r.h / @as(f32, @floatFromInt(total_rows));
-    const min_h = 2 * s;
-
-    const Kind = enum { none, add, del, both };
-    var run_kind: Kind = .none;
-    var run_start: usize = 0;
-
-    const flush = struct {
-        fn f(kind: Kind, from: usize, to: usize, a: dvui.RectScale, xx: f32, w: f32, sc: f32, mh: f32) void {
-            if (kind == .none) return;
-            const color = switch (kind) {
-                .add => style.success(),
-                .del => style.danger(),
-                else => style.get().yellow,
-            };
-            const top = a.r.y + @as(f32, @floatFromInt(from)) * sc;
-            const h = @max(mh, @as(f32, @floatFromInt(to - from)) * sc);
-            (dvui.Rect.Physical{ .x = xx, .y = top, .w = w, .h = h }).fill(.{}, .{ .color = .{ .color = color.opacity(0.85) }, .fade = 0 });
-        }
-    }.f;
-
-    var row: usize = 0;
-    if (diff_split) {
-        for (split_rows.items, 0..) |sr, r| {
-            var kind: Kind = .none;
-            if (sr.kind == .pair) {
-                const file = d.files[sr.file];
-                const left_del = sr.left != NO_LINE and file.lines[sr.left].kind == .deletion;
-                const right_add = sr.right != NO_LINE and file.lines[sr.right].kind == .addition;
-                kind = if (left_del and right_add) .both else if (left_del) .del else if (right_add) .add else .none;
-            }
-            if (kind != run_kind) {
-                flush(run_kind, run_start, r, area, x, strip_w, scale, min_h);
-                run_kind = kind;
-                run_start = r;
-            }
-        }
-        row = split_rows.items.len;
-    } else {
-        for (d.files) |file| {
-            // The file's own header row.
-            if (run_kind != .none) {
-                flush(run_kind, run_start, row, area, x, strip_w, scale, min_h);
-                run_kind = .none;
-            }
-            row += FILE_ROWS;
-            for (file.lines) |line| {
-                const kind: Kind = switch (line.kind) {
-                    .addition => .add,
-                    .deletion => .del,
-                    else => .none,
-                };
-                if (kind != run_kind) {
-                    flush(run_kind, run_start, row, area, x, strip_w, scale, min_h);
-                    run_kind = kind;
-                    run_start = row;
-                }
-                row += 1;
-            }
-        }
-    }
-    flush(run_kind, run_start, row, area, x, strip_w, scale, min_h);
-}
-
-/// The diff's own bar: its controls with room around them.
-const DIFF_HEAD_H: f32 = 52;
-
-/// "← Graph": the way back from a diff to the commit list, said in words.
-fn backButton(src: std.builtin.SourceLocation) bool {
-    var bw: dvui.ButtonWidget = undefined;
-    bw.init(src, .{ .draw_focus = false }, .{
-        .tag = "diff:back",
-        .gravity_y = 0.5,
-        .background = true,
-        .color_fill = .{ .color = style.surfaceRaised() },
-        .color_fill_hover = .{ .color = style.rowHover() },
-        .border = dvui.Rect.all(1),
-        .color_border = .{ .color = style.border() },
-        .corners = style.radius.input,
-        .margin = .{ .x = style.space.xs, .w = style.space.md },
-        .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
-    });
-    defer bw.deinit();
-    bw.processEvents();
-    bw.drawBackground();
-    {
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
-        defer row.deinit();
-        const color = if (bw.hovered()) style.accent() else style.text();
-        dvui.icon(@src(), "back_icon", dvui.entypo.chevron_small_left, .{ .fill_color = .{ .color = color } }, .{
-            .min_size_content = .{ .w = 12, .h = 12 },
-            .gravity_y = 0.5,
-        });
-        dvui.label(@src(), "Graph", .{}, .{
-            .font = style.smallBold(),
-            .color_text = .{ .color = color },
-            .gravity_y = 0.5,
-            .padding = dvui.Rect.all(0),
-        });
-    }
-    if (bw.hovered()) {
-        dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "Back to the commits — Esc", .{}, .{ .font = style.small() });
-    }
-    return bw.clicked();
-}
-
-fn diffHeader() void {
-    var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .background = true,
-        .color_fill = .{ .color = style.surface() },
-        .min_size_content = .{ .h = DIFF_HEAD_H },
-        .border = .{ .h = 1 },
-        .color_border = .{ .color = style.border() },
-        .padding = .{ .x = style.space.md, .w = style.space.lg },
-    });
-    defer head.deinit();
-
-    if (backButton(@src())) {
-        closeDiff();
-        active_view = .graph;
-    }
-    if (!isConflictView() and selection != .blame) {
-        diffModeToggle(@src());
-        diffReadControls();
-    }
-
-    switch (selection) {
-        .none, .rebase, .blame => {},
-        .compare => {
-            dvui.icon(@src(), "compare_icon", dvui.entypo.swap, .{ .fill_color = .{ .color = style.accent() } }, .{
-                .min_size_content = .{ .w = 12, .h = 12 },
-                .gravity_y = 0.5,
-                .margin = .{ .w = style.space.sm },
-            });
-            dvui.label(@src(), "{s}", .{compare_label}, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.text() },
-                .gravity_y = 0.5,
-                .expand = .horizontal,
-                .max_size_content = .width(0),
-                .padding = dvui.Rect.all(0),
-            });
-        },
-        .commit => |id| {
-            var buf: [8]u8 = undefined;
-            dvui.label(@src(), "{s}", .{git.oidShort(id, &buf)}, .{
-                .font = style.mono(),
-                .color_text = .{ .color = style.accent() },
-                .background = true,
-                .color_fill = .{ .color = style.accentDim() },
-                .corners = style.radius.tag,
-                .gravity_y = 0.5,
-                .margin = .{ .x = style.space.sm, .w = style.space.md },
-                .padding = .{ .x = style.space.sm, .y = 2, .w = style.space.sm, .h = 2 },
-            });
-            dvui.label(@src(), "{s}", .{commitSummary(id)}, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.text() },
-                .gravity_y = 0.5,
-                .expand = .horizontal,
-                .max_size_content = .width(0),
-                .padding = dvui.Rect.all(0),
-            });
-        },
-        .change => |side| {
-            dvui.label(@src(), "{s}", .{selected_path.items}, .{
-                .font = style.small(),
-                .color_text = .{ .color = style.text() },
-                .gravity_y = 0.5,
-                .expand = .horizontal,
-                .max_size_content = .width(0),
-                .margin = .{ .x = style.space.xs },
-                .padding = dvui.Rect.all(0),
-            });
-
-            if (selectedStatus(side) == .conflicted) {
-                // The answers for a conflict nobody needs to read. `checkout`
-                // rewrites the file; the index stays conflicted until it is
-                // staged, which is what "resolved" means to git.
-                // Taking back a pick, and starting the file over, while there
-                // is something to take back.
-                if (resolve_undo.items.len > 0) {
-                    if (linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) requestAction(.undo_resolve);
-                    if (linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) ask(.restart_file, selected_path.items);
-                }
-                // The whole file as one side has it, staged in the same click.
-                // Not for one deleted on a side: its panel asks that plainly.
-                if (!wholeFileConflict()) {
-                    const names = sideNames();
-                    var ours_buf: [96]u8 = undefined;
-                    var theirs_buf: [96]u8 = undefined;
-                    if (linkButtonTagged(@src(), allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) takeFile(.ours);
-                    if (linkButtonTagged(@src(), allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) takeFile(.theirs);
-                }
-                if (linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) requestAction(.stage_next);
-                return;
-            }
-
-            if (linkButton(@src(), "Open in editor", style.textMuted())) openInEditor(selected_path.items);
-            if (linkButton(@src(), "Blame", style.textMuted())) selectBlame(selected_path.items);
-
-            // The whole-file counterpart of the per-hunk buttons below, and the
-            // only thing on offer for a binary file or a mode change.
-            if (side == .unstaged) {
-                if (linkButton(@src(), "Stage file", style.accent())) {
-                    requestStage(selected_path.items, oldPathOf(side, selected_path.items), true);
-                }
-            } else {
-                if (linkButton(@src(), "Unstage file", style.accent())) {
-                    requestStage(selected_path.items, oldPathOf(side, selected_path.items), false);
-                }
-            }
-        },
-    }
-}
-
-/// The commit itself, while it is still in the history snapshot.
-fn commitAt(id: git.Oid) ?git.Commit {
-    const h = history orelse return null;
-    const at = h.indexOf(id) orelse return null;
-    return h.commits[at];
-}
-
-/// Summary of a commit still in the history snapshot; empty for one that is
-/// not.
-fn commitSummary(id: git.Oid) []const u8 {
-    return if (commitAt(id)) |c| c.summary else "";
-}
-
-/// After a new history: a commit picked before a rebase or an amend rewrote
-/// it is not in it any more, and its pane would show a commit with no
-/// message. The working tree comes back instead, as after Esc.
-pub fn dropStaleSelection() void {
-    switch (selection) {
-        .commit => |id| if (commitAt(id) == null) clearSelection(),
-        else => {},
-    }
-}
-
-// === Centre: blame ===
-
-/// Every line of a file with the commit that last touched it.
-///
-/// Repeats are blank rather than restated: a file is mostly runs of lines from
-/// one commit, and printing the same sha forty times buries the four places it
-/// actually changes.
-fn blamePanel() void {
-    ensureDiff();
-
-    var panel = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .both,
-        .background = true,
-        .color_fill = .{ .color = style.background() },
-        .padding = dvui.Rect.all(0),
-        .margin = dvui.Rect.all(0),
-    });
-    defer panel.deinit();
-
-    {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .horizontal,
-            .background = true,
-            .color_fill = .{ .color = style.surface() },
-            .min_size_content = .{ .h = style.toolbar_cell },
-            .border = .{ .h = 1 },
-            .color_border = .{ .color = style.borderSubtle() },
-            .padding = .{ .x = style.space.xs, .w = style.space.md },
-        });
-        defer head.deinit();
-
-        if (iconButton(@src(), "blame_close", "Back to the graph — Esc", dvui.entypo.chevron_small_left, style.textMuted())) {
-            clearSelection();
-        }
-
-        dvui.label(@src(), "Blame", .{}, .{
-            .font = style.smallBold(),
-            .color_text = .{ .color = style.accent() },
-            .gravity_y = 0.5,
-            .margin = .{ .x = style.space.xs, .w = style.space.sm },
-            .padding = dvui.Rect.all(0),
-        });
-
-        dvui.label(@src(), "{s}", .{selected_path.items}, .{
-            .font = style.small(),
-            .color_text = .{ .color = style.text() },
-            .gravity_y = 0.5,
-            .expand = .horizontal,
-            .max_size_content = .width(0),
-            .padding = dvui.Rect.all(0),
-        });
-    }
-
-    const b = blame_view orelse {
-        emptyState(@src(), "Nothing to blame.");
-        return;
-    };
-
-    const rh = style.diff_row * @max(1, style.code_scale);
-    blame_scroll.virtual_size.h = @as(f32, @floatFromInt(b.lines.len)) * rh;
-
-    var scroll = dvui.scrollArea(@src(), .{ .scroll_info = &blame_scroll }, .{
-        .expand = .both,
-        .background = false,
-        .padding = dvui.Rect.all(0),
-    });
-    defer scroll.deinit();
-
-    const width = @max(blame_scroll.viewport.w, 320);
-    const top = @max(0, blame_scroll.viewport.y);
-    const first = @as(usize, @intFromFloat(@floor(top / rh))) -| 1;
-    const last = @min(b.lines.len, first + @as(usize, @intFromFloat(@ceil(blame_scroll.viewport.h / rh))) + 3);
-
-    for (first..last) |i| {
-        // The first visible row always shows its commit, even mid-run: it has
-        // no predecessor on screen to have shown it.
-        const starts_run = i == 0 or i == first or !git.oidEql(b.lines[i].id, b.lines[i - 1].id);
-        blameRow(@src(), b.lines[i], i, starts_run, width, rh);
-    }
-}
-
-fn blameRow(
-    src: std.builtin.SourceLocation,
-    line: git.BlameLine,
-    index: usize,
-    starts_run: bool,
-    width: f32,
-    rh: f32,
-) void {
-    var row = dvui.box(src, .{ .dir = .horizontal }, .{
-        .id_extra = index,
-        .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(index)) * rh, .w = width, .h = rh },
-        .background = starts_run,
-        .color_fill = .{ .color = style.rowHover() },
-        .padding = .{ .x = style.space.md, .w = style.space.md },
-    });
-    defer row.deinit();
-
-    var sha_buf: [8]u8 = undefined;
-    dvui.label(@src(), "{s}", .{if (starts_run) git.oidShort(line.id, &sha_buf) else ""}, .{
-        .font = style.mono(),
-        .color_text = .{ .color = style.accent() },
-        .gravity_y = 0.5,
-        .min_size_content = .{ .w = 58 },
-        .padding = dvui.Rect.all(0),
-    });
-
-    dvui.label(@src(), "{s}", .{if (starts_run) line.author else ""}, .{
-        .font = style.tiny(),
-        .color_text = .{ .color = style.textMuted() },
-        .gravity_y = 0.5,
-        .min_size_content = .{ .w = 110 },
-        .max_size_content = .width(110),
-        .padding = dvui.Rect.all(0),
-    });
-
-    var time_buf: [32]u8 = undefined;
-    dvui.label(@src(), "{s}", .{if (starts_run and line.time > 0) search_view.relativeTime(&time_buf, line.time) else ""}, .{
-        .font = style.tiny(),
-        .color_text = .{ .color = style.textFaint() },
-        .gravity_y = 0.5,
-        .min_size_content = .{ .w = 78 },
-        .padding = dvui.Rect.all(0),
-    });
-
-    lineNumber(@src(), @intCast(index + 1));
-    var tab_buf: [MAX_SHOWN_LINE]u8 = undefined;
-
-    dvui.label(@src(), "{s}", .{detab(&tab_buf, line.text)}, .{
-        .font = style.mono(),
-        .color_text = .{ .color = style.text() },
-        .gravity_y = 0.5,
-        .expand = .horizontal,
-        .max_size_content = .width(0),
-        .margin = .{ .x = style.space.sm },
-        .padding = dvui.Rect.all(0),
-    });
-}
-
 // === Centre: the interactive rebase composer ===
 
 /// A row asking to swap places with another.
@@ -13775,7 +12923,7 @@ fn rebaseRow(src: std.builtin.SourceLocation, index: usize) ?Move {
     return move;
 }
 
-fn isConflictView() bool {
+pub fn isConflictView() bool {
     return switch (selection) {
         .change => |side| selectedStatus(side) == .conflicted,
         else => false,
@@ -13784,7 +12932,7 @@ fn isConflictView() bool {
 
 /// The three-pane merge: each conflict's two sides next to each other on top,
 /// and underneath, the file they are being resolved into.
-fn conflictBody() void {
+pub fn conflictBody() void {
     // A binary file, or one deleted on a side, has nothing to read in an
     // output pane: its question takes the whole of it.
     if (wholeFileConflict()) return conflictRegions();
@@ -14143,14 +13291,14 @@ fn keyedLink(src: std.builtin.SourceLocation, key: []const u8, caption: []const 
     return bw.clicked();
 }
 
-fn takeFile(side: git.ConflictSide) void {
+pub fn takeFile(side: git.ConflictSide) void {
     if (action != .none) return;
     action_side = side;
     action = .take_file;
 }
 
 /// "All of main": the whole file as one side has it.
-fn allCaption(buf: []u8, name: []const u8) []const u8 {
+pub fn allCaption(buf: []u8, name: []const u8) []const u8 {
     var fit: [MAX_SHOWN_LINE]u8 = undefined;
     return std.fmt.bufPrint(buf, "All of {s}", .{graph_view.fitText(&fit, name, style.small(), 120)}) catch "All";
 }
@@ -14232,7 +13380,7 @@ fn conflictSide(
     }
 }
 
-fn diffFileRow(
+pub fn diffFileRow(
     src: std.builtin.SourceLocation,
     file: git.FileDiff,
     id: usize,
@@ -14242,7 +13390,7 @@ fn diffFileRow(
 ) void {
     var box = dvui.box(src, .{ .dir = .horizontal }, .{
         .id_extra = id,
-        .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row)) * rh, .w = width, .h = FILE_ROWS * rh },
+        .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(row)) * rh, .w = width, .h = diff_view.FILE_ROWS * rh },
         .background = true,
         .color_fill = .{ .color = style.surface() },
         .border = .{ .y = if (row > 0) 1 else 0, .h = 1 },
@@ -14302,7 +13450,7 @@ fn diffFileRow(
     }
 }
 
-fn diffLineRow(
+pub fn diffLineRow(
     src: std.builtin.SourceLocation,
     file: git.FileDiff,
     line: git.DiffLine,
@@ -14394,7 +13542,7 @@ fn indexOfLine(file: git.FileDiff, line: git.DiffLine) usize {
 /// A line of code as the diff draws it: its sign, its text coloured by
 /// syntax, and — on a changed line set against the one it replaced — the
 /// part that actually changed, on a stronger ground.
-fn codeLine(file: git.FileDiff, index: usize) void {
+pub fn codeLine(file: git.FileDiff, index: usize) void {
     const line = file.lines[index];
     var buf: [MAX_SHOWN_LINE]u8 = undefined;
     const text = detab(&buf, line.text);
@@ -14523,7 +13671,7 @@ const TAB_WIDTH = 4;
 /// Neither font has a glyph for a tab — it is a control character, not
 /// something to draw — so left in, every indent shows as an empty box. Only
 /// what is drawn: the patches Zit builds keep the real tabs.
-fn detab(buf: *[MAX_SHOWN_LINE]u8, raw: []const u8) []const u8 {
+pub fn detab(buf: *[MAX_SHOWN_LINE]u8, raw: []const u8) []const u8 {
     // A CRLF file's lines keep their `\r` for the patches built from them;
     // on screen it is nothing.
     const text = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
@@ -14558,7 +13706,7 @@ test "tabs become spaces to the next tab stop, and nothing else changes" {
 }
 
 /// One side's line number, blank where the line does not exist on that side.
-fn lineNumber(src: std.builtin.SourceLocation, n: u32) void {
+pub fn lineNumber(src: std.builtin.SourceLocation, n: u32) void {
     var buf: [12]u8 = undefined;
     const text = if (n == 0) "" else std.fmt.bufPrint(&buf, "{d}", .{n}) catch "";
 
@@ -14601,11 +13749,11 @@ fn requestHunk(file: git.FileDiff, hunk: u32, side: git.DiffSide) void {
     action_input = patch;
 }
 
-fn isPicked(index: usize) bool {
+pub fn isPicked(index: usize) bool {
     return index < picked_lines.items.len and picked_lines.items[index];
 }
 
-fn togglePicked(index: usize, count: usize) void {
+pub fn togglePicked(index: usize, count: usize) void {
     if (picked_lines.items.len != count) {
         picked_lines.resize(gpa, count) catch return;
         @memset(picked_lines.items, false);
@@ -14690,7 +13838,7 @@ var commit_scroll: dvui.ScrollInfo = .{};
 
 fn commitDetail(id: git.Oid) void {
     ensureDiff();
-    const commit = commitAt(id);
+    const commit = diff_view.commitAt(id);
     const whole: []const u8 = if (repo) |r| r.commitMessage(dvui.currentWindow().arena(), id) else "";
     const nl = std.mem.indexOfScalar(u8, whole, '\n');
     const rest = if (nl) |i| std.mem.trim(u8, whole[i..], " \t\r\n") else "";
@@ -14729,7 +13877,7 @@ fn commitDetail(id: git.Oid) void {
 
         var title = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .background = false, .padding = dvui.Rect.all(0) });
         dropStaleTextSelection(title);
-        title.addText(commitSummary(id), .{ .font = style.title().withSize(15 * style.ui_scale), .color_text = .{ .color = style.text() } });
+        title.addText(diff_view.commitSummary(id), .{ .font = style.title().withSize(15 * style.ui_scale), .color_text = .{ .color = style.text() } });
         title.deinit();
 
         // The message past its title, read as the host would show it: its
@@ -14794,7 +13942,7 @@ fn commitDetail(id: git.Oid) void {
             dvui.label(@src(), "{s}", .{if (i == 0) "Parent" else "Merged"}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .min_size_content = .{ .w = 64 }, .padding = dvui.Rect.all(0) });
             var p: [8]u8 = undefined;
             if (linkButton(@src(), git.oidShort(parent, &p), style.accent())) selectCommit(parent);
-            dvui.label(@src(), "{s}", .{commitSummary(parent)}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
+            dvui.label(@src(), "{s}", .{diff_view.commitSummary(parent)}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
         }
     };
 
@@ -16327,7 +15475,7 @@ fn markersLeft(path: []const u8) bool {
 /// `reset`, not `restore --staged`: the latter resolves HEAD, so it fails on a
 /// repository that has no commits yet — which is exactly when you are staging
 /// for the first time.
-fn requestStage(path: []const u8, old: []const u8, stage: bool) void {
+pub fn requestStage(path: []const u8, old: []const u8, stage: bool) void {
     if (stage) {
         if (markersLeft(path)) return ask(.stage_markers, path);
         request(&.{ "--literal-pathspecs", "add", "--", path, old });
@@ -17850,7 +16998,7 @@ fn resetUiGlobals() void {
     features_open = false;
     active_view = .graph;
     left_squeezed = false;
-    section_collapsed = @splat(true);
+    diff_view.section_collapsed = @splat(true);
     forgetTabs();
     tab_strip.groups.deinit(gpa);
     tab_strip.groups = .empty;
@@ -17898,7 +17046,7 @@ fn resetUiGlobals() void {
     tab_strip.editor_cmd = .empty;
     tab_strip.terminal_cmd.deinit(gpa);
     tab_strip.terminal_cmd = .empty;
-    clearImagePair();
+    diff_view.clearImagePair();
     signing_key.deinit(gpa);
     signing_key = .empty;
     signing_loaded = false;
@@ -17968,8 +17116,8 @@ fn resetUiGlobals() void {
     pr_applied_for = 0;
     pr_scroll_thread = false;
     pr_selected = null;
-    split_rows.deinit(gpa);
-    split_rows = .empty;
+    diff_view.split_rows.deinit(gpa);
+    diff_view.split_rows = .empty;
     palette_open = false;
     graph_view.clearFileHistory();
     graph_view.file_history.deinit(gpa);
@@ -20863,7 +20011,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -22682,7 +21830,7 @@ test "dragging a branch row onto another opens the drop menu where it was let go
     app_io = std.testing.io;
     defer resetUiGlobals();
     // Folded by default; these rows are what the test works on.
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -22801,7 +21949,7 @@ test "a frame drawn again with nothing changed allocates nothing" {
     gpa = counting.allocator();
     app_io = std.testing.io;
     defer resetUiGlobals();
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -22900,7 +22048,7 @@ test "after the mouse has swept the window, frames stop" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
     stillUi();
     defer {
         dvui.reduce_motion = false;
@@ -22948,7 +22096,7 @@ test "opening and closing everything, again and again, leaks nothing" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -23034,13 +22182,13 @@ test "a search fades the commits it leaves out, and the arrows go match to match
     try std.testing.expectEqual(@as(usize, 2), graph_view.list_matches);
 
     stepCommit(1);
-    try std.testing.expectEqualStrings("three fix", commitSummary(selection.commit));
+    try std.testing.expectEqualStrings("three fix", diff_view.commitSummary(selection.commit));
     stepCommit(1);
-    try std.testing.expectEqualStrings("one fix", commitSummary(selection.commit));
+    try std.testing.expectEqualStrings("one fix", diff_view.commitSummary(selection.commit));
     // From a commit the search leaves out, the next match that way.
     selectCommit(two.id);
     stepCommit(-1);
-    try std.testing.expectEqualStrings("three fix", commitSummary(selection.commit));
+    try std.testing.expectEqualStrings("three fix", diff_view.commitSummary(selection.commit));
 }
 
 // A commit picked lists its files without reading their lines — over
@@ -23177,7 +22325,7 @@ test "dragging a branch's tag in the graph onto another opens the drop menu" {
     graph_view.clearDrop();
     try clickAt(try tagCenter("ref:feat"));
     try std.testing.expect(graph_view.drop == null);
-    try std.testing.expectEqualStrings("on feat", commitSummary(selection.commit));
+    try std.testing.expectEqualStrings("on feat", diff_view.commitSummary(selection.commit));
 }
 
 test "a long list of changes is built a screenful at a time, scrolls, and leaves the commit box in sight" {
@@ -23427,7 +22575,7 @@ test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the 
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -23472,11 +22620,11 @@ test "the sidebar's eyes hide one ref or a whole section, and its ⋯ opens the 
 
     // A section header's ⋯ opens its right-click menu too, and the section
     // stays folded or open as it was.
-    const open = section_collapsed[@backingInt(Section.local)];
+    const open = diff_view.section_collapsed[@backingInt(diff_view.Section.local)];
     try hoverAt(try tagCenter("section:LOCAL"));
     try clickAt(try tagCenter("section-more:LOCAL"));
     _ = try tagCenter("menu:New branch here");
-    try std.testing.expectEqual(open, section_collapsed[@backingInt(Section.local)]);
+    try std.testing.expectEqual(open, diff_view.section_collapsed[@backingInt(diff_view.Section.local)]);
     try pressFrame(.escape, .none);
 
     // Signing, flipped beside the commit's title.
@@ -23493,7 +22641,7 @@ test "a long section builds the lines it shows, wherever it is scrolled" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -23519,7 +22667,7 @@ test "a long section builds the lines it shows, wherever it is scrolled" {
     try std.testing.expect(dvui.tagGet("b00") != null);
     try std.testing.expect(dvui.tagGet("b59") == null);
 
-    const si = &section_scroll[@backingInt(Section.local)];
+    const si = &section_scroll[@backingInt(diff_view.Section.local)];
     si.viewport.y = si.virtual_size.h;
     try dvui.testing.settle(frameArrowCursor);
     try std.testing.expect(dvui.tagGet("b59") != null);
@@ -23640,7 +22788,7 @@ test "the sidebar seam still drags" {
     app_io = std.testing.io;
     defer resetUiGlobals();
     // Folded by default; these rows are what the test works on.
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -24024,7 +23172,7 @@ test "audit: the main controls do what they say when clicked" {
     app_io = std.testing.io;
     defer resetUiGlobals();
     // Folded by default; these rows are what the test works on.
-    section_collapsed = @splat(false);
+    diff_view.section_collapsed = @splat(false);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -24084,7 +23232,7 @@ test "audit: the main controls do what they say when clicked" {
     try std.testing.expect(diffOpen());
     try std.testing.expectEqual(View.graph, active_view);
     try clickAt(try tagCenter("diff:split"));
-    try std.testing.expect(diff_split);
+    try std.testing.expect(diff_view.diff_split);
     try clickAt(try tagCenter("diff:unified"));
     closeDiff();
     try std.testing.expect(!diffOpen());
@@ -24256,16 +23404,16 @@ test "the split view sets each removed line against the line that replaced it" {
         diff.?.arena.deinit();
         diff = null;
     }
-    buildSplitRows();
+    diff_view.buildSplitRows();
 
-    const r = split_rows.items;
+    const r = diff_view.split_rows.items;
     // file (two rows high), hunk, a|a, b|B, c|-, d|d
     try std.testing.expectEqual(@as(usize, 7), r.len);
     try std.testing.expect(r[1].kind == .pad);
     try std.testing.expectEqual(@as(u32, 2), r[4].left);
     try std.testing.expectEqual(@as(u32, 4), r[4].right);
     try std.testing.expectEqual(@as(u32, 3), r[5].left);
-    try std.testing.expectEqual(NO_LINE, r[5].right);
+    try std.testing.expectEqual(diff_view.NO_LINE, r[5].right);
     try std.testing.expectEqual(@as(u32, 5), r[6].left);
 }
 
@@ -24465,8 +23613,8 @@ test "docs screenshots" {
     app_io = std.testing.io;
     try git.init();
     defer git.shutdown();
-    section_collapsed = @splat(false);
-    section_collapsed[@backingInt(Section.tags)] = true;
+    diff_view.section_collapsed = @splat(false);
+    diff_view.section_collapsed[@backingInt(diff_view.Section.tags)] = true;
     stillUi();
     try window_chrome.me_name.appendSlice(gpa, "Alice Martin");
     try window_chrome.me_email.appendSlice(gpa, "alice@acme.dev");
