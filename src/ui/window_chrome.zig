@@ -7,6 +7,7 @@ const github = @import("../github/github.zig");
 const tab_strip = @import("tab_strip.zig");
 const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
+const rebase_view = @import("rebase_view.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -324,7 +325,7 @@ fn branchSwitcher() void {
     const detached = if (app.history) |h| h.head == null else false;
     // Mid-rebase HEAD is detached, but the branch being rebased is still
     // the one being worked on: its name, not "detached HEAD".
-    const head: []const u8 = if (app.history) |h| h.head orelse (if (app.op_info.branch.len > 0) app.op_info.branch else "detached HEAD") else "";
+    const head: []const u8 = if (app.history) |h| h.head orelse (if (rebase_view.op_info.branch.len > 0) rebase_view.op_info.branch else "detached HEAD") else "";
     const button = DropButton.begin(@src(), .{
         .tag = "toolbar:branch",
         .gravity_y = 0.5,
@@ -355,7 +356,7 @@ fn branchSwitcher() void {
             .gravity_y = 0.5,
             .margin = .{ .w = style.space.sm },
         });
-        var buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+        var buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
         const room = branchRoom(toolbarZones().left);
         // Its name, and under it where Pull and Push go — or that they have
         // nowhere yet.
@@ -366,7 +367,7 @@ fn branchSwitcher() void {
             .padding = dvui.Rect.all(0),
         });
         if (app.history) |h| if (h.head != null) {
-            var up_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+            var up_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
             const upstream = h.tracking.upstream orelse "no upstream";
             dvui.label(@src(), "{s}", .{graph_view.fitText(&up_buf, upstream, style.tiny(), room)}, .{
                 .font = style.tiny(),
@@ -443,7 +444,7 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.md },
     });
-    var buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+    var buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
     dvui.label(@src(), "{s}", .{graph_view.fitText(&buf, ref.name, style.small(), 220)}, .{
         .font = if (ref.head) style.smallBold() else style.small(),
         .color_text = .{ .color = if (ref.head) style.accent() else style.text() },

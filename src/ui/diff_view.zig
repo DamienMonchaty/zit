@@ -5,6 +5,7 @@ const git = @import("../git/git.zig");
 const graph = @import("../git/graph.zig");
 const run = @import("../core/run.zig");
 const search_view = @import("search_view.zig");
+const rebase_view = @import("rebase_view.zig");
 const app = @import("../main.zig");
 
 // === Split diff ===
@@ -108,7 +109,7 @@ fn splitHalf(
     const line: ?git.DiffLine = if (present) file.lines[line_index] else null;
     const kind: git.DiffLine.Kind = if (line) |l| l.kind else .context;
     const pickable = pick and side != null and present and (kind == .addition or kind == .deletion);
-    const picked = pickable and app.isPicked(line_index);
+    const picked = pickable and rebase_view.isPicked(line_index);
 
     const fill: ?dvui.Color = if (!present)
         style.rowHover()
@@ -130,10 +131,10 @@ fn splitHalf(
     defer box.deinit();
 
     const l = line orelse return;
-    app.lineNumber(@src(), if (kind == .addition) l.new_no else if (kind == .deletion) l.old_no else if (x > 0) l.new_no else l.old_no);
-    app.codeLine(file, line_index);
+    rebase_view.lineNumber(@src(), if (kind == .addition) l.new_no else if (kind == .deletion) l.old_no else if (x > 0) l.new_no else l.old_no);
+    rebase_view.codeLine(file, line_index);
 
-    if (pickable and dvui.clicked(box.data(), .{})) app.togglePicked(line_index, file.lines.len);
+    if (pickable and dvui.clicked(box.data(), .{})) rebase_view.togglePicked(line_index, file.lines.len);
 }
 
 /// How the diff is read: whitespace counted or not, and how much context
@@ -293,7 +294,7 @@ pub fn diffPanel() void {
 
     // A conflicted file has no diff worth reading — it is a file full of
     // markers — so it gets the regions instead.
-    if (app.isConflictView()) return app.conflictBody();
+    if (rebase_view.isConflictView()) return rebase_view.conflictBody();
 
     const d = app.diff orelse {
         app.emptyState(@src(), "Nothing to show.");
@@ -349,9 +350,9 @@ pub fn diffPanel() void {
             const file = d.files[sr.file];
             const pick = sr.file == 0;
             switch (sr.kind) {
-                .file => app.diffFileRow(@src(), file, r, r, width, rh),
+                .file => rebase_view.diffFileRow(@src(), file, r, r, width, rh),
                 .pad => {},
-                .hunk => app.diffLineRow(@src(), file, file.lines[sr.left], r, width, rh, side, if (pick) sr.left else null),
+                .hunk => rebase_view.diffLineRow(@src(), file, file.lines[sr.left], r, width, rh, side, if (pick) sr.left else null),
                 .pair => {
                     const y = @as(f32, @floatFromInt(r)) * rh;
                     splitHalf(@src(), r * 2, file, sr.left, 0, y, width / 2, rh, side, pick);
@@ -365,14 +366,14 @@ pub fn diffPanel() void {
     var row: usize = 0;
     for (d.files, 0..) |file, fi| {
         // Its second line too, so a header scrolled half out is still drawn.
-        if (row + 1 >= first and row < last) app.diffFileRow(@src(), file, fi, row, width, rh);
+        if (row + 1 >= first and row < last) rebase_view.diffFileRow(@src(), file, fi, row, width, rh);
         row += FILE_ROWS;
 
         for (file.lines, 0..) |line, li| {
             if (row >= first and row < last) {
                 // Only one file is on screen when it is a change, which is the
                 // only time a line can be picked.
-                app.diffLineRow(@src(), file, line, row, width, rh, side, if (fi == 0) li else null);
+                rebase_view.diffLineRow(@src(), file, line, row, width, rh, side, if (fi == 0) li else null);
             }
             row += 1;
         }
@@ -603,7 +604,7 @@ fn diffHeader() void {
         app.closeDiff();
         app.active_view = .graph;
     }
-    if (!app.isConflictView() and app.selection != .blame) {
+    if (!rebase_view.isConflictView() and app.selection != .blame) {
         diffModeToggle(@src());
         diffReadControls();
     }
@@ -670,11 +671,11 @@ fn diffHeader() void {
                 // The whole file as one side has it, staged in the same click.
                 // Not for one deleted on a side: its panel asks that plainly.
                 if (!app.wholeFileConflict()) {
-                    const names = app.sideNames();
+                    const names = rebase_view.sideNames();
                     var ours_buf: [96]u8 = undefined;
                     var theirs_buf: [96]u8 = undefined;
-                    if (app.linkButtonTagged(@src(), app.allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) app.takeFile(.ours);
-                    if (app.linkButtonTagged(@src(), app.allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) app.takeFile(.theirs);
+                    if (app.linkButtonTagged(@src(), rebase_view.allCaption(&ours_buf, names.ours), style.success(), "conflict:all_ours")) rebase_view.takeFile(.ours);
+                    if (app.linkButtonTagged(@src(), rebase_view.allCaption(&theirs_buf, names.theirs), style.get().blue, "conflict:all_theirs")) rebase_view.takeFile(.theirs);
                 }
                 if (app.linkButtonTagged(@src(), "Mark resolved", style.accent(), "conflict:resolved")) app.requestAction(.stage_next);
                 return;
@@ -846,10 +847,10 @@ fn blameRow(
         .padding = dvui.Rect.all(0),
     });
 
-    app.lineNumber(@src(), @intCast(index + 1));
-    var tab_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+    rebase_view.lineNumber(@src(), @intCast(index + 1));
+    var tab_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
 
-    dvui.label(@src(), "{s}", .{app.detab(&tab_buf, line.text)}, .{
+    dvui.label(@src(), "{s}", .{rebase_view.detab(&tab_buf, line.text)}, .{
         .font = style.mono(),
         .color_text = .{ .color = style.text() },
         .gravity_y = 0.5,

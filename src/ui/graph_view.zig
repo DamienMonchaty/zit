@@ -8,6 +8,7 @@ const tab_strip = @import("tab_strip.zig");
 const window_chrome = @import("window_chrome.zig");
 const search_view = @import("search_view.zig");
 const diff_view = @import("diff_view.zig");
+const rebase_view = @import("rebase_view.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -306,7 +307,7 @@ pub fn collectHistoryLoad() bool {
         load.lanes = null;
         history_seq +%= 1;
         diff_view.dropStaleSelection();
-        app.readOpInfo();
+        rebase_view.readOpInfo();
         if (file_history.items.len > 0) markFileHistory();
         app.trimHeap();
     }
@@ -1017,7 +1018,7 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
                 // branches, at the end of its name.
                 var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .tag = "header:branches", .min_size_content = .{ .w = bw }, .max_size_content = .width(bw), .gravity_y = 0.5, .background = false });
                 defer cell.deinit();
-                var buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+                var buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
                 dvui.label(@src(), "{s}", .{fitText(&buf, "BRANCH / TAG", style.section(), bw - HEADER_INSET - style.space.sm - search_view.BRANCH_MENU_W)}, .{
                     .font = style.section(),
                     .color_text = .{ .color = style.textFaint() },
@@ -1177,7 +1178,7 @@ fn authorHeader() void {
         } else {
             // Who it is narrowed to, by name, rather than how many.
             var cap_buf: [32]u8 = undefined;
-            var fit_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+            var fit_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
             dvui.label(@src(), "{s}", .{fitText(&fit_buf, authorFilterCaption(&cap_buf), style.smallBold(), col_author - 24)}, .{ .font = style.smallBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         }
         dvui.icon(@src(), "author_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = ink } }, .{
@@ -1384,7 +1385,7 @@ pub fn listCell(src: std.builtin.SourceLocation, id: usize, text: []const u8, fo
         .padding = dvui.Rect.all(0),
     });
     defer cell.deinit();
-    var buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+    var buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
     const inset: f32 = if (left) HEADER_INSET else 0;
     dvui.label(@src(), "{s}", .{fitText(&buf, text, font, width - inset)}, .{
         .font = font,
@@ -1406,7 +1407,7 @@ const COL_MAX: f32 = 400;
 
 /// `text` cut to fit `width` at `font`, ending in "…" where it was cut.
 /// Whole UTF-8 sequences only; the cut point is found by halving.
-pub fn fitText(buf: *[app.MAX_SHOWN_LINE]u8, text: []const u8, font: dvui.Font, width: f32) []const u8 {
+pub fn fitText(buf: *[rebase_view.MAX_SHOWN_LINE]u8, text: []const u8, font: dvui.Font, width: f32) []const u8 {
     if (width <= 0 or font.textSize(text).w <= width) return text;
     const ellipsis = "…";
     var lo: usize = 0;
@@ -1595,7 +1596,7 @@ fn floatingSearch() void {
     });
     defer card.deinit();
     app.focusOnce(app.searchFieldIn(@src(), &app.commit_filter, "Search commits — author:, msg:, path:, code:, after:", "commit_filter", dvui.Rect.all(0), false));
-    if (search_view.search_hits.running != null) app.loadingSpinner(@src());
+    if (search_view.search_hits.running != null) rebase_view.loadingSpinner(@src());
     if (list_filtering) {
         dvui.label(@src(), "{d} of {d}", .{ list_matches, list_total }, .{
             .font = style.tiny(),

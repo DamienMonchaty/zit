@@ -9,6 +9,7 @@ const pr = @import("../github/pr.zig");
 const tab_strip = @import("tab_strip.zig");
 const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
+const rebase_view = @import("rebase_view.zig");
 const app = @import("../main.zig");
 
 // === Search through git ===
@@ -445,7 +446,7 @@ pub fn commitRow(
             .padding = dvui.Rect.all(0),
         });
         defer cell.deinit();
-        var fit_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+        var fit_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
         const font = style.graphText();
         const room = cell.data().contentRect().w;
         // What CI made of it, ahead of the message: a failed build is the
@@ -477,7 +478,7 @@ pub fn commitRow(
         const gap = style.space.md;
         const left = room - ci_w - font.textSize(summary).w - gap;
         if (commit.body.len > 0 and left > 60) {
-            var body_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+            var body_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
             const meta = style.graphMeta();
             dvui.label(@src(), "{s}", .{graph_view.fitText(&body_buf, commit.body, meta, left)}, .{
                 .font = meta,
@@ -956,7 +957,7 @@ fn stashTag(entry: git.Stash, i: usize, room: ?f32) void {
         .margin = .{ .w = style.space.xs },
     });
     const name_room = if (room) |r| r - (3 * style.space.sm + 10 + style.space.xs + 2) else 140;
-    var name_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+    var name_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
     // Past git's "On main: " or "WIP on main: ": the branch is the row's.
     const said = if (std.mem.indexOf(u8, entry.message, ": ")) |at| entry.message[at + 2 ..] else entry.message;
     dvui.label(@src(), "{s}", .{graph_view.fitText(&name_buf, said, style.small(), @max(name_room, 12))}, .{
@@ -1039,7 +1040,7 @@ pub fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: 
     // the tag's own parts are counted: its padding, icon, border and margin.
     const font = if (ref.head or picked) style.smallBold() else style.small();
     const name_room = if (room) |r| r - (3 * style.space.sm + 10 + style.space.xs + 2) - refExtrasWidth(ref, synced) else 140;
-    var name_buf: [app.MAX_SHOWN_LINE]u8 = undefined;
+    var name_buf: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
     dvui.label(@src(), "{s}", .{graph_view.fitText(&name_buf, ref.name, font, @max(name_room, 12))}, .{
         .font = font,
         .color_text = .{ .color = ink },
