@@ -10,6 +10,7 @@ const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
+const command_palette = @import("command_palette.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -590,7 +591,7 @@ pub fn tabList() void {
     }
     // The active tab's foot only where the strip shows the tab: scrolled
     // part out of sight, the rest of it is under the buttons after the tabs.
-    defer if (app.active_tab_foot) |*foot| {
+    defer if (command_palette.active_tab_foot) |*foot| {
         const view = scroll.data().contentRectScale().r;
         const left = @max(foot.x, view.x);
         foot.w = @max(0, @min(foot.x + foot.w, view.x + view.w) - left);
