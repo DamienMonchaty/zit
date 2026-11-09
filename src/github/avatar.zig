@@ -19,7 +19,7 @@
 //! With the GitHub switch off (`use_github`), only Gravatar is asked.
 
 const std = @import("std");
-const run = @import("run.zig");
+const run = @import("../core/run.zig");
 const pr = @import("pr.zig");
 const gh_api = @import("github.zig");
 

@@ -383,9 +383,9 @@ const Linked = struct {
 };
 
 /// libgit2 linked, and its headers translated into the `git2` module that
-/// src/git.zig imports.
+/// src/git/git.zig imports.
 fn linkLibgit2(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system_libgit2: bool) void {
-    const headers = b.addTranslateC(.{ .root_source_file = b.path("src/git2.h"), .target = target, .optimize = optimize });
+    const headers = b.addTranslateC(.{ .root_source_file = b.path("src/git/git2.h"), .target = target, .optimize = optimize });
     if (system_libgit2) {
         exe.root_module.linkSystemLibrary("git2", .{});
         headers.linkSystemLibrary("git2", .{});

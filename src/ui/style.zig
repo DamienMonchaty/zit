@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
-const git = @import("git.zig");
+const git = @import("../git/git.zig");
 
 // === Fonts ===
 //
@@ -27,16 +27,16 @@ pub const MONO_FAMILY = "Mono";
 const fonts: []const dvui.Font.Source = &.{
     .{
         .family = dvui.Font.array(UI_FAMILY),
-        .bytes = @embedFile("fonts/inter/Inter-Regular.ttf"),
+        .bytes = @embedFile("../fonts/inter/Inter-Regular.ttf"),
     },
     .{
         .family = dvui.Font.array(UI_FAMILY),
         .weight = .bold,
-        .bytes = @embedFile("fonts/inter/Inter-Medium.ttf"),
+        .bytes = @embedFile("../fonts/inter/Inter-Medium.ttf"),
     },
     .{
         .family = dvui.Font.array(MONO_FAMILY),
-        .bytes = @embedFile("fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
+        .bytes = @embedFile("../fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
     },
 };
 
@@ -441,8 +441,8 @@ fn pick(v: ?ColorValue, fallback: dvui.Color) dvui.Color {
 /// to the executable" failure mode. The day Zit grows user themes, this is
 /// where a file path comes back — as an override on top of these, not instead
 /// of them, so a broken user theme cannot leave the app unstyled.
-const theme_dark = @embedFile("theme/zit_dark.json");
-const theme_light = @embedFile("theme/zit_light.json");
+const theme_dark = @embedFile("../theme/zit_dark.json");
+const theme_light = @embedFile("../theme/zit_light.json");
 
 /// A theme to pick: its name, its file, light or dark, and the three
 /// colours its card shows — ground, panel, line — with its accent.
@@ -457,10 +457,10 @@ pub const Theme = struct {
 pub const themes = [_]Theme{
     .{ .name = "Zit Dark", .json = theme_dark, .dark = true, .preview = .{ 0x1c1b24, 0x24232e, 0x3c3a4a, 0xa66cff } },
     .{ .name = "Zit Light", .json = theme_light, .dark = false, .preview = .{ 0xffffff, 0xf3f2f8, 0xd6d2e2, 0x7c3aed } },
-    .{ .name = "Catppuccin Latte", .json = @embedFile("theme/catppuccin_latte.json"), .dark = false, .preview = .{ 0xeff1f5, 0xe6e9ef, 0xbcc0cc, 0x8839ef } },
-    .{ .name = "Catppuccin Frappé", .json = @embedFile("theme/catppuccin_frappe.json"), .dark = true, .preview = .{ 0x303446, 0x292c3c, 0x51576d, 0xca9ee6 } },
-    .{ .name = "Catppuccin Macchiato", .json = @embedFile("theme/catppuccin_macchiato.json"), .dark = true, .preview = .{ 0x24273a, 0x1e2030, 0x494d64, 0xc6a0f6 } },
-    .{ .name = "Catppuccin Mocha", .json = @embedFile("theme/catppuccin_mocha.json"), .dark = true, .preview = .{ 0x1e1e2e, 0x181825, 0x45475a, 0xcba6f7 } },
+    .{ .name = "Catppuccin Latte", .json = @embedFile("../theme/catppuccin_latte.json"), .dark = false, .preview = .{ 0xeff1f5, 0xe6e9ef, 0xbcc0cc, 0x8839ef } },
+    .{ .name = "Catppuccin Frappé", .json = @embedFile("../theme/catppuccin_frappe.json"), .dark = true, .preview = .{ 0x303446, 0x292c3c, 0x51576d, 0xca9ee6 } },
+    .{ .name = "Catppuccin Macchiato", .json = @embedFile("../theme/catppuccin_macchiato.json"), .dark = true, .preview = .{ 0x24273a, 0x1e2030, 0x494d64, 0xc6a0f6 } },
+    .{ .name = "Catppuccin Mocha", .json = @embedFile("../theme/catppuccin_mocha.json"), .dark = true, .preview = .{ 0x1e1e2e, 0x181825, 0x45475a, 0xcba6f7 } },
 };
 
 pub fn hex(v: u24) dvui.Color {

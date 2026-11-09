@@ -4,7 +4,7 @@
 //! the caller runs as a job.
 
 const std = @import("std");
-const run = @import("run.zig");
+const run = @import("../core/run.zig");
 const github = @import("github.zig");
 
 pub const Host = enum { none, github };

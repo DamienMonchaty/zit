@@ -6,16 +6,16 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
-const style = @import("style.zig");
-const git = @import("git.zig");
-const graph = @import("graph.zig");
-const run = @import("run.zig");
-const store = @import("store.zig");
-const avatars = @import("avatar.zig");
-const pr = @import("pr.zig");
-const syntax = @import("syntax.zig");
-const watch = @import("watch.zig");
-const github = @import("github.zig");
+const style = @import("ui/style.zig");
+const git = @import("git/git.zig");
+const graph = @import("git/graph.zig");
+const run = @import("core/run.zig");
+const store = @import("core/store.zig");
+const avatars = @import("github/avatar.zig");
+const pr = @import("github/pr.zig");
+const syntax = @import("ui/syntax.zig");
+const watch = @import("git/watch.zig");
+const github = @import("github/github.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },

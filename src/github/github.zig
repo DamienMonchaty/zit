@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const run = @import("run.zig");
+const run = @import("../core/run.zig");
 
 /// The OAuth App Zit signs in as (github.com/settings/applications), device
 /// flow on. Public by design: the device flow needs no secret.

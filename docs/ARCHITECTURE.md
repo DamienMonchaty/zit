@@ -60,7 +60,7 @@ GPG passphrase once per test. `-Dtest-filter` runs one of them by name.
 
 ## Shape of it
 
-Reads go through **libgit2** (`src/git.zig`): a revwalk beats parsing `git log`
+Reads go through **libgit2** (`src/git/git.zig`): a revwalk beats parsing `git log`
 output. Writes and anything networked shell out to the **`git` binary** —
 credential helpers, the SSH agent, hooks and GPG signing all work for free
 there, and each is a callback maze in libgit2.
@@ -89,13 +89,13 @@ the graph (a stash's: the one it was made on); a double-click still checks
 out. The commit's summary and the lines of a diff are text you can select
 and copy, except a changed line in a working-tree diff, where the click picks
 the line for staging. Each graph node is the
-author's picture, ringed in the lane's colour, from **Gravatar** (`src/avatar.zig`: fetched by `curl`, one at a time, off the
+author's picture, ringed in the lane's colour, from **Gravatar** (`src/github/avatar.zig`: fetched by `curl`, one at a time, off the
 UI thread, cached in `~/.cache/zit/avatars`, a miss remembered as a `.miss`
 file), and a disc of initials until it lands or where there is none. Every
 lookup tells GitHub or Gravatar which author it is about.
 
 UI is **dvui** (SDL3 backend), set in **Inter** and **JetBrains Mono**. Every visual value — fonts, spacing, colours,
-graph geometry — lives in `src/style.zig`; the palette itself is authored in
+graph geometry — lives in `src/ui/style.zig`; the palette itself is authored in
 `src/theme/zit_{dark,light}.json` and compiled in. The menu on your face at the
 end of the tab strip — one button for you and for Zit: settings, keys, theme,
 signing, the GitHub account — switches between the two and remembers which, in
@@ -121,7 +121,7 @@ which Windows gives to the input method and the keyboard layout, and only
 `↑`/`↓` act on a held key's repeats. The keyboard menu lists them all,
 because a shortcut nobody can find is a shortcut nobody has.
 
-`src/graph.zig` turns the flat commit list into lanes and curves — the one
+`src/git/graph.zig` turns the flat commit list into lanes and curves — the one
 genuinely custom algorithm here.
 
 Selecting a commit, or a changed file, opens a **diff pane under the graph**
@@ -203,7 +203,7 @@ config folder — nothing to install. Settings › GitHub turns it off: no
 pull requests or issues in the sidebar or the strip, no checks, no account,
 and no request goes to GitHub.
 
-Diffs are coloured by a small per-line lexer (`src/syntax.zig`: keywords,
+Diffs are coloured by a small per-line lexer (`src/ui/syntax.zig`: keywords,
 strings, numbers, comments, type names; no grammar per language), and a
 changed line set against the one it replaced marks the part that actually
 changed. Whitespace can be ignored and the context widened; a diff read ignoring
@@ -234,7 +234,7 @@ Gravatar.
 
 Reads are *snapshots*: `History` (refs, commits) and `Work` (staged/unstaged)
 each own an arena, and refreshing throws it away and builds a new one. On
-Linux the repository is watched (`src/watch.zig`, inotify): every folder of
+Linux the repository is watched (`src/git/watch.zig`, inotify): every folder of
 the working tree git does not ignore, and HEAD, the index, the refs and the
 reflog in `.git`. A file you save in your editor shows up without asking and
 without Zit asking either — idle, it does nothing; a 30-second poll stays as

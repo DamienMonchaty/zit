@@ -13,9 +13,9 @@
 //! `-Doptimize=` to compare release modes the same way.
 
 const std = @import("std");
-const git = @import("git.zig");
-const graph = @import("graph.zig");
-const syntax = @import("syntax.zig");
+const git = @import("git/git.zig");
+const graph = @import("git/graph.zig");
+const syntax = @import("ui/syntax.zig");
 
 /// The commits whose diffs are read, newest first.
 const DIFF_COMMITS = 50;

@@ -23,7 +23,7 @@ Private_Dirty moves with the moment it is read: 16.8 MB at 45 s, 8 MB at
 70 s in the same run, once the first fetch, the pull requests' list and a
 trim have gone by. Compare builds read at the same moment.
 
-Idle is now the watcher (`src/watch.zig`): nothing is read until inotify —
+Idle is now the watcher (`src/git/watch.zig`): nothing is read until inotify —
 ReadDirectoryChangesExW on Windows — says something changed, and a 30 s
 poll is the net under it. What is left,
 0.8 wake-ups a second, is not Zit's: 0.6 on the main thread inside SDL's
