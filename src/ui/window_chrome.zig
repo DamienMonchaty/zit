@@ -15,6 +15,7 @@ const home_page = @import("home_page.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -204,8 +205,8 @@ pub fn rebasedSinceUpstream() bool {
 /// frame — less the bar's own padding — and never narrower than what they
 /// hold needs.
 fn toolbarZones() struct { left: f32, right: f32 } {
-    const left_w: f32 = if (app.leftShown()) app.body_width * app.sidebar_split else 0;
-    const content_w = app.body_width - left_w;
+    const left_w: f32 = if (pr_editor.leftShown()) pr_editor.body_width * app.sidebar_split else 0;
+    const content_w = pr_editor.body_width - left_w;
     const right_w: f32 = if (app.show_detail and app.active_view == .graph and content_w >= 760) content_w * (1 - app.detail_split) else 0;
     return .{
         .left = @max(left_w - style.space.lg, 230),

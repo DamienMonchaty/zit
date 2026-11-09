@@ -12,6 +12,7 @@ const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === What Zit does ===
@@ -367,10 +368,10 @@ pub fn startScreen() void {
             else => continue,
         };
         if (ke.action == .up) continue;
-        if (app.pressed(ke, .down, false)) {
+        if (pr_editor.pressed(ke, .down, false)) {
             e.handled = true;
             if (start_pick + 1 < shown.items.len) start_pick += 1;
-        } else if (app.pressed(ke, .up, false)) {
+        } else if (pr_editor.pressed(ke, .up, false)) {
             e.handled = true;
             start_pick -|= 1;
         }

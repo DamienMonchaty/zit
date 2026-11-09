@@ -11,6 +11,7 @@ const identity_view = @import("identity_view.zig");
 const repo_settings = @import("repo_settings.zig");
 const github_actions = @import("../github/github_actions.zig");
 const pr_list = @import("pr_list.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === A request's conversation ===
@@ -39,7 +40,7 @@ pub fn requestConversation(d: pr.Detail) void {
     // all, Collapse all for a long conversation, where only the last few
     // are open to begin with.
     const many = d.comments.len + d.reviews.len > CARDS_OPEN_AT_END;
-    const open_threads = app.openThreads(d);
+    const open_threads = pr_editor.openThreads(d);
     if (many or d.threads.len > 0) {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
         defer bar.deinit();
@@ -91,7 +92,7 @@ pub fn requestConversation(d: pr.Detail) void {
                     ri += 1;
                     // A bare "commented" review says nothing — unless it is
                     // what left comments on lines of the diff.
-                    if (r.body.len == 0 and std.mem.eql(u8, r.state, "COMMENTED") and !app.reviewHasThreads(d, r.id)) continue;
+                    if (r.body.len == 0 and std.mem.eql(u8, r.state, "COMMENTED") and !pr_editor.reviewHasThreads(d, r.id)) continue;
                     events.append(a, .{ .note = r, .review = true }) catch break;
                 } else {
                     events.append(a, .{ .note = d.comments[ci], .review = false }) catch break;
@@ -103,7 +104,7 @@ pub fn requestConversation(d: pr.Detail) void {
         while (i < events.items.len) {
             var end = i + 1;
             // A review with a conversation still open is never folded away.
-            while (end < events.items.len and std.mem.eql(u8, events.items[end].note.author, events.items[i].note.author) and !(events.items[end].review and app.reviewHasOpenThreads(d, events.items[end].note.id))) end += 1;
+            while (end < events.items.len and std.mem.eql(u8, events.items[end].note.author, events.items[i].note.author) and !(events.items[end].review and pr_editor.reviewHasOpenThreads(d, events.items[end].note.id))) end += 1;
             const bit: u128 = @as(u128, 1) << @intCast(i % 128);
             const folded = end - i >= 3 and pr_runs_open & bit == 0;
             for (i..end) |k| {
@@ -116,20 +117,20 @@ pub fn requestConversation(d: pr.Detail) void {
                 // A long conversation is read from its end: the last few open.
                 const open = k + CARDS_OPEN_AT_END >= events.items.len;
                 if (e.review) {
-                    reviewEvent(k + 1, e.note, open, app.reviewHasThreads(d, e.note.id));
+                    reviewEvent(k + 1, e.note, open, pr_editor.reviewHasThreads(d, e.note.id));
                     // Its conversations on lines of the diff, under it, as
                     // the host shows them.
                     for (d.threads, 0..) |t, ti| {
                         if (e.note.id.len == 0 or !std.mem.eql(u8, t.review, e.note.id)) continue;
                         shown_threads[ti] = true;
-                        app.threadRow(ti, t, d, true);
+                        pr_editor.threadRow(ti, t, d, true);
                     }
                 } else timelineCard(k + 1, e.note.author, "commented", pr.isoSeconds(e.note.when), "", e.note.body, false, open);
             }
             i = end;
         }
         // Those no review on the page opened: after it, on the rail.
-        for (d.threads, 0..) |t, ti| if (!shown_threads[ti]) app.threadRow(ti, t, d, false);
+        for (d.threads, 0..) |t, ti| if (!shown_threads[ti]) pr_editor.threadRow(ti, t, d, false);
     }
 
     requestComposer();
@@ -179,7 +180,7 @@ pub fn requestSidebar(d: pr.Detail) void {
         for (d.labels, 0..) |l, i| {
             var cell = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false, .margin = .{ .y = 2, .h = 2 } });
             defer cell.deinit();
-            app.tinyBadge(@src(), 0, l.name, pr_list.labelColor(l.color));
+            pr_editor.tinyBadge(@src(), 0, l.name, pr_list.labelColor(l.color));
         }
     }
 }
@@ -661,12 +662,12 @@ fn requestComposer() void {
     defer line.deinit();
     const text = std.mem.trim(u8, pr_list.pr_comment.items, " \n\t");
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-    if (dialog_views.dialogButton(@src(), "Comment", false) and text.len > 0) app.prAnswer(.comment);
+    if (dialog_views.dialogButton(@src(), "Comment", false) and text.len > 0) pr_editor.prAnswer(.comment);
     // GitHub refuses a review of your own request: only a comment there.
     const own = if (pr.detail) |d| window_chrome.me_gh.items.len > 0 and std.ascii.eqlIgnoreCase(d.author, window_chrome.me_gh.items) else false;
     if (own) return;
-    if (dialog_views.dialogButton(@src(), "Request changes", false) and text.len > 0) app.prAnswer(.request_changes);
-    if (dialog_views.dialogButton(@src(), "Approve", true)) app.prAnswer(.approve);
+    if (dialog_views.dialogButton(@src(), "Request changes", false) and text.len > 0) pr_editor.prAnswer(.request_changes);
+    if (dialog_views.dialogButton(@src(), "Approve", true)) pr_editor.prAnswer(.approve);
 }
 
 /// Merging, on a card of its own at the very end.
@@ -740,7 +741,7 @@ pub fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f3
             .{ "Draft", style.textMuted() }
         else
             .{ "Open", style.success() };
-        app.statePill(word, hue);
+        pr_editor.statePill(word, hue);
         dvui.label(@src(), "#{d}", .{d.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE * style.ui_scale), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
         tl.addText(d.title, .{ .font = style.title().withSize(PR_TITLE_SIZE * style.ui_scale), .color_text = .{ .color = style.text() } });
@@ -750,7 +751,7 @@ pub fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f3
         // its title's line, each saying itself on hover.
         if (dialog_views.iconButtonTagged(@src(), "pr_checkout", "Check it out: switch to its branch, up to date", dvui.entypo.download, style.textMuted(), "pr:checkout")) github_actions.checkoutRequest(d.number, d.head, d.fork);
         if (dialog_views.iconButtonTagged(@src(), "pr_web", "Open it on GitHub", dvui.entypo.popup, style.textMuted(), "pr:web")) github_actions.openUrl(d.url);
-        if (dialog_views.iconButtonTagged(@src(), "pr_edit", "Edit its title, description, reviewers and labels", dvui.entypo.pencil, style.textMuted(), "pr:edit")) app.openPrEdit(d);
+        if (dialog_views.iconButtonTagged(@src(), "pr_edit", "Edit its title, description, reviewers and labels", dvui.entypo.pencil, style.textMuted(), "pr:edit")) pr_editor.openPrEdit(d);
         if (requestOpen(d) and !d.draft) {
             if (dialog_views.iconButtonTagged(@src(), "pr_draft", "Convert it back to a draft", dvui.entypo.back, style.textMuted(), "pr:draft")) requestOnRequest("Making a draft", "convertPullRequestToDraft", d.id);
         }
@@ -768,9 +769,9 @@ pub fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f3
         search_view.avatarSized(@src(), 0, pr_list.requestAuthor(d.author), null, null, 20);
         dvui.label(@src(), "{s}", .{d.author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         dvui.label(@src(), "wants to merge", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
-        app.branchChip(0, d.head);
+        pr_editor.branchChip(0, d.head);
         dvui.icon(@src(), "into", dvui.entypo.arrow_long_right, .{ .fill_color = .{ .color = style.textFaint() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs, .w = style.space.xs } });
-        app.branchChip(1, d.base);
+        pr_editor.branchChip(1, d.base);
         if (d.created > 0) {
             var when: [32]u8 = undefined;
             dvui.label(@src(), "· opened {s}", .{search_view.relativeTime(&when, d.created)}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
@@ -783,15 +784,15 @@ pub fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f3
     if (people_inline and d.reviewers.len + d.assignees.len + d.labels.len > 0) {
         var line = dvui.flexbox(@src(), .{ .justify_content = .start }, .{ .expand = .horizontal, .margin = .{ .h = style.space.sm } });
         defer line.deinit();
-        for (d.reviewers, 0..) |r, i| app.reviewerChip(i, r);
-        for (d.assignees, 0..) |a, i| app.personChip(100 + i, a, "assigned");
+        for (d.reviewers, 0..) |r, i| pr_editor.reviewerChip(i, r);
+        for (d.assignees, 0..) |a, i| pr_editor.personChip(100 + i, a, "assigned");
         for (d.labels, 0..) |l, i| {
             var cell = dvui.box(@src(), .{}, .{ .id_extra = 200 + i, .background = false, .margin = .{ .y = 2, .h = 2 } });
             defer cell.deinit();
-            app.tinyBadge(@src(), 0, l.name, pr_list.labelColor(l.color));
+            pr_editor.tinyBadge(@src(), 0, l.name, pr_list.labelColor(l.color));
         }
     }
-    app.mergeReadiness(d);
+    pr_editor.mergeReadiness(d);
 }
 
 /// A request's title: the largest words on its page.
@@ -819,7 +820,7 @@ pub fn loadingHeader(r: pr.Request) void {
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer line.deinit();
-        if (r.draft) app.statePill("Draft", style.textMuted()) else app.statePill("Open", style.success());
+        if (r.draft) pr_editor.statePill("Draft", style.textMuted()) else pr_editor.statePill("Open", style.success());
         dvui.label(@src(), "#{d}", .{r.number}, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .x = style.space.md, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .padding = dvui.Rect.all(0) });
         tl.addText(r.title, .{ .font = style.title().withSize(PR_TITLE_SIZE), .color_text = .{ .color = style.text() } });
@@ -830,15 +831,15 @@ pub fn loadingHeader(r: pr.Request) void {
     search_view.avatarSized(@src(), 0, pr_list.requestAuthor(r.author), null, null, 20);
     dvui.label(@src(), "{s}", .{r.author}, .{ .font = style.smallBold(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
     dvui.label(@src(), "wants to merge", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm, .w = style.space.sm }, .padding = dvui.Rect.all(0) });
-    app.branchChip(0, r.branch);
+    pr_editor.branchChip(0, r.branch);
     dvui.icon(@src(), "into", dvui.entypo.arrow_long_right, .{ .fill_color = .{ .color = style.textFaint() } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5, .margin = .{ .x = style.space.xs, .w = style.space.xs } });
-    app.branchChip(1, r.base);
+    pr_editor.branchChip(1, r.base);
 }
 
 /// Ask GitHub to merge it once it can, by the method picked. Deleting its
 /// branch after is the repository's own setting on GitHub, not the call's.
 fn autoMerge(d: pr.Detail) void {
-    if (!app.safeNodeId(d.id)) return;
+    if (!pr_editor.safeNodeId(d.id)) return;
     const method = ([_][]const u8{ "MERGE", "SQUASH", "REBASE" })[@min(pr_list.pr_merge_method, 2)];
     const v = std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"id\":\"{s}\",\"method\":\"{s}\"}}", .{ d.id, method }) catch return;
     github_actions.requestGraphql("Setting auto-merge", "mutation($id:ID!,$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:$method}){clientMutationId}}", v, .none);
@@ -846,7 +847,7 @@ fn autoMerge(d: pr.Detail) void {
 
 /// One of GitHub's mutations that take a request's node id and nothing else.
 pub fn requestOnRequest(label: []const u8, comptime mutation: []const u8, id: []const u8) void {
-    if (!app.safeNodeId(id)) return;
+    if (!pr_editor.safeNodeId(id)) return;
     const v = std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"id\":\"{s}\"}}", .{id}) catch return;
     github_actions.requestGraphql(label, "mutation($id:ID!){" ++ mutation ++ "(input:{pullRequestId:$id}){clientMutationId}}", v, .none);
 }

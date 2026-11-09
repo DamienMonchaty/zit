@@ -13,6 +13,7 @@ const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === Command palette ===
@@ -294,13 +295,13 @@ pub fn palette() void {
             else => continue,
         };
         if (ke.action == .up) continue;
-        if (app.pressed(ke, .down, false)) {
+        if (pr_editor.pressed(ke, .down, false)) {
             e.handled = true;
             if (palette_pick + 1 < n) palette_pick += 1;
-        } else if (app.pressed(ke, .up, false)) {
+        } else if (pr_editor.pressed(ke, .up, false)) {
             e.handled = true;
             palette_pick -|= 1;
-        } else if (app.pressed(ke, .escape, false)) {
+        } else if (pr_editor.pressed(ke, .escape, false)) {
             e.handled = true;
             palette_open = false;
         }

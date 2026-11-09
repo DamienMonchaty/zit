@@ -17,6 +17,7 @@ const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
 const pr_conversation = @import("pr_conversation.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -2224,7 +2225,7 @@ fn commitBox() void {
 
     coAuthorChips();
 
-    const can_commit = app.canCommit();
+    const can_commit = pr_editor.canCommit();
 
     const caption: []const u8 = if (app.commit_summary.items.len == 0)
         "Write a summary to commit"

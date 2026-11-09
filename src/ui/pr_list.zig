@@ -11,6 +11,7 @@ const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_io = @import("../core/repo_io.zig");
 const pr_conversation = @import("pr_conversation.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === Pull requests ===
@@ -411,8 +412,8 @@ fn requestListRow(src: std.builtin.SourceLocation, entry: pr.Request, id: usize)
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .y = 3 } });
         defer line.deinit();
         reviewBadge(@src(), 0, entry.review, entry.draft);
-        if (entry.conflict) app.tinyBadge(@src(), 1, "conflict", style.danger());
-        for (entry.labels[0..@min(entry.labels.len, 2)], 0..) |label, i| app.tinyBadge(@src(), 10 + i, label.name, labelColor(label.color));
+        if (entry.conflict) pr_editor.tinyBadge(@src(), 1, "conflict", style.danger());
+        for (entry.labels[0..@min(entry.labels.len, 2)], 0..) |label, i| pr_editor.tinyBadge(@src(), 10 + i, label.name, labelColor(label.color));
         if (entry.labels.len > 2) dvui.label(@src(), "+{d}", .{entry.labels.len - 2}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .margin = .{ .w = style.space.xs }, .padding = dvui.Rect.all(0) });
         dvui.label(@src(), "{s} → {s}", .{ entry.branch, entry.base }, .{
             .font = style.tiny(),
@@ -502,11 +503,11 @@ fn requestDetail() void {
     // it, which frees what `d` points into: asked once the pane is drawn.
     var reload = false;
     defer if (reload) pr.loadDetail(app.repo_path.items, d.number);
-    if (app.pr_reread_at != 0) {
-        if (app.frame_now_s >= app.pr_reread_at) {
-            app.pr_reread_at = 0;
+    if (pr_editor.pr_reread_at != 0) {
+        if (app.frame_now_s >= pr_editor.pr_reread_at) {
+            pr_editor.pr_reread_at = 0;
             pr.loadDetail(app.repo_path.items, d.number);
-        } else dvui.timer(panel.data().id, app.PR_REREAD_S * std.time.us_per_s);
+        } else dvui.timer(panel.data().id, pr_editor.PR_REREAD_S * std.time.us_per_s);
     }
 
     // The whole pane, and where there is the room GitHub's sidebar on its
@@ -519,7 +520,7 @@ fn requestDetail() void {
     // what they hold set in as far as the page under them is.
     const inset = @max(style.space.sm, (pane_w - total) / 2);
     pr_conversation.requestHeader(d, &reload, !side, inset);
-    app.requestTabs(d, inset);
+    pr_editor.requestTabs(d, inset);
 
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .background = false });
     {
@@ -541,9 +542,9 @@ fn requestDetail() void {
 
             switch (pr_conversation.pr_tab) {
                 .conversation => pr_conversation.requestConversation(d),
-                .commits => app.requestCommits(d),
-                .files => app.requestFiles(d),
-                .checks => app.requestChecks(d),
+                .commits => pr_editor.requestCommits(d),
+                .files => pr_editor.requestFiles(d),
+                .checks => pr_editor.requestChecks(d),
             }
         }
         if (side) pr_conversation.requestSidebar(d);

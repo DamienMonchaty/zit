@@ -15,6 +15,7 @@ const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -844,13 +845,13 @@ pub fn graphPanel() void {
     // ↑ and ↓ before the list's scroll area sees them: once a row was
     // clicked the scroll area had the keyboard, and scrolled by a line
     // instead of moving to the next commit.
-    if (!app.typing()) for (dvui.events()) |*e| {
+    if (!pr_editor.typing()) for (dvui.events()) |*e| {
         if (e.handled or e.evt != .key) continue;
         const ke = e.evt.key;
         if (ke.action == .up) continue;
-        if (app.pressed(ke, .up, false) or app.pressed(ke, .down, false)) {
+        if (pr_editor.pressed(ke, .up, false) or pr_editor.pressed(ke, .down, false)) {
             e.handled = true;
-            app.stepCommit(if (app.pressed(ke, .up, false)) -1 else 1);
+            pr_editor.stepCommit(if (pr_editor.pressed(ke, .up, false)) -1 else 1);
         }
     };
 
@@ -896,7 +897,7 @@ pub fn graphPanel() void {
     const query = std.hash.Wyhash.hash(author_only.items.len, app.commit_filter.items);
     if (query != last_query) {
         last_query = query;
-        if (filtering and matches > 0) if (listRow(shown.items[0], shown.items)) |row| app.revealCommit(row);
+        if (filtering and matches > 0) if (listRow(shown.items[0], shown.items)) |row| pr_editor.revealCommit(row);
     }
 
     // A `path:` or `code:` search git refused says why, in place of the list.

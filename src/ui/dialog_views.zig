@@ -17,6 +17,7 @@ const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const pr_list = @import("pr_list.zig");
+const pr_editor = @import("pr_editor.zig");
 const app = @import("../main.zig");
 
 // === Folder picker ===
@@ -1199,7 +1200,7 @@ pub fn escapePressed() bool {
     for (dvui.events()) |*e| {
         if (e.handled) continue;
         switch (e.evt) {
-            .key => |ke| if (ke.action == .down and app.pressed(ke, .escape, false)) {
+            .key => |ke| if (ke.action == .down and pr_editor.pressed(ke, .escape, false)) {
                 e.handled = true;
                 return true;
             },
