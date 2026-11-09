@@ -6,6 +6,7 @@ const run = @import("../core/run.zig");
 const github = @import("../github/github.zig");
 const tab_strip = @import("tab_strip.zig");
 const graph_view = @import("graph_view.zig");
+const search_view = @import("search_view.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -129,7 +130,7 @@ pub fn titlebar() void {
         }
         toolbarDivider(@src(), 1);
         if (app.toolButton(@src(), "Branch", dvui.entypo.flow_branch, .{ .hint = "A new branch at what is checked out" })) app.askName(.new_branch, "");
-        const changes = app.changeCount();
+        const changes = search_view.changeCount();
         if (app.toolButton(@src(), "Stash", dvui.entypo.save, .{
             .busy = std.mem.eql(u8, running, "Stashing"),
             .usable = idle and changes > 0,
@@ -405,7 +406,7 @@ fn branchSwitcher() void {
         for (h.refs, 0..) |ref, i| {
             if (ref.kind != kind) continue;
             // A remote's branch with a local one of the same name is that one.
-            if (kind == .remote and app.sameOnRemote(h, ref)) continue;
+            if (kind == .remote and search_view.sameOnRemote(h, ref)) continue;
             if (needle.len > 0 and std.ascii.findIgnoreCase(ref.name, needle) == null) continue;
             if (shown >= app.MAX_BRANCH_CHOICES) break;
             if (!header) {
@@ -450,7 +451,7 @@ fn branchChoice(id: usize, ref: git.Ref) bool {
         .expand = .horizontal,
         .padding = dvui.Rect.all(0),
     });
-    app.trackingMarks(ref.tracking, style.textFaint());
+    search_view.trackingMarks(ref.tracking, style.textFaint());
     return mi.activeRect() != null;
 }
 
@@ -755,7 +756,7 @@ pub fn userMenu() void {
         // The face, and the chevron that says it opens.
         var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .background = false });
         defer face.deinit();
-        app.avatarSized(@src(), 0, me, null, null, 22);
+        search_view.avatarSized(@src(), 0, me, null, null, 22);
         dvui.icon(@src(), "user_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = style.textMuted() } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
@@ -774,7 +775,7 @@ pub fn userMenu() void {
             .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.lg, .h = style.space.sm },
         });
         defer head.deinit();
-        app.avatarSized(@src(), 1, me, null, null, 36);
+        search_view.avatarSized(@src(), 1, me, null, null, 36);
         var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.xs } });
         defer col.deinit();
         const set = me_name.items.len > 0 and me_email.items.len > 0;

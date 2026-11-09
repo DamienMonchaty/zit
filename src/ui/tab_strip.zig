@@ -8,6 +8,7 @@ const store = @import("../core/store.zig");
 const avatars = @import("../github/avatar.zig");
 const window_chrome = @import("window_chrome.zig");
 const graph_view = @import("graph_view.zig");
+const search_view = @import("search_view.zig");
 const app = @import("../main.zig");
 
 // === Tabs and groups ===
@@ -169,8 +170,8 @@ pub fn loadWorkspace() void {
     auto_fetch_minutes = loaded.file.auto_fetch_minutes;
     graph_view.graph_show_remote = loaded.file.show_remote_branches;
     graph_view.graph_first_parent = loaded.file.first_parent;
-    app.graph_width = loaded.file.graph_width;
-    app.branch_width = loaded.file.branch_width;
+    search_view.graph_width = loaded.file.graph_width;
+    search_view.branch_width = loaded.file.branch_width;
     zoom = zoomStep(loaded.file.zoom);
     // The file's strings die with `loaded`.
     app.commit_template.clearRetainingCapacity();
@@ -267,8 +268,8 @@ fn writeWorkspace() bool {
         .auto_fetch_minutes = auto_fetch_minutes,
         .show_remote_branches = graph_view.graph_show_remote,
         .first_parent = graph_view.graph_first_parent,
-        .graph_width = app.graph_width,
-        .branch_width = app.branch_width,
+        .graph_width = search_view.graph_width,
+        .branch_width = search_view.branch_width,
         .remember_tabs = remember_tabs,
         .default_branch = default_branch.items,
         .editor = editor_cmd.items,

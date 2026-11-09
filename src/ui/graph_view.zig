@@ -6,6 +6,7 @@ const graph = @import("../git/graph.zig");
 const run = @import("../core/run.zig");
 const tab_strip = @import("tab_strip.zig");
 const window_chrome = @import("window_chrome.zig");
+const search_view = @import("search_view.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -846,7 +847,7 @@ pub fn graphPanel() void {
     };
 
     const filtering = listFiltered();
-    app.updateSearchHits();
+    search_view.updateSearchHits();
 
     // Listed before anything is drawn: the scrollbar needs the total, and the
     // bar above says how many of them there are.
@@ -891,11 +892,11 @@ pub fn graphPanel() void {
     }
 
     // A `path:` or `code:` search git refused says why, in place of the list.
-    if (filtering and matches == 0 and (narrowed or app.search_hits.err.items.len > 0)) {
+    if (filtering and matches == 0 and (narrowed or search_view.search_hits.err.items.len > 0)) {
         // `path:` and `code:` still running have found nothing yet, not nothing.
-        app.emptyState(@src(), if (app.search_hits.err.items.len > 0)
-            app.search_hits.err.items
-        else if (app.search_hits.running != null and !app.search_hits.ready)
+        app.emptyState(@src(), if (search_view.search_hits.err.items.len > 0)
+            search_view.search_hits.err.items
+        else if (search_view.search_hits.running != null and !search_view.search_hits.ready)
             "Loading the commits that match…"
         else
             "No commit matches that.");
@@ -904,7 +905,7 @@ pub fn graphPanel() void {
 
     // A row for the uncommitted changes, above the first commit. Not in a
     // file's history: it is not one of its commits.
-    const wip = !narrowed and app.changeCount() > 0;
+    const wip = !narrowed and search_view.changeCount() > 0;
     const extra: usize = if (wip) 1 else 0;
     const total = if (narrowed) matches else commits.len + extra;
 
@@ -937,23 +938,23 @@ pub fn graphPanel() void {
         // history, and drawing a subset of them would draw a history that
         // never happened.
         for (shown.items[first..last], first..) |commit_index, row| {
-            app.commitRow(@src(), row, commit_index, width, rh, false, false);
+            search_view.commitRow(@src(), row, commit_index, width, rh, false, false);
         }
         return;
     }
 
-    if (wip and first == 0) app.wipRow(@src(), width);
+    if (wip and first == 0) search_view.wipRow(@src(), width);
 
     for (first..last) |i| {
         if (i < extra) continue;
         const index = i - extra;
-        app.commitRow(@src(), i, index, width, rh, true, filtering and index < hit.len and !hit[index]);
+        search_view.commitRow(@src(), i, index, width, rh, true, filtering and index < hit.len and !hit[index]);
     }
 
     // The lanes are drawn in one pass over a canvas spanning the whole virtual
     // height: a curve joins two rows, so drawing it inside either one would
     // clip it at the row boundary.
-    app.drawLanes(@src(), first, last, extra, rh);
+    search_view.drawLanes(@src(), first, last, extra, rh);
 }
 
 /// The names over the list's columns, the sortable ones clickable.
@@ -990,33 +991,33 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
         columnHandle(@src(), 2, edges.date - style.space.xs * rs.s, rs, &col_time);
         if (with_lanes) {
             // Dragged from the auto width, it starts from what is shown.
-            if (app.graph_width == 0) app.graph_width_drag = app.graphColumn() else app.graph_width_drag = app.graph_width;
-            const before = app.graph_width_drag;
-            columnHandleDir(@src(), 3, rs.r.x + app.graphRuleX() * rs.s, rs, &app.graph_width_drag, 1, app.GRAPH_MIN_W, app.GRAPH_MAX_W);
-            if (app.graph_width_drag != before) {
-                app.graph_width = app.graph_width_drag;
+            if (search_view.graph_width == 0) search_view.graph_width_drag = search_view.graphColumn() else search_view.graph_width_drag = search_view.graph_width;
+            const before = search_view.graph_width_drag;
+            columnHandleDir(@src(), 3, rs.r.x + search_view.graphRuleX() * rs.s, rs, &search_view.graph_width_drag, 1, search_view.GRAPH_MIN_W, search_view.GRAPH_MAX_W);
+            if (search_view.graph_width_drag != before) {
+                search_view.graph_width = search_view.graph_width_drag;
                 tab_strip.saveWorkspace();
             }
             // The branch column's right edge: wider shows more of each name.
-            app.branch_width_drag = app.branchColumn();
-            columnHandleDir(@src(), 4, rs.r.x + app.branchColumn() * rs.s, rs, &app.branch_width_drag, 1, app.BRANCH_MIN_W, app.BRANCH_MAX_W);
-            if (app.branch_width_drag != app.branchColumn()) {
-                app.branch_width = app.branch_width_drag;
+            search_view.branch_width_drag = search_view.branchColumn();
+            columnHandleDir(@src(), 4, rs.r.x + search_view.branchColumn() * rs.s, rs, &search_view.branch_width_drag, 1, search_view.BRANCH_MIN_W, search_view.BRANCH_MAX_W);
+            if (search_view.branch_width_drag != search_view.branchColumn()) {
+                search_view.branch_width = search_view.branch_width_drag;
                 tab_strip.saveWorkspace();
             }
         }
 
-        const lane_w: f32 = if (with_lanes) app.graphLead() else 0;
+        const lane_w: f32 = if (with_lanes) search_view.graphLead() else 0;
         if (with_lanes) {
             // GitKraken's heads: the branch column's, then the graph's.
             {
-                const bw = app.branchColumn();
+                const bw = search_view.branchColumn();
                 // Which branches the graph draws, in the column of the
                 // branches, at the end of its name.
                 var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .tag = "header:branches", .min_size_content = .{ .w = bw }, .max_size_content = .width(bw), .gravity_y = 0.5, .background = false });
                 defer cell.deinit();
                 var buf: [app.MAX_SHOWN_LINE]u8 = undefined;
-                dvui.label(@src(), "{s}", .{fitText(&buf, "BRANCH / TAG", style.section(), bw - HEADER_INSET - style.space.sm - app.BRANCH_MENU_W)}, .{
+                dvui.label(@src(), "{s}", .{fitText(&buf, "BRANCH / TAG", style.section(), bw - HEADER_INSET - style.space.sm - search_view.BRANCH_MENU_W)}, .{
                     .font = style.section(),
                     .color_text = .{ .color = style.textFaint() },
                     .gravity_y = 0.5,
@@ -1026,7 +1027,7 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
                 app.graphBranchMenu(@src());
             }
             // The graph's own head: its width, nothing in it.
-            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = lane_w - app.branchColumn() }, .max_size_content = .width(lane_w - app.branchColumn()), .gravity_y = 0.5, .background = false });
+            var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = lane_w - search_view.branchColumn() }, .max_size_content = .width(lane_w - search_view.branchColumn()), .gravity_y = 0.5, .background = false });
             cell.deinit();
         }
         headerCell(@src(), "MESSAGE", 0, true, false);
@@ -1294,7 +1295,7 @@ fn authorRow(id: usize, entry: AuthorEntry, picked: bool, has_commit: bool) ?boo
         defer mi.deinit();
         var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
         defer face.deinit();
-        if (has_commit) app.avatarSized(@src(), 0, .{ .id = std.mem.zeroes(git.Oid), .summary = "", .author = entry.name, .email = entry.email, .time = 0 }, null, null, 18);
+        if (has_commit) search_view.avatarSized(@src(), 0, .{ .id = std.mem.zeroes(git.Oid), .summary = "", .author = entry.name, .email = entry.email, .time = 0 }, null, null, 18);
         dvui.label(@src(), "{s}", .{entry.name}, .{
             .font = if (picked) style.smallBold() else style.small(),
             .color_text = .{ .color = style.text() },
@@ -1493,8 +1494,8 @@ fn columnRules(rs: dvui.RectScale, with_lanes: bool) void {
     const xs = [_]?f32{
         // The branch column's and the graph's edges too, where the lanes are
         // drawn: columns like the others, each rule where its handle is.
-        if (with_lanes) r.x + app.branchColumn() * s else null,
-        if (with_lanes) r.x + app.graphRuleX() * s else null,
+        if (with_lanes) r.x + search_view.branchColumn() * s else null,
+        if (with_lanes) r.x + search_view.graphRuleX() * s else null,
         if (cols.author) edges.author else null,
         if (cols.sha) edges.sha - style.space.xs * s else null,
         edges.date - style.space.xs * s,
@@ -1525,7 +1526,7 @@ pub fn messageSpare() f32 {
     const w = app.graph_scroll.viewport.w;
     if (w <= 0) return std.math.inf(f32);
     const cols = columnsShown();
-    const room = w - 2 * style.space.lg - app.graphLead() - col_time -
+    const room = w - 2 * style.space.lg - search_view.graphLead() - col_time -
         (if (cols.sha) col_sha else 0) - (if (cols.author) col_author + 2 * style.space.md else 0);
     return @max(0, room - MESSAGE_MIN);
 }
@@ -1536,7 +1537,7 @@ pub fn messageSpare() f32 {
 pub fn columnsShown() struct { author: bool, sha: bool } {
     const w = app.graph_scroll.viewport.w;
     if (w <= 0) return .{ .author = true, .sha = true };
-    var room = w - 2 * style.space.lg - app.graphLead() - col_time - col_sha - col_author - 2 * style.space.md;
+    var room = w - 2 * style.space.lg - search_view.graphLead() - col_time - col_sha - col_author - 2 * style.space.md;
     const sha = room >= MESSAGE_MIN;
     if (!sha) room += col_sha;
     return .{ .author = room >= MESSAGE_MIN, .sha = sha };
@@ -1593,7 +1594,7 @@ fn floatingSearch() void {
     });
     defer card.deinit();
     app.focusOnce(app.searchFieldIn(@src(), &app.commit_filter, "Search commits — author:, msg:, path:, code:, after:", "commit_filter", dvui.Rect.all(0), false));
-    if (app.search_hits.running != null) app.loadingSpinner(@src());
+    if (search_view.search_hits.running != null) app.loadingSpinner(@src());
     if (list_filtering) {
         dvui.label(@src(), "{d} of {d}", .{ list_matches, list_total }, .{
             .font = style.tiny(),
@@ -1710,7 +1711,7 @@ var last_query: u64 = 0;
 /// place under the uncommitted-changes row.
 pub fn listRow(index: u32, shown: []const u32) ?usize {
     if (listNarrowed()) return std.mem.indexOfScalar(u32, shown, index);
-    return index + @intFromBool(app.changeCount() > 0);
+    return index + @intFromBool(search_view.changeCount() > 0);
 }
 
 pub fn commitShown(commit: git.Commit, index: usize, terms: []const Term) bool {
@@ -1820,7 +1821,7 @@ pub fn commitMatches(commit: git.Commit, terms: []const Term) bool {
             .sha => std.ascii.startsWithIgnoreCase(hex, t.text),
             .after => commit.time >= t.time,
             .before => commit.time < t.time,
-            .path, .code => app.search_hits.ready and app.search_hits.ids.contains(commit.id),
+            .path, .code => search_view.search_hits.ready and search_view.search_hits.ids.contains(commit.id),
         };
         if (!ok) return false;
     }
