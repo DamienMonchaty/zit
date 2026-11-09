@@ -11,6 +11,7 @@ const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const command_palette = @import("command_palette.zig");
+const home_page = @import("home_page.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -815,10 +816,10 @@ pub fn userMenu() void {
             identity_view.keys_rect = .{};
         },
         .signing => identity_view.openSettings(6),
-        .docs => app.openUrl(app.SITE_URL),
+        .docs => app.openUrl(home_page.SITE_URL),
         .about => {
-            app.features_open = true;
-            app.features_rect = .{};
+            home_page.features_open = true;
+            home_page.features_rect = .{};
         },
         .sign_in => {
             identity_view.openIdentity();
