@@ -13,6 +13,7 @@ const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const identity_view = @import("identity_view.zig");
+const repo_settings = @import("repo_settings.zig");
 const app = @import("../main.zig");
 
 // === Folder picker ===
@@ -290,7 +291,7 @@ pub fn repoDialog() void {
         _ = dialogField(@src(), 3, "Default branch", &dialog_branch, "main", false, &entered);
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
         defer row.deinit();
-        if (app.toggle(@src(), dialog_readme)) dialog_readme = !dialog_readme;
+        if (repo_settings.toggle(@src(), dialog_readme)) dialog_readme = !dialog_readme;
         dvui.label(@src(), "Add a README and make the first commit", .{}, .{
             .font = style.small(),
             .color_text = .{ .color = style.textMuted() },

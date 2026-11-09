@@ -12,6 +12,7 @@ const search_view = @import("search_view.zig");
 const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const repo_settings = @import("repo_settings.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -596,7 +597,7 @@ fn commitFiles(id: git.Oid) void {
         track.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         dvui.label(@src(), "All files", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
-        if (app.toggle(@src(), commit_all_files)) commit_all_files = !commit_all_files;
+        if (repo_settings.toggle(@src(), commit_all_files)) commit_all_files = !commit_all_files;
         // The kinds after it, at the end of the line.
         if (app.diff_all.len > 0) fileFilters();
     }

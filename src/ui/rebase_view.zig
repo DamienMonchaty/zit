@@ -14,6 +14,7 @@ const diff_view = @import("diff_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
+const repo_settings = @import("repo_settings.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -1393,7 +1394,7 @@ pub fn diffFileRow(
 
     switch (app.selection) {
         .commit => |commit_id| {
-            if (file.status != .deleted and dialog_views.chipButton(@src(), dvui.entypo.edit, "Open in editor", false)) app.openInEditor(file.path);
+            if (file.status != .deleted and dialog_views.chipButton(@src(), dvui.entypo.edit, "Open in editor", false)) repo_settings.openInEditor(file.path);
             if (dialog_views.chipButton(@src(), dvui.entypo.clock, "History", false)) graph_view.showFileHistory(file.path);
             // Nothing to restore of a file this commit deleted.
             if (file.status != .deleted) {

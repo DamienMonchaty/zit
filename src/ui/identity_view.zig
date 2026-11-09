@@ -11,6 +11,7 @@ const graph_view = @import("graph_view.zig");
 const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const repo_settings = @import("repo_settings.zig");
 const app = @import("../main.zig");
 
 // === Git identity ===
@@ -179,12 +180,12 @@ pub fn openSettings(section: usize) void {
     settings_open = true;
     settings_rect = .{};
     signing_loaded = false;
-    app.repo_prefs_loaded = false;
-    app.editors_loaded = false;
+    repo_settings.repo_prefs_loaded = false;
+    repo_settings.editors_loaded = false;
     // The repository whose settings show: the one open, to start with.
     if (app.repo != null) {
-        app.repo_settings_path.clearRetainingCapacity();
-        app.repo_settings_path.appendSlice(app.gpa, app.repo_path.items) catch {};
+        repo_settings.repo_settings_path.clearRetainingCapacity();
+        repo_settings.repo_settings_path.appendSlice(app.gpa, app.repo_path.items) catch {};
     }
     settings_page = section;
 }
@@ -257,7 +258,7 @@ pub fn settingsDialog() void {
             });
             defer section.deinit();
 
-            var changed = app.settingsSwitch(0, &tab_strip.remember_tabs, "Reopen your tabs", "Start where you left off, rather than on the start page");
+            var changed = repo_settings.settingsSwitch(0, &tab_strip.remember_tabs, "Reopen your tabs", "Start where you left off, rather than on the start page");
 
             settingsField(@src(), "Default branch", "The first branch of a repository made here");
             const branch = dialog_views.textField(@src(), .{
@@ -270,10 +271,10 @@ pub fn settingsDialog() void {
             branch.deinit();
 
             settingsField(@src(), "External editor", "What a file from a diff opens with");
-            if (app.editorChoice()) changed = true;
+            if (repo_settings.editorChoice()) changed = true;
 
             settingsField(@src(), "Terminal", "What Terminal opens, in the repository's folder");
-            if (app.terminalChoice()) changed = true;
+            if (repo_settings.terminalChoice()) changed = true;
 
             settingsField(@src(), "Fetch in the background", "Every remote, quietly — the counts on Pull and Push stay true");
             {
@@ -290,7 +291,7 @@ pub fn settingsDialog() void {
                     }
                 }
             }
-            changed = app.settingsSwitch(1, &tab_strip.prune_on_fetch, "Prune when fetching", "Drop the remote branches deleted on the remote") or changed;
+            changed = repo_settings.settingsSwitch(1, &tab_strip.prune_on_fetch, "Prune when fetching", "Drop the remote branches deleted on the remote") or changed;
 
             if (changed) tab_strip.saveWorkspace();
         }
@@ -303,7 +304,7 @@ pub fn settingsDialog() void {
             });
             defer section.deinit();
             var on = tab_strip.integrations;
-            if (app.settingsSwitch(0, &on, "Use GitHub", "Pull requests, issues, checks and the account. Off: none of it, and nothing asked of GitHub")) tab_strip.setIntegrations(on);
+            if (repo_settings.settingsSwitch(0, &on, "Use GitHub", "Pull requests, issues, checks and the account. Off: none of it, and nothing asked of GitHub")) tab_strip.setIntegrations(on);
             // Who Zit is connected as, and the way in or out.
             if (tab_strip.integrations) {
                 window_chrome.loadMe();
@@ -344,7 +345,7 @@ pub fn settingsDialog() void {
                 });
                 defer cards.deinit();
                 for (r * 3..@min(r * 3 + 3, style.themes.len)) |i| {
-                    if (app.themeCard(@src(), i) and i != app.theme_index) pickTheme(i);
+                    if (repo_settings.themeCard(@src(), i) and i != app.theme_index) pickTheme(i);
                 }
             }
             {
@@ -352,13 +353,13 @@ pub fn settingsDialog() void {
                 defer section.deinit();
                 settingsField(@src(), "Text size", "The app's words, apart from the zoom");
                 const ui_steps = [_]f32{ 0.9, 1, 1.08, 1.16 };
-                if (app.choiceChips(10, &.{ "Small", "Default", "Large", "Larger" }, app.nearestStep(&ui_steps, style.ui_scale))) |i| {
+                if (repo_settings.choiceChips(10, &.{ "Small", "Default", "Large", "Larger" }, repo_settings.nearestStep(&ui_steps, style.ui_scale))) |i| {
                     style.ui_scale = ui_steps[i];
                     tab_strip.saveWorkspace();
                 }
                 settingsField(@src(), "Editor text size", "The code of a diff or a blame");
                 const code_steps = [_]f32{ 10.0 / 11.0, 1, 12.0 / 11.0, 13.0 / 11.0, 14.0 / 11.0 };
-                if (app.choiceChips(11, &.{ "10", "11", "12", "13", "14" }, app.nearestStep(&code_steps, style.code_scale))) |i| {
+                if (repo_settings.choiceChips(11, &.{ "10", "11", "12", "13", "14" }, repo_settings.nearestStep(&code_steps, style.code_scale))) |i| {
                     style.code_scale = code_steps[i];
                     tab_strip.saveWorkspace();
                 }
@@ -366,12 +367,12 @@ pub fn settingsDialog() void {
             {
                 var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
                 defer section.deinit();
-                if (app.settingsSwitch(0, &tab_strip.show_avatars, "Pictures in the graph", "Each commit its author's picture. Off: a dot")) tab_strip.saveWorkspace();
+                if (repo_settings.settingsSwitch(0, &tab_strip.show_avatars, "Pictures in the graph", "Each commit its author's picture. Off: a dot")) tab_strip.saveWorkspace();
             }
         }
         if (SettingsCard.begin(REPO_PAGE)) |card| {
             defer card.end();
-            app.repoSettings();
+            repo_settings.repoSettings();
         }
         if (SettingsCard.begin(1)) |card| {
             defer card.end();
@@ -400,13 +401,13 @@ pub fn settingsDialog() void {
             defer section.deinit();
 
             var changed = false;
-            changed = app.settingsSwitch(0, &app.commit_prefs.ticket, "Ticket from the branch", "PROJ-80-Back-Login puts PROJ-80 in the message") or changed;
+            changed = repo_settings.settingsSwitch(0, &app.commit_prefs.ticket, "Ticket from the branch", "PROJ-80-Back-Login puts PROJ-80 in the message") or changed;
             if (app.commit_prefs.ticket) {
-                changed = app.settingsSwitch(1, &app.commit_prefs.ticket_footer, "Ticket as a trailer", "Refs: PROJ-80 at the end, rather than at the head of the summary") or changed;
+                changed = repo_settings.settingsSwitch(1, &app.commit_prefs.ticket_footer, "Ticket as a trailer", "Refs: PROJ-80 at the end, rather than at the head of the summary") or changed;
             }
-            changed = app.settingsSwitch(2, &app.commit_prefs.conventional, "Conventional commits", "A type and a scope before the summary: feat(api): …") or changed;
-            changed = app.settingsSwitch(3, &app.commit_prefs.wrap_body, "Wrap the description", "Long lines broken at 72 columns, as git log expects") or changed;
-            changed = app.settingsSwitch(4, &app.commit_prefs.signoff, "Sign off", "A Signed-off-by line on every commit") or changed;
+            changed = repo_settings.settingsSwitch(2, &app.commit_prefs.conventional, "Conventional commits", "A type and a scope before the summary: feat(api): …") or changed;
+            changed = repo_settings.settingsSwitch(3, &app.commit_prefs.wrap_body, "Wrap the description", "Long lines broken at 72 columns, as git log expects") or changed;
+            changed = repo_settings.settingsSwitch(4, &app.commit_prefs.signoff, "Sign off", "A Signed-off-by line on every commit") or changed;
 
             dvui.label(@src(), "Template", .{}, .{
                 .font = style.small(),
@@ -470,8 +471,8 @@ pub fn settingsDialog() void {
                 });
             }
 
-            var changed = app.settingsSwitch(0, &app.commit_prefs.sign, "Sign every commit", "-S on each commit made here; git's own commit.gpgsign signs the rest");
-            changed = app.settingsSwitch(1, &app.commit_prefs.sign_tags, "Sign tags", "The tags made here are annotated and signed") or changed;
+            var changed = repo_settings.settingsSwitch(0, &app.commit_prefs.sign, "Sign every commit", "-S on each commit made here; git's own commit.gpgsign signs the rest");
+            changed = repo_settings.settingsSwitch(1, &app.commit_prefs.sign_tags, "Sign tags", "The tags made here are annotated and signed") or changed;
             if (changed) tab_strip.saveWorkspace();
 
             settingsField(@src(), "Format", "Saved in git's global config, gpg.format");
@@ -482,7 +483,7 @@ pub fn settingsDialog() void {
                     var chip = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false });
                     defer chip.deinit();
                     const on = std.mem.eql(u8, signing_format, format[1]);
-                    if (dialog_views.chipButton(@src(), if (on) dvui.entypo.check else dvui.entypo.lock, format[0], on)) app.setGlobalConfig("gpg.format", format[1]);
+                    if (dialog_views.chipButton(@src(), if (on) dvui.entypo.check else dvui.entypo.lock, format[0], on)) repo_settings.setGlobalConfig("gpg.format", format[1]);
                 }
             }
 
@@ -498,7 +499,7 @@ pub fn settingsDialog() void {
                     .margin = .{ .w = style.space.sm },
                 }));
                 key.deinit();
-                if (dialog_views.dialogButton(@src(), "Save", true)) app.setGlobalConfig("user.signingkey", std.mem.trim(u8, signing_key.items, " "));
+                if (dialog_views.dialogButton(@src(), "Save", true)) repo_settings.setGlobalConfig("user.signingkey", std.mem.trim(u8, signing_key.items, " "));
             }
         }
     }
@@ -538,60 +539,60 @@ pub fn keysDialog() void {
     {
         var card = shortcutCard(@src(), 0);
         defer card.deinit();
-        app.shortcutRow(@src(), "Ctrl+P", "Command palette: any action, branch or repo");
-        app.shortcutRow(@src(), "Ctrl+T", "New tab: open, clone or create");
-        app.shortcutRow(@src(), "Ctrl+O", "Open a folder");
-        app.shortcutRow(@src(), "Ctrl+W", "Close this tab");
-        app.shortcutRow(@src(), "Ctrl+Tab, Ctrl+PgDn", "Next tab (Shift+Tab, PgUp: previous)");
-        app.shortcutRow(@src(), "Ctrl+,", "Settings");
-        app.shortcutRow(@src(), "Ctrl+Shift+T", "A terminal in this repository's folder");
-        app.shortcutRow(@src(), "F5", "Refresh");
+        repo_settings.shortcutRow(@src(), "Ctrl+P", "Command palette: any action, branch or repo");
+        repo_settings.shortcutRow(@src(), "Ctrl+T", "New tab: open, clone or create");
+        repo_settings.shortcutRow(@src(), "Ctrl+O", "Open a folder");
+        repo_settings.shortcutRow(@src(), "Ctrl+W", "Close this tab");
+        repo_settings.shortcutRow(@src(), "Ctrl+Tab, Ctrl+PgDn", "Next tab (Shift+Tab, PgUp: previous)");
+        repo_settings.shortcutRow(@src(), "Ctrl+,", "Settings");
+        repo_settings.shortcutRow(@src(), "Ctrl+Shift+T", "A terminal in this repository's folder");
+        repo_settings.shortcutRow(@src(), "F5", "Refresh");
     }
     settingsGroup(@src(), 0, "History");
     {
         var card = shortcutCard(@src(), 1);
         defer card.deinit();
-        app.shortcutRow(@src(), "↑ ↓", "Previous / next commit");
-        app.shortcutRow(@src(), "Ctrl+F", "Search the commits");
-        app.shortcutRow(@src(), "Ctrl+Z", "Undo the last commit, checkout, merge…");
-        app.shortcutRow(@src(), "Ctrl+Shift+Z, Ctrl+Y", "Redo what was just undone");
-        app.shortcutRow(@src(), "Esc", "Back to the graph, or cancel the bar");
+        repo_settings.shortcutRow(@src(), "↑ ↓", "Previous / next commit");
+        repo_settings.shortcutRow(@src(), "Ctrl+F", "Search the commits");
+        repo_settings.shortcutRow(@src(), "Ctrl+Z", "Undo the last commit, checkout, merge…");
+        repo_settings.shortcutRow(@src(), "Ctrl+Shift+Z, Ctrl+Y", "Redo what was just undone");
+        repo_settings.shortcutRow(@src(), "Esc", "Back to the graph, or cancel the bar");
     }
     settingsGroup(@src(), 0, "Changes");
     {
         var card = shortcutCard(@src(), 2);
         defer card.deinit();
-        app.shortcutRow(@src(), "Ctrl+Enter", "Commit what is staged");
-        app.shortcutRow(@src(), "Ctrl+Enter", "Continue a merge or rebase, its conflicts resolved");
+        repo_settings.shortcutRow(@src(), "Ctrl+Enter", "Commit what is staged");
+        repo_settings.shortcutRow(@src(), "Ctrl+Enter", "Continue a merge or rebase, its conflicts resolved");
     }
     settingsGroup(@src(), 0, "Conflicts");
     {
         var card = shortcutCard(@src(), 5);
         defer card.deinit();
-        app.shortcutRow(@src(), "↑ ↓, F2 F3", "Previous / next conflict in the file");
-        app.shortcutRow(@src(), "1, 2, 3", "Keep the left side, the right one, or both");
-        app.shortcutRow(@src(), "U, Ctrl+Z", "Take the last pick back");
-        app.shortcutRow(@src(), "Enter", "Stage a resolved file and open the next");
-        app.shortcutRow(@src(), "F4", "Next conflicted file");
+        repo_settings.shortcutRow(@src(), "↑ ↓, F2 F3", "Previous / next conflict in the file");
+        repo_settings.shortcutRow(@src(), "1, 2, 3", "Keep the left side, the right one, or both");
+        repo_settings.shortcutRow(@src(), "U, Ctrl+Z", "Take the last pick back");
+        repo_settings.shortcutRow(@src(), "Enter", "Stage a resolved file and open the next");
+        repo_settings.shortcutRow(@src(), "F4", "Next conflicted file");
     }
     settingsGroup(@src(), 0, "Pull requests");
     {
         var card = shortcutCard(@src(), 6);
         defer card.deinit();
-        app.shortcutRow(@src(), "↑ ↓, K J", "Previous / next request in the list");
-        app.shortcutRow(@src(), "1, 2, 3, 4", "Conversation, commits, files, checks");
-        app.shortcutRow(@src(), "Ctrl+F", "Search the requests");
-        app.shortcutRow(@src(), "Ctrl+Enter", "Send what is in the review box, as a comment");
+        repo_settings.shortcutRow(@src(), "↑ ↓, K J", "Previous / next request in the list");
+        repo_settings.shortcutRow(@src(), "1, 2, 3, 4", "Conversation, commits, files, checks");
+        repo_settings.shortcutRow(@src(), "Ctrl+F", "Search the requests");
+        repo_settings.shortcutRow(@src(), "Ctrl+Enter", "Send what is in the review box, as a comment");
     }
     settingsGroup(@src(), 0, "Panels");
     {
         var card = shortcutCard(@src(), 3);
         defer card.deinit();
-        app.shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
-        app.shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
-        app.shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
-        app.shortcutRow(@src(), "Ctrl+Plus, Ctrl+Minus", "Zoom in / out, from 70 to 200 %");
-        app.shortcutRow(@src(), "Ctrl+0", "Back to 100 %");
+        repo_settings.shortcutRow(@src(), "Ctrl+B", "Show or hide the branches panel");
+        repo_settings.shortcutRow(@src(), "Ctrl+J", "Show or hide the changes panel");
+        repo_settings.shortcutRow(@src(), "Ctrl+Shift+PgUp/PgDn", "Move this tab left / right");
+        repo_settings.shortcutRow(@src(), "Ctrl+Plus, Ctrl+Minus", "Zoom in / out, from 70 to 200 %");
+        repo_settings.shortcutRow(@src(), "Ctrl+0", "Back to 100 %");
     }
 
     if (dialog_views.escapePressed()) keys_open = false;
@@ -763,10 +764,10 @@ fn settingsNav() void {
         };
         // The repositories' group: an entry for each, its badge for an icon.
         if (page.id == REPO_PAGE) {
-            const known = app.knownRepos();
+            const known = repo_settings.knownRepos();
             if (known.len == 0) dvui.label(@src(), "None yet", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.sm, .y = style.space.sm } });
             for (known, 0..) |path, r| {
-                const on = settings_page == REPO_PAGE and std.mem.eql(u8, path, app.repo_settings_path.items);
+                const on = settings_page == REPO_PAGE and std.mem.eql(u8, path, repo_settings.repo_settings_path.items);
                 var rb: dvui.ButtonWidget = undefined;
                 rb.init(@src(), .{ .draw_focus = false }, .{
                     .id_extra = 1000 + r,
@@ -791,9 +792,9 @@ fn settingsNav() void {
                 if (rb.hovered()) dvui.tooltip(@src(), .{ .active_rect = rb.data().borderRectScale().r, .position = .horizontal, .delay = 400_000 }, "{s}", .{path}, .{ .font = style.small() });
                 if (rb.clicked()) {
                     settings_page = REPO_PAGE;
-                    app.repo_settings_path.clearRetainingCapacity();
-                    app.repo_settings_path.appendSlice(app.gpa, path) catch {};
-                    app.repo_prefs_loaded = false;
+                    repo_settings.repo_settings_path.clearRetainingCapacity();
+                    repo_settings.repo_settings_path.appendSlice(app.gpa, path) catch {};
+                    repo_settings.repo_prefs_loaded = false;
                 }
                 rb.deinit();
             }
@@ -827,7 +828,7 @@ fn settingsNav() void {
         if (bw.clicked()) {
             settings_page = page.id;
             signing_loaded = false;
-            app.repo_prefs_loaded = false;
+            repo_settings.repo_prefs_loaded = false;
         }
         bw.deinit();
     }
@@ -851,9 +852,9 @@ const SettingsCard = struct {
             var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5, .background = false, .margin = .{ .x = style.space.md } });
             defer col.deinit();
             // A repository's page goes by its name, its folder under it.
-            const one = id == REPO_PAGE and app.repo_settings_path.items.len > 0;
-            dvui.label(@src(), "{s}", .{if (one) git.repoName(app.repo_settings_path.items) else page.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
-            dvui.label(@src(), "{s}", .{if (one) app.repo_settings_path.items else page.hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 1 } });
+            const one = id == REPO_PAGE and repo_settings.repo_settings_path.items.len > 0;
+            dvui.label(@src(), "{s}", .{if (one) git.repoName(repo_settings.repo_settings_path.items) else page.title}, .{ .font = style.bodyBold(), .color_text = .{ .color = style.text() }, .padding = dvui.Rect.all(0) });
+            dvui.label(@src(), "{s}", .{if (one) repo_settings.repo_settings_path.items else page.hint}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 1 } });
         }
         return .{ .inner = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,

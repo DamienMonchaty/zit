@@ -8,6 +8,7 @@ const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const repo_settings = @import("repo_settings.zig");
 const app = @import("../main.zig");
 
 // === Split diff ===
@@ -683,7 +684,7 @@ fn diffHeader() void {
                 return;
             }
 
-            if (dialog_views.linkButton(@src(), "Open in editor", style.textMuted())) app.openInEditor(app.selected_path.items);
+            if (dialog_views.linkButton(@src(), "Open in editor", style.textMuted())) repo_settings.openInEditor(app.selected_path.items);
             if (dialog_views.linkButton(@src(), "Blame", style.textMuted())) app.selectBlame(app.selected_path.items);
 
             // The whole-file counterpart of the per-hunk buttons below, and the
