@@ -92,7 +92,7 @@ fn writePrivate(path: []const u8, bytes: []const u8) !void {
     std.Io.Dir.cwd().deleteFile(io, path) catch {};
     if (std.fs.path.dirname(path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch {};
     const Perm = std.Io.File.Permissions;
-    const private: Perm = if (@hasDecl(Perm, "toMode")) @enumFromInt(0o600) else .default_file;
+    const private: Perm = if (@hasDecl(Perm, "toMode")) @fromBackingInt(@intCast(0o600)) else .default_file;
     var file = try std.Io.Dir.cwd().createFile(io, path, .{ .permissions = private });
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);

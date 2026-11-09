@@ -1,6 +1,6 @@
 ---
 title: Install Zit
-description: Download Zit for Windows or Linux, or build it from source with Zig 0.16.
+description: Download Zit for Windows or Linux, or build it from source with Zig 0.17.
 ---
 
 ## Download
@@ -61,13 +61,13 @@ is one click away. Open tabs come back the next time Zit starts.
 
 ## Build from source
 
-Zit builds with [Zig 0.16](https://ziglang.org/download/). libgit2 and SDL are
+Zit builds with [Zig 0.17](https://ziglang.org/download/). libgit2 and SDL are
 built along with it, so nothing else needs installing.
 
 ```sh
 git clone https://github.com/DamienMonchaty/zit.git
 cd zit
-zig build                       # ReleaseSafe by default
+zig build                       # safe (ReleaseSafe) by default
 ./zig-out/bin/zit /path/to/a/repository
 ```
 

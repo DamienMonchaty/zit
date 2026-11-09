@@ -14,7 +14,7 @@
   <a href="https://github.com/DamienMonchaty/zit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/DamienMonchaty/zit/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Linux" src="https://img.shields.io/badge/Linux-x86__64-8b5cf6">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-10%2B-8b5cf6">
-  <img alt="Zig 0.16" src="https://img.shields.io/badge/Zig-0.16-f7a41d">
+  <img alt="Zig 0.17" src="https://img.shields.io/badge/Zig-0.17-f7a41d">
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-22c55e">
 </p>
 
@@ -131,7 +131,7 @@ Get the latest build from [**Releases**](https://github.com/DamienMonchaty/zit/r
 
 ### Build from source
 
-Zit builds from source with [Zig 0.16](https://ziglang.org/download/).
+Zit builds from source with [Zig 0.17](https://ziglang.org/download/).
 libgit2 and SDL are built along with it, so nothing else needs installing.
 
 ```sh
