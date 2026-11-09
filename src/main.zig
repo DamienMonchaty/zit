@@ -314,7 +314,12 @@ fn loadWorkspace() void {
     // Turned off, the tabs are still written — so turning it back on brings
     // them back — but not opened.
     for (if (remember_tabs) loaded.file.groups else &.{}) |saved| {
-        const name = gpa.dupe(u8, if (std.mem.eql(u8, saved.name, LEGACY_DEFAULT_GROUP)) DEFAULT_GROUP_NAME else saved.name) catch continue;
+        const name = gpa.dupe(u8, if (std.mem.eql(u8, saved.name, LEGACY_DEFAULT_GROUP))
+            DEFAULT_GROUP_NAME
+        else if (std.mem.eql(u8, saved.name, LEGACY_GROUP_MARK))
+            GROUP_MARK
+        else
+            saved.name) catch continue;
         var group: TabGroup = .{ .name = name, .tabs = .empty, .color = saved.color, .collapsed = saved.collapsed, .ws = saved.workspace };
 
         for (saved.repos) |path| {
@@ -820,9 +825,17 @@ fn groupColorName(i: u8) []const u8 {
     };
 }
 
-/// What a group made from the dialog is called inside: never shown, it only
-/// marks the tabs as grouped — tabs in no group have no name.
-const GROUP_MARK = "group";
+/// What a group left unnamed is called inside: never shown, it only marks
+/// the tabs as grouped — tabs in no group have no name. Not a name anyone
+/// types.
+const GROUP_MARK = "\x1f";
+/// What unnamed groups were called in the files of before group names.
+const LEGACY_GROUP_MARK = "group";
+
+/// A group's name as shown; empty for one left unnamed, which is its dot.
+fn groupLabel(group: TabGroup) []const u8 {
+    return if (std.mem.eql(u8, group.name, GROUP_MARK)) "" else group.name;
+}
 
 /// A new group named `name`, holding tab `t` of group `g`, right after it.
 fn groupTab(name: []const u8, g: usize, t: usize) void {
@@ -872,6 +885,24 @@ fn moveTabTo(from: usize, t: usize, to: usize, at: usize) void {
     groups.items[to].collapsed = false;
     dropEmptyGroups();
     saveWorkspace();
+}
+
+/// Tab `t` of group `g` to the end of its workspace's strip, in no group:
+/// into the ungrouped run there, or a new one.
+fn tabToEnd(g: usize, t: usize) void {
+    if (g >= groups.items.len) return;
+    const ws = groups.items[g].ws;
+    var last = g;
+    for (groups.items, 0..) |other, i| {
+        if (other.ws == ws) last = i;
+    }
+    if (groups.items[last].name.len > 0) {
+        const owned = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
+        groups.insert(gpa, last + 1, .{ .name = owned, .tabs = .empty, .ws = ws }) catch return gpa.free(owned);
+        if (active_group > last) active_group += 1;
+        last += 1;
+    }
+    moveTabTo(g, t, last, std.math.maxInt(usize));
 }
 
 /// Tab `t` of group `g` out of it, into the tabs in no group just after.
@@ -3305,6 +3336,8 @@ const TabAction = union(enum) {
     tab_out: [2]usize,
     /// Group, tab, then the group and slot it was dragged to.
     tab_at: [4]usize,
+    /// A tab let go past the last one: out of its group, at the end.
+    tab_end: [2]usize,
     /// A repository picked out of the menu of known ones, owned — the list it
     /// came from is about to be rebuilt underneath it.
     open: []u8,
@@ -4141,6 +4174,7 @@ fn runTabAction() void {
         .ungroup => |g| ungroup(g),
         .tab_to => |m| moveTab(m[0], m[1], m[2]),
         .tab_at => |m| moveTabTo(m[0], m[1], m[2], m[3]),
+        .tab_end => |m| tabToEnd(m[0], m[1]),
         .select_ws => |w| selectWorkspace(w),
         .close_ws => |w| deleteWorkspace(w),
         .workspace_named => applyWorkspaceDialog(),
@@ -11071,6 +11105,15 @@ fn tabList() void {
         r.x += used;
         r.w -= used;
         setWindowDrag(r);
+        // A tab let go there leaves its group for the end of the strip.
+        if (dvui.dragName(TAB_DRAG_NAME)) for (dvui.events()) |*e| {
+            if (e.evt != .mouse) continue;
+            const me = e.evt.mouse;
+            if (me.action != .release or !me.button.pointer() or !r.contains(me.p)) continue;
+            e.handle(@src(), scroll.data());
+            dvui.dragEnd(me.button);
+            requestTab(.{ .tab_end = tab_drag });
+        };
     }
     // The active tab's foot only where the strip shows the tab: scrolled
     // part out of sight, the rest of it is under the buttons after the tabs.
@@ -11503,18 +11546,20 @@ fn connectDialog() void {
 /// name — and how many tabs, folded. A click folds or unfolds it; a
 /// right-click offers the rest.
 fn groupChip(g: usize, group: TabGroup, hue: dvui.Color) dvui.Rect.Physical {
+    const lit = if (tab_drop_over) |o| o[0] == g and o[1] == std.math.maxInt(usize) else false;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
         .id_extra = g,
         .tag = frameTag("group", group.name),
         .gravity_y = 0.5,
         .background = true,
-        .color_fill = .{ .color = dvui.Color.transparent },
-        .color_fill_hover = .{ .color = style.rowHover() },
+        .color_fill = .{ .color = if (lit) style.accentDim() else dvui.Color.transparent },
+        .color_fill_hover = .{ .color = if (lit) style.accentDim() else style.rowHover() },
         .corners = style.radius.input,
         .margin = .{ .x = style.space.xs, .y = TAB_TOP },
         .padding = dvui.Rect.all(style.space.sm),
     });
+    groupDrop(bw.data(), g);
     bw.processEvents();
     bw.drawBackground();
     {
@@ -11528,6 +11573,11 @@ fn groupChip(g: usize, group: TabGroup, hue: dvui.Color) dvui.Rect.Physical {
             .gravity_y = 0.5,
         });
         dot.deinit();
+        const label = groupLabel(group);
+        if (label.len > 0) {
+            var fit_buf: [MAX_SHOWN_LINE]u8 = undefined;
+            dvui.label(@src(), "{s}", .{fitText(&fit_buf, label, style.smallBold(), 140)}, .{ .font = style.smallBold(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
+        }
         if (group.collapsed) {
             dvui.label(@src(), "{d}", .{group.tabs.items.len}, .{ .font = style.tinyBold(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
         }
@@ -11571,6 +11621,11 @@ fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
             }
             bw.deinit();
         }
+    }
+    if (menuIcon(@src(), dvui.entypo.pencil, "Rename the group…", false)) {
+        fw.close();
+        group_target = .{ g, 0 };
+        openWorkspaceDialog(.group_rename);
     }
     if (menuIcon(@src(), dvui.entypo.squared_minus, "Ungroup", false)) {
         fw.close();
@@ -11761,6 +11816,8 @@ const WorkspaceDialog = enum {
     rename,
     /// A new tab group, for the tab `group_target` names.
     group,
+    /// The group `group_target` names, its name and colour.
+    group_rename,
 };
 var ws_dialog: ?WorkspaceDialog = null;
 var ws_rect: dvui.Rect = .{};
@@ -11786,6 +11843,11 @@ fn openWorkspaceDialog(kind: WorkspaceDialog) void {
         ws_name.appendSlice(gpa, workspaces.items[active_ws].name) catch {};
         ws_color = workspaces.items[active_ws].color;
     }
+    if (kind == .group_rename and group_target[0] < groups.items.len) {
+        const group = groups.items[group_target[0]];
+        ws_name.appendSlice(gpa, groupLabel(group)) catch {};
+        ws_color = group.color;
+    }
 }
 
 fn workspaceDialog() void {
@@ -11795,26 +11857,29 @@ fn workspaceDialog() void {
     var fw = modalWindow(@src(), &ws_rect, &open, style.surface(), 400, dvui.Rect.all(0));
     defer fw.deinit();
     centerModal(fw.data(), win, null);
+    const is_group = kind == .group or kind == .group_rename;
     if (kind == .group)
         dialogHeader(@src(), dvui.entypo.plus, "New group", "The tab under a coloured dot, with the ones you add to it", &open)
+    else if (kind == .group_rename)
+        dialogHeader(@src(), dvui.entypo.pencil, "Rename the group", "Its name beside its dot; none leaves the dot alone", &open)
     else
         dialogHeader(@src(), dvui.entypo.layers, if (kind == .rename) "Rename the workspace" else "New workspace", "A set of groups and tabs, switched to in this window", &open);
 
     var body = dialogBody(@src(), null);
     var entered = false;
-    // A group has no name, only its colour.
-    if (kind != .group) _ = dialogField(@src(), 0, "Name", &ws_name, "e.g. Client work", true, &entered);
+    // A group's name is optional: without one, the group is its dot.
+    _ = dialogField(@src(), 0, if (is_group) "Name (optional)" else "Name", &ws_name, "e.g. Client work", true, &entered);
     dialogLabel(@src(), "Colour");
     if (colorSwatches(@src(), ws_color, .{ .y = style.space.xs, .h = style.space.lg })) |c| ws_color = @intCast(c);
 
-    const named = kind == .group or std.mem.trim(u8, ws_name.items, " \t").len > 0;
+    const named = is_group or std.mem.trim(u8, ws_name.items, " \t").len > 0;
     body.deinit();
     {
         var line = dialogFooter(@src());
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialogButton(@src(), "Cancel", false)) open = false;
-        if ((dialogButton(@src(), if (kind == .rename) "Rename" else "Create", named) or entered) and named) requestTab(.workspace_named);
+        if ((dialogButton(@src(), if (kind == .rename or kind == .group_rename) "Rename" else "Create", named) or entered) and named) requestTab(.workspace_named);
     }
     if (escapePressed() or !open) ws_dialog = null;
 }
@@ -11823,7 +11888,8 @@ fn workspaceDialog() void {
 fn applyWorkspaceDialog() void {
     const kind = ws_dialog orelse return;
     ws_dialog = null;
-    const name = if (kind == .group) GROUP_MARK else std.mem.trim(u8, ws_name.items, " \t");
+    const typed = std.mem.trim(u8, ws_name.items, " \t");
+    const name = if ((kind == .group or kind == .group_rename) and typed.len == 0) GROUP_MARK else typed;
     if (name.len == 0) return;
     switch (kind) {
         .new => if (newWorkspace(name, ws_color)) |w| selectWorkspace(w),
@@ -11842,6 +11908,13 @@ fn applyWorkspaceDialog() void {
                 if (other.path.ptr == tab) group.color = ws_color;
             };
             saveWorkspace();
+        },
+        .group_rename => {
+            const g = group_target[0];
+            // Only a group: tabs in no group are not renamed into one.
+            if (g >= groups.items.len or groups.items[g].name.len == 0) return;
+            groups.items[g].color = ws_color;
+            renameGroup(g, name);
         },
         .rename => if (active_ws < workspaces.items.len) {
             const owned = gpa.dupe(u8, name) catch return;
@@ -11883,7 +11956,11 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     }
     for (groups.items, 0..) |other, gi| {
         if (gi == g or other.name.len == 0 or other.ws != groups.items[g].ws) continue;
-        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to the {s} group", .{groupColorName(other.color)}) catch continue;
+        const label = groupLabel(other);
+        const caption = (if (label.len > 0)
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to {s}", .{label})
+        else
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to the {s} group", .{groupColorName(other.color)})) catch continue;
         if (menuIconAt(@src(), gi, dvui.entypo.layers, caption)) {
             fw.close();
             requestTab(.{ .tab_to = .{ g, t, gi } });
@@ -11932,6 +12009,53 @@ var tab_drag: [2]usize = .{ 0, 0 };
 /// The tab a drag was over last frame, lit this one.
 var tab_drop_over: ?[2]usize = null;
 var tab_drop_seen: ?[2]usize = null;
+
+/// The tab on the move, under the cursor as a branch is: its badge and
+/// name, a little below and right of the pointer, deaf to the mouse.
+fn tabGhost() void {
+    const g = tab_drag[0];
+    if (g >= groups.items.len or tab_drag[1] >= groups.items[g].tabs.items.len) return;
+    const name = git.repoName(groups.items[g].tabs.items[tab_drag[1]].path);
+    const scale = dvui.windowNaturalScale();
+    const at = dvui.currentWindow().mouse_pt;
+    const named = groups.items[g].name.len > 0;
+    // Sized by hand: a floating widget takes its rect as given.
+    const text = style.tab().textSize(name);
+    var fw: dvui.FloatingWidget = undefined;
+    fw.init(@src(), .{ .mouse_events = false }, .{
+        .rect = .{ .x = at.x / scale + 14, .y = at.y / scale + 10, .w = BADGE_W + style.space.sm + text.w + 2 * style.space.md + 4, .h = @max(text.h, 18) + 12 },
+        .background = true,
+        .color_fill = .{ .color = style.surface() },
+        .border = dvui.Rect.all(2),
+        .color_border = .{ .color = if (named) groupColor(groups.items[g].color) else style.accent() },
+        .corners = style.radius.tag,
+        .box_shadow = .{ .color = .black, .offset = .{ .x = 0, .y = 2 }, .fade = 8, .alpha = 0.25 },
+        .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
+    });
+    defer fw.deinit();
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
+    defer row.deinit();
+    tabBadge(name, true);
+    dvui.label(@src(), "{s}", .{name}, .{ .font = style.tab(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
+}
+
+/// A tab dragged onto a group's label goes to the end of that group —
+/// the way into a folded one.
+fn groupDrop(wd: *dvui.WidgetData, g: usize) void {
+    if (!dvui.dragName(TAB_DRAG_NAME)) return;
+    const rect = wd.borderRectScale().r;
+    for (dvui.events()) |*e| {
+        if (e.evt != .mouse) continue;
+        if (!dvui.eventMatch(e, .{ .id = wd.id, .r = rect, .drag_name = TAB_DRAG_NAME })) continue;
+        const me = e.evt.mouse;
+        if (me.action == .position) tab_drop_seen = .{ g, std.math.maxInt(usize) };
+        if (me.action == .release and me.button.pointer()) {
+            e.handle(@src(), wd);
+            dvui.dragEnd(me.button);
+            requestTab(.{ .tab_to = .{ tab_drag[0], tab_drag[1], g } });
+        }
+    }
+}
 
 /// A tab dragged onto this one moves to its place.
 fn tabDrop(wd: *dvui.WidgetData, slot: [2]usize) void {
@@ -12774,16 +12898,15 @@ const Tool = struct {
     busy: bool = false,
 };
 
-/// Icon over caption: the icon is what you aim at, the caption is what makes
-/// it unambiguous.
+/// The icon alone; the caption is its hint, on hover.
 fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []const u8, t: Tool) bool {
     const enabled = repo != null and t.usable and !t.busy;
-    const bare = t.icon_only or toolbar_compact;
+    const bare = true;
 
     var bw: dvui.ButtonWidget = undefined;
     bw.init(src, .{ .draw_focus = false }, .{
         .tag = t.tag orelse frameTag("toolbar", caption),
-        .min_size_content = .{ .w = if (bare) TOOL_H else TOOL_W, .h = TOOL_H },
+        .min_size_content = .{ .w = if (bare) TOOL_H else 0, .h = TOOL_H },
         .gravity_y = 0.5,
         .background = false,
         .margin = .{ .x = 2, .w = 2 },
@@ -12800,7 +12923,7 @@ fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []cons
     if (bw.hovered()) dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r, .position = .vertical, .delay = 400_000 }, "{s}", .{t.hint orelse caption}, .{ .font = style.small() });
 
     {
-        var cell = dvui.box(@src(), .{ .dir = .vertical }, .{
+        var cell = dvui.box(@src(), .{ .dir = if (bare) .vertical else .horizontal }, .{
             .expand = .both,
             .background = hovered or t.on,
             .color_fill = .{ .color = if (t.on) style.accentDim() else style.rowHover() },
@@ -12809,21 +12932,22 @@ fn toolButton(src: std.builtin.SourceLocation, caption: []const u8, icon: []cons
         });
         defer cell.deinit();
 
+        // Running, a spinner: in place of the icon, or before the caption.
         if (t.busy) dvui.spinner(@src(), .{
-            .min_size_content = .{ .w = 17, .h = 17 },
+            .min_size_content = .{ .w = if (bare) 17 else 13, .h = if (bare) 17 else 13 },
             .gravity_x = 0.5,
-            .gravity_y = if (bare) 0.5 else null,
-            .margin = .{ .h = 4 },
+            .gravity_y = 0.5,
+            .margin = .{ .w = if (bare) 0 else style.space.xs },
             .color_text = .{ .color = color },
-        }) else dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
+        }) else if (bare) dvui.icon(@src(), caption, icon, .{ .fill_color = .{ .color = color } }, .{
             .min_size_content = .{ .w = 17, .h = 17 },
             .gravity_x = 0.5,
-            .gravity_y = if (bare) 0.5 else null,
-            .margin = .{ .h = 4 },
+            .gravity_y = 0.5,
         });
 
         var line = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .gravity_x = 0.5,
+            .gravity_y = 0.5,
             .background = false,
             .padding = dvui.Rect.all(0),
         });
@@ -15063,6 +15187,7 @@ fn branchDragStart(wd: *dvui.WidgetData, ref: git.Ref) void {
 /// the graph's, a little below and right of the pointer. Deaf to the mouse,
 /// so the release lands on the row beneath it.
 fn dragGhost() void {
+    if (dvui.dragName(TAB_DRAG_NAME)) return tabGhost();
     if (!dvui.dragName(DRAG_NAME) or drag_source.items.len == 0) return;
     const scale = dvui.windowNaturalScale();
     const at = dvui.currentWindow().mouse_pt;
@@ -15623,7 +15748,6 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
     // right whenever the list overflows; the header has to keep the same, or
     // every column header sits that far right of its column.
     const bar_w: f32 = if (graph_scroll.virtual_size.h > graph_scroll.viewport.h + 0.5) dvui.ScrollBarWidget.defaults.min_sizeGet().w else 0;
-    const lane_w: f32 = if (with_lanes) graphLead() else 0;
 
     {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -15633,7 +15757,33 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
             .padding = .{ .x = style.space.lg, .w = style.space.lg + bar_w },
         });
         defer bar.deinit();
+        const rs = bar.data().contentRectScale();
+        // The widths dragged before any cell is drawn: drawn first, the
+        // header would show last frame's widths under this frame's rows.
+        const cols = columnsShown();
+        const edges = columnEdges(rs);
+        if (cols.author) columnHandle(@src(), 0, edges.author, rs, &col_author);
+        if (cols.sha) columnHandle(@src(), 1, edges.sha - style.space.xs * rs.s, rs, &col_sha);
+        columnHandle(@src(), 2, edges.date - style.space.xs * rs.s, rs, &col_time);
+        if (with_lanes) {
+            // Dragged from the auto width, it starts from what is shown.
+            if (graph_width == 0) graph_width_drag = graphColumn() else graph_width_drag = graph_width;
+            const before = graph_width_drag;
+            columnHandleDir(@src(), 3, rs.r.x + graphRuleX() * rs.s, rs, &graph_width_drag, 1, GRAPH_MIN_W, GRAPH_MAX_W);
+            if (graph_width_drag != before) {
+                graph_width = graph_width_drag;
+                saveWorkspace();
+            }
+            // The branch column's right edge: wider shows more of each name.
+            branch_width_drag = branchColumn();
+            columnHandleDir(@src(), 4, rs.r.x + branchColumn() * rs.s, rs, &branch_width_drag, 1, BRANCH_MIN_W, BRANCH_MAX_W);
+            if (branch_width_drag != branchColumn()) {
+                branch_width = branch_width_drag;
+                saveWorkspace();
+            }
+        }
 
+        const lane_w: f32 = if (with_lanes) graphLead() else 0;
         if (with_lanes) {
             // GitKraken's heads: the branch column's, then the graph's.
             {
@@ -15657,33 +15807,10 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
             cell.deinit();
         }
         headerCell(@src(), "MESSAGE", 0, true, false);
-        const cols = columnsShown();
         if (cols.author) authorHeader();
         if (cols.sha) headerCell(@src(), "COMMIT", col_sha, false, false);
         headerCell(@src(), "DATE", col_time, false, false);
-        const rs = bar.data().contentRectScale();
-        columnRules(rs, with_lanes);
-        const edges = columnEdges(rs);
-        if (cols.author) columnHandle(@src(), 0, edges.author, rs, &col_author);
-        if (cols.sha) columnHandle(@src(), 1, edges.sha - style.space.xs * rs.s, rs, &col_sha);
-        columnHandle(@src(), 2, edges.date - style.space.xs * rs.s, rs, &col_time);
-        if (with_lanes) {
-            // Dragged from the auto width, it starts from what is shown.
-            if (graph_width == 0) graph_width_drag = graphColumn() else graph_width_drag = graph_width;
-            const before = graph_width_drag;
-            columnHandleDir(@src(), 3, rs.r.x + graphRuleX() * rs.s, rs, &graph_width_drag, 1, GRAPH_MIN_W, GRAPH_MAX_W);
-            if (graph_width_drag != before) {
-                graph_width = graph_width_drag;
-                saveWorkspace();
-            }
-            // The branch column's right edge: wider shows more of each name.
-            branch_width_drag = branchColumn();
-            columnHandleDir(@src(), 4, rs.r.x + branchColumn() * rs.s, rs, &branch_width_drag, 1, BRANCH_MIN_W, BRANCH_MAX_W);
-            if (branch_width_drag != branchColumn()) {
-                branch_width = branch_width_drag;
-                saveWorkspace();
-            }
-        }
+        columnRules(bar.data().contentRectScale(), with_lanes);
     }
 }
 
@@ -16076,6 +16203,10 @@ fn fitText(buf: *[MAX_SHOWN_LINE]u8, text: []const u8, font: dvui.Font, width: f
     return buf[0 .. end + ellipsis.len];
 }
 
+/// The width a column's handle is dragged to, before its limits: one drag
+/// at a time.
+var column_drag_raw: f32 = 0;
+
 /// A grab handle on a column's left edge: dragged, it resizes the column to
 /// its right, which is anchored at the window's edge — so the message column
 /// is what gives or takes the room.
@@ -16087,6 +16218,9 @@ fn columnHandle(src: std.builtin.SourceLocation, id: usize, x: f32, rs: dvui.Rec
 /// grows the column as the handle moves left, +1 as it moves right.
 fn columnHandleDir(src: std.builtin.SourceLocation, id: usize, x: f32, rs: dvui.RectScale, width: *f32, dir: f32, min: f32, max: f32) void {
     const s = rs.s;
+    // Never wider than the message can give: past `MESSAGE_MIN` the list
+    // would hide a column — the author dragged over the message vanished.
+    const cap = @max(min, @min(max, width.* + messageSpare()));
     const hit: dvui.Rect.Physical = .{ .x = x - 4 * s, .y = rs.r.y, .w = 8 * s, .h = rs.r.h };
     var handle = dvui.box(src, .{}, .{ .id_extra = id, .rect = .{}, .background = false });
     defer handle.deinit();
@@ -16100,6 +16234,7 @@ fn columnHandleDir(src: std.builtin.SourceLocation, id: usize, x: f32, rs: dvui.
             .position => dvui.cursorSet(.arrow_w_e),
             .press => if (me.button.pointer()) {
                 e.handle(@src(), handle.data());
+                column_drag_raw = width.*;
                 dvui.captureMouse(handle.data(), e.num);
                 dvui.dragPreStart(me.button, me.p, .{ .cursor = .arrow_w_e });
             },
@@ -16111,7 +16246,10 @@ fn columnHandleDir(src: std.builtin.SourceLocation, id: usize, x: f32, rs: dvui.
             .motion => if (dvui.captured(hid)) {
                 e.handle(@src(), handle.data());
                 if (dvui.dragging(me, null)) |dp| {
-                    width.* = std.math.clamp(width.* + dir * dp.x / s, min, max);
+                    // Unclamped as dragged, so past a limit and back the
+                    // edge stays under the pointer.
+                    column_drag_raw += dir * dp.x / s;
+                    width.* = std.math.clamp(column_drag_raw, min, cap);
                     dvui.refresh(null, @src(), hid);
                 }
             },
@@ -16157,6 +16295,17 @@ fn columnEdges(rs: dvui.RectScale) struct { author: f32, sha: f32, date: f32 } {
 
 /// Least the message column keeps before the optional columns give way.
 const MESSAGE_MIN: f32 = 220;
+
+/// How much wider the other columns may get before the message is down to
+/// `MESSAGE_MIN`, with the columns shown now.
+fn messageSpare() f32 {
+    const w = graph_scroll.viewport.w;
+    if (w <= 0) return std.math.inf(f32);
+    const cols = columnsShown();
+    const room = w - 2 * style.space.lg - graphLead() - col_time -
+        (if (cols.sha) col_sha else 0) - (if (cols.author) col_author + 2 * style.space.md else 0);
+    return @max(0, room - MESSAGE_MIN);
+}
 
 /// The optional columns, given up when the message would otherwise get less
 /// than `MESSAGE_MIN` — the sha first, then the author. The date stays: it is
@@ -16854,6 +17003,11 @@ fn commitRow(
     });
 
     if (!lanes_drawn) _ = refTags(h, commit, row_index, 2, null);
+    // Its stashes, before the message: the stash commits are not walked,
+    // and the branch column would fold them into its "+N".
+    for (h.stashes, 0..) |entry, i| {
+        if (git.oidEql(entry.base, commit.id)) stashTag(entry, i, null);
+    }
     // GitComet's message border: the line's colour, before the message.
     if (hue) |c| {
         var bar = dvui.box(@src(), .{}, .{
@@ -17355,6 +17509,7 @@ fn refTags(h: git.History, commit: git.Commit, row_index: usize, most: usize, la
         if (!git.oidEql(ref.target, commit.id) or !tagShown(h, ref)) continue;
         count += 1;
     }
+
     const hidden = count -| most;
     const room: ?f32 = if (lane == null) null else (branchColumn() - style.space.sm - (if (hidden > 0) moreRefsWidth(hidden) else 0)) /
         @as(f32, @floatFromInt(@max(1, @min(count, most))));
@@ -17366,8 +17521,48 @@ fn refTags(h: git.History, commit: git.Commit, row_index: usize, most: usize, la
         refTag(@src(), ref, i, ref.kind == .local and sameOnRemote(h, ref), true, lane, room);
         drawn += 1;
     }
+
     if (hidden > 0) moreRefs(@src(), commit, hidden, row_index);
     return drawn > 0;
+}
+
+/// A stash's tag in the graph, on the commit it was made on: its message,
+/// outlined in purple. Its right-click is the sidebar row's menu.
+fn stashTag(entry: git.Stash, i: usize, room: ?f32) void {
+    const color = style.get().purple;
+    var pill = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = i,
+        .tag = frameTag("stash_tag", entry.message),
+        .background = true,
+        .color_fill = .{ .color = style.tint(color) },
+        .border = dvui.Rect.all(1),
+        .color_border = .{ .color = color },
+        .corners = style.radius.tag,
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.sm },
+        .padding = .{ .x = style.space.sm, .w = style.space.sm },
+    });
+    defer pill.deinit();
+    dvui.icon(@src(), "stash_kind", dvui.entypo.archive, .{ .fill_color = .{ .color = color }, .stroke_color = null }, .{
+        .min_size_content = .{ .w = 10, .h = 10 },
+        .gravity_y = 0.5,
+        .margin = .{ .w = style.space.xs },
+    });
+    const name_room = if (room) |r| r - (3 * style.space.sm + 10 + style.space.xs + 2) else 140;
+    var name_buf: [MAX_SHOWN_LINE]u8 = undefined;
+    // Past git's "On main: " or "WIP on main: ": the branch is the row's.
+    const said = if (std.mem.indexOf(u8, entry.message, ": ")) |at| entry.message[at + 2 ..] else entry.message;
+    dvui.label(@src(), "{s}", .{fitText(&name_buf, said, style.small(), @max(name_room, 12))}, .{
+        .font = style.small(),
+        .color_text = .{ .color = color },
+        .gravity_y = 0.5,
+        .padding = dvui.Rect.all(0),
+    });
+    const rect = pill.data().borderRectScale().r;
+    if (rect.contains(dvui.currentWindow().mouse_pt)) {
+        dvui.tooltip(@src(), .{ .active_rect = rect, .position = .vertical, .delay = 500_000 }, "Stash: {s}", .{entry.message}, .{ .font = style.small() });
+    }
+    stashMenu(entry, 1_000_000 + i, rect, null);
 }
 
 /// The "+N" after a commit's names, margin included.
@@ -17419,10 +17614,16 @@ fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool
         .padding = .{ .x = style.space.sm, .w = style.space.sm },
     });
     defer pill.deinit();
-    // What kind of ref, before its name: a branch's fork, a tag's label.
+    // Where the ref is, before its name, as GitKraken marks it: a laptop for
+    // a local branch, a cloud for a remote one, a label for a tag.
     // No stroke colour: with dvui's white defaults for both, an icon is
     // tinted the theme's text colour, and white on the head's pill turns dark.
-    dvui.icon(@src(), "ref_kind", if (ref.kind == .tag) dvui.entypo.tag else dvui.entypo.flow_branch, .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
+    const kind_icon = switch (ref.kind) {
+        .local => dvui.entypo.laptop,
+        .remote => dvui.entypo.cloud,
+        .tag => dvui.entypo.tag,
+    };
+    dvui.icon(@src(), "ref_kind", kind_icon, .{ .fill_color = .{ .color = ink }, .stroke_color = null }, .{
         .min_size_content = .{ .w = 10, .h = 10 },
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.xs },
@@ -17445,10 +17646,36 @@ fn refTag(src: std.builtin.SourceLocation, ref: git.Ref, id: usize, synced: bool
     });
     trackingMarks(ref.tracking, ink);
     requestBadge(ref, ink);
+    const pill_rect = pill.data().borderRectScale().r;
+    if (pill_rect.contains(dvui.currentWindow().mouse_pt)) refTooltip(ref, synced, pill_rect);
     if (draggable) {
         _ = branchDrop(pill.data(), ref);
         tagDrag(pill.data(), ref);
     }
+}
+
+/// What a ref's tag stands for, in words: local, on a remote, or both.
+fn refTooltip(ref: git.Ref, synced: bool, rect: dvui.Rect.Physical) void {
+    const arena = dvui.currentWindow().arena();
+    const text = switch (ref.kind) {
+        .tag => std.fmt.allocPrint(arena, "Tag {s}", .{ref.name}),
+        .remote => std.fmt.allocPrint(arena, "Remote branch {s}, on {s}", .{ ref.name, splitRemoteRef(ref.name).remote }),
+        .local => if (synced)
+            std.fmt.allocPrint(arena, "Local branch {s}, and {s} at the same commit", .{ ref.name, syncedRemote(ref) orelse "its remote" })
+        else
+            std.fmt.allocPrint(arena, "Local branch {s}, with no remote branch at this commit", .{ref.name}),
+    } catch return;
+    dvui.tooltip(@src(), .{ .active_rect = rect, .position = .vertical, .delay = 400_000 }, "{s}", .{text}, .{ .font = style.small() });
+}
+
+/// The remote branch of the same name as local `ref`, at its commit.
+fn syncedRemote(ref: git.Ref) ?[]const u8 {
+    const h = history orelse return null;
+    for (h.refs) |other| {
+        if (other.kind != .remote or !git.oidEql(other.target, ref.target)) continue;
+        if (std.mem.eql(u8, splitRemoteRef(other.name).branch, ref.name)) return other.name;
+    }
+    return null;
 }
 
 /// A branch's tag in the graph, dragged as its row in the sidebar is: onto
@@ -25090,6 +25317,27 @@ test "a group is made in a dialog, with its colour and no name" {
     try std.testing.expectEqualStrings(GROUP_MARK, groups.items[0].name);
     try std.testing.expectEqual(@as(u8, 4), groups.items[0].color);
     try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
+    try std.testing.expectEqualStrings("", groupLabel(groups.items[0]));
+
+    // Named, then the name taken off again: still a group, its dot alone.
+    group_target = .{ 0, 0 };
+    openWorkspaceDialog(.group_rename);
+    try std.testing.expectEqual(@as(u8, 4), ws_color);
+    ws_name.appendSlice(gpa, " Client ") catch unreachable;
+    applyWorkspaceDialog();
+    try std.testing.expectEqualStrings("Client", groupLabel(groups.items[0]));
+    openWorkspaceDialog(.group_rename);
+    try std.testing.expectEqualStrings("Client", ws_name.items);
+    ws_name.clearRetainingCapacity();
+    applyWorkspaceDialog();
+    try std.testing.expectEqualStrings(GROUP_MARK, groups.items[0].name);
+
+    // Let go past the last tab: out of the group, which goes, empty.
+    tabToEnd(0, 0);
+    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
+    try std.testing.expectEqual(@as(usize, 0), groups.items[0].name.len);
+    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), active_group);
 }
 
 test "a group keeps its own tabs, and the last group cannot be closed" {
@@ -29434,4 +29682,22 @@ fn docShot(name: []const u8, sfx: []const u8) !void {
     if (std.mem.eql(u8, name, "zz")) return;
     const p = try std.fmt.bufPrint(&path, "docs/screenshots/{s}-{s}.png", .{ name, sfx });
     try std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = p, .data = out.written() });
+}
+
+test "a column dragged as wide as it may go hides none" {
+    defer resetUiGlobals();
+    const saved = .{ graph_scroll.viewport.w, col_author, col_sha, col_time };
+    defer {
+        graph_scroll.viewport.w = saved[0];
+        col_author = saved[1];
+        col_sha = saved[2];
+        col_time = saved[3];
+    }
+    graph_scroll.viewport.w = 1200;
+    col_author += messageSpare();
+    try std.testing.expect(columnsShown().author and columnsShown().sha);
+    try std.testing.expectEqual(@as(f32, 0), messageSpare());
+    // A pixel past the cap: the sha goes, as it did under the drag.
+    col_author += 1;
+    try std.testing.expect(!columnsShown().sha);
 }
