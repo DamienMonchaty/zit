@@ -17,6 +17,7 @@ const syntax = @import("ui/syntax.zig");
 const watch = @import("git/watch.zig");
 const github = @import("github/github.zig");
 const refs_panel = @import("ui/refs_panel.zig");
+const tab_strip = @import("ui/tab_strip.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -172,8 +173,8 @@ fn stopWatching() void {
 fn pollInterval(focused: bool) i32 {
     if (!watching()) return if (focused) POLL_INTERVAL_US else POLL_INTERVAL_BACKGROUND_US;
     var us: i64 = WATCHED_POLL_US;
-    if (auto_fetch_minutes > 0 and repo != null) {
-        const due_s = last_auto_fetch_s + @as(i64, auto_fetch_minutes) * 60 - frame_now_s;
+    if (tab_strip.auto_fetch_minutes > 0 and repo != null) {
+        const due_s = tab_strip.last_auto_fetch_s + @as(i64, tab_strip.auto_fetch_minutes) * 60 - frame_now_s;
         us = @min(us, @max(1, due_s) * std.time.us_per_s);
     }
     return @intCast(us);
@@ -190,14 +191,14 @@ fn windowFocused() bool {
 
 /// The allocator and Io zig's runtime hands the process. Set in `appInit`,
 /// which runs before any frame.
-var gpa: std.mem.Allocator = undefined;
-var app_io: std.Io = undefined;
+pub var gpa: std.mem.Allocator = undefined;
+pub var app_io: std.Io = undefined;
 
 // === Repository state ===
 
-var repo: ?git.Repo = null;
+pub var repo: ?git.Repo = null;
 /// Absolute path of the working directory, owned.
-var repo_path: std.ArrayList(u8) = .empty;
+pub var repo_path: std.ArrayList(u8) = .empty;
 /// Repo directory name, a slice into `repo_path`.
 var repo_name: []const u8 = "";
 
@@ -207,787 +208,6 @@ pub var history: ?git.History = null;
 var lanes: ?graph.Layout = null;
 /// Staged and unstaged changes. Re-read on the poll timer.
 pub var work: ?git.Work = null;
-
-// === Tabs and groups ===
-
-/// One repository in the strip.
-///
-/// A tab is a bookmark, not a live session: switching to one opens it, which
-/// costs the revwalk that opening a repository has always cost. Keeping every
-/// tab's snapshots alive to avoid that would multiply both the memory and the
-/// invalidation rules, for something you can only look at one of at a time.
-const Tab = struct {
-    /// Working directory with its trailing slash, exactly as libgit2 resolved
-    /// it, owned. Two ways of naming the same repository land on one tab.
-    path: []u8,
-};
-
-/// A run of tabs in the strip. Named, it is a group — a coloured label
-/// before its tabs, foldable to that label. Unnamed, it is tabs in no group.
-const TabGroup = struct {
-    name: []u8,
-    tabs: std.ArrayList(Tab),
-    color: u8 = 0,
-    collapsed: bool = false,
-    /// The workspace it is in, by index.
-    ws: usize = 0,
-
-    fn deinit(self: *TabGroup) void {
-        for (self.tabs.items) |tab| gpa.free(tab.path);
-        self.tabs.deinit(gpa);
-        gpa.free(self.name);
-        self.* = undefined;
-    }
-};
-
-var groups: std.ArrayList(TabGroup) = .empty;
-var active_group: usize = 0;
-var active_tab: usize = 0;
-
-/// Workspaces, GitComet's: named, coloured sets of groups, the strip showing
-/// one at a time — switched in this window, keeping the view. The unnamed
-/// one is "Default".
-const Workspace = struct {
-    name: []u8,
-    color: u8 = 0,
-    /// The group and tab it was on.
-    group: usize = 0,
-    tab: usize = 0,
-};
-var workspaces: std.ArrayList(Workspace) = .empty;
-var active_ws: usize = 0;
-
-fn workspaceName(w: Workspace) []const u8 {
-    return if (w.name.len > 0) w.name else "Default";
-}
-
-/// Every workspace has a group, so a tab opened there has somewhere to go.
-fn ensureWorkspaceGroups() void {
-    for (workspaces.items, 0..) |_, w| {
-        const has = for (groups.items) |g| {
-            if (g.ws == w) break true;
-        } else false;
-        if (has) continue;
-        const name = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch continue;
-        groups.append(gpa, .{ .name = name, .tabs = .empty, .ws = w }) catch gpa.free(name);
-    }
-}
-
-fn freeWorkspaces() void {
-    for (workspaces.items) |w| gpa.free(w.name);
-    workspaces.clearRetainingCapacity();
-    active_ws = 0;
-}
-
-/// Where the workspace file goes. Empty when the environment names nowhere —
-/// and in tests, which is what keeps a test run from writing over the real one.
-var config_dir: std.ArrayList(u8) = .empty;
-
-/// Tabs in no group.
-const DEFAULT_GROUP_NAME = "";
-const LEGACY_DEFAULT_GROUP = "Main";
-
-fn activeGroup() ?*TabGroup {
-    if (active_group >= groups.items.len) return null;
-    return &groups.items[active_group];
-}
-
-/// Bring back the groups from the last run.
-///
-/// Always leaves at least one group, so nothing downstream has to carry a case
-/// for there being none.
-fn loadWorkspace() void {
-    var loaded = store.load(gpa, app_io, config_dir.items);
-    defer loaded.deinit();
-
-    remember_tabs = loaded.file.remember_tabs;
-    prune_on_fetch = loaded.file.prune;
-    integrations = loaded.file.integrations;
-    avatars.use_github.store(integrations, .release);
-    default_branch.clearRetainingCapacity();
-    default_branch.appendSlice(gpa, loaded.file.default_branch) catch {};
-    editor_cmd.clearRetainingCapacity();
-    editor_cmd.appendSlice(gpa, loaded.file.editor) catch {};
-    terminal_cmd.clearRetainingCapacity();
-    terminal_cmd.appendSlice(gpa, loaded.file.terminal) catch {};
-    show_avatars = loaded.file.avatars;
-
-    // Turned off, the tabs are still written — so turning it back on brings
-    // them back — but not opened.
-    for (if (remember_tabs) loaded.file.groups else &.{}) |saved| {
-        const name = gpa.dupe(u8, if (std.mem.eql(u8, saved.name, LEGACY_DEFAULT_GROUP))
-            DEFAULT_GROUP_NAME
-        else if (std.mem.eql(u8, saved.name, LEGACY_GROUP_MARK))
-            GROUP_MARK
-        else
-            saved.name) catch continue;
-        var group: TabGroup = .{ .name = name, .tabs = .empty, .color = saved.color, .collapsed = saved.collapsed, .ws = saved.workspace };
-
-        for (saved.repos) |path| {
-            const owned = gpa.dupe(u8, path) catch continue;
-            group.tabs.append(gpa, .{ .path = owned }) catch gpa.free(owned);
-        }
-
-        groups.append(gpa, group) catch {
-            group.deinit();
-            continue;
-        };
-    }
-
-    if (groups.items.len == 0) {
-        const name = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
-        groups.append(gpa, .{ .name = name, .tabs = .empty }) catch gpa.free(name);
-    }
-
-    active_group = @min(loaded.file.active_group, groups.items.len -| 1);
-    active_tab = loaded.file.active_repo;
-    // A file of before the workspaces: all its groups are in one.
-    for (loaded.file.workspaces) |saved| {
-        const name = gpa.dupe(u8, saved.name) catch continue;
-        workspaces.append(gpa, .{ .name = name, .color = saved.color, .group = saved.group, .tab = saved.tab }) catch gpa.free(name);
-    }
-    if (workspaces.items.len == 0) if (gpa.dupe(u8, "")) |name| {
-        workspaces.append(gpa, .{ .name = name }) catch gpa.free(name);
-    } else |_| {};
-    for (groups.items) |*g| if (g.ws >= workspaces.items.len) {
-        g.ws = 0;
-    };
-    ensureWorkspaceGroups();
-    active_ws = if (groups.items.len > 0) groups.items[active_group].ws else 0;
-    dark_theme = loaded.file.dark;
-    theme_index = if (dark_theme) 0 else 1;
-    for (style.themes, 0..) |t, i| if (std.mem.eql(u8, t.name, loaded.file.theme)) {
-        theme_index = i;
-        dark_theme = t.dark;
-    };
-    style.ui_scale = std.math.clamp(loaded.file.ui_text, 0.8, 1.3);
-    style.code_scale = std.math.clamp(loaded.file.code_text, 0.8, 1.5);
-    for (loaded.file.recent) |path| addRecent(path, false);
-    commit_prefs = loaded.file.commit;
-    auto_fetch_minutes = loaded.file.auto_fetch_minutes;
-    graph_show_remote = loaded.file.show_remote_branches;
-    graph_first_parent = loaded.file.first_parent;
-    graph_width = loaded.file.graph_width;
-    branch_width = loaded.file.branch_width;
-    zoom = zoomStep(loaded.file.zoom);
-    // The file's strings die with `loaded`.
-    commit_template.clearRetainingCapacity();
-    commit_template.appendSlice(gpa, commit_prefs.template) catch {};
-    commit_prefs.template = "";
-}
-
-/// The strip and the settings to be written out. Asked for on every change
-/// rather than only at exit — the run that loses your tabs is the one that
-/// did not exit cleanly — but written once things have been quiet for
-/// `SAVE_QUIET_NS`: a column dragged, a run of tabs moved, is one write, not
-/// one a frame. A write that fails is tried again later and later, up to a
-/// minute apart (`flushWorkspace`). Tests write at once; they read it back.
-fn saveWorkspace() void {
-    // Every change of tab comes through here: the workspace shown follows
-    // the tab, and remembers where it is for when it is switched back to.
-    if (activeGroup()) |g| active_ws = g.ws;
-    if (active_ws < workspaces.items.len) {
-        workspaces.items[active_ws].group = active_group;
-        workspaces.items[active_ws].tab = active_tab;
-    }
-    if (config_dir.items.len == 0) return;
-    // Outside a frame — at exit — there is no later: now.
-    if (@import("builtin").is_test or !in_frame) {
-        workspace_dirty = !writeWorkspace();
-        return;
-    }
-    workspace_due_ns = dvui.frameTimeNS() + SAVE_QUIET_NS;
-    workspace_dirty = true;
-}
-
-/// Between the start and the end of `appFrame`: where dvui's clock and
-/// timers can be asked.
-var in_frame = false;
-
-const SAVE_QUIET_NS: i128 = 400 * std.time.ns_per_ms;
-const SAVE_RETRY_MAX_NS: i128 = 60 * std.time.ns_per_s;
-var workspace_dirty = false;
-var workspace_due_ns: i128 = 0;
-/// After a failed write, how long until the next try; doubled each time.
-var workspace_backoff_ns: i128 = 0;
-
-/// Write the workspace if it is due, and ask for a frame when it will be,
-/// through `id`'s timer.
-fn flushWorkspace(id: dvui.Id) void {
-    if (!workspace_dirty) return;
-    const now = dvui.frameTimeNS();
-    if (now < workspace_due_ns) {
-        dvui.timer(id, @intCast(@max(1, @divTrunc(workspace_due_ns - now, std.time.ns_per_us))));
-        return;
-    }
-    if (writeWorkspace()) {
-        workspace_dirty = false;
-        workspace_backoff_ns = 0;
-        return;
-    }
-    workspace_backoff_ns = @min(SAVE_RETRY_MAX_NS, @max(SAVE_QUIET_NS, workspace_backoff_ns * 2));
-    workspace_due_ns = now + workspace_backoff_ns;
-    dvui.timer(id, @intCast(@divTrunc(workspace_backoff_ns, std.time.ns_per_us)));
-}
-
-fn writeWorkspace() bool {
-    var list: std.ArrayList(store.Group) = .empty;
-    defer {
-        for (list.items) |saved| gpa.free(saved.repos);
-        list.deinit(gpa);
-    }
-
-    for (groups.items) |group| {
-        const repos = gpa.alloc([]const u8, group.tabs.items.len) catch return false;
-        for (group.tabs.items, 0..) |tab, i| repos[i] = tab.path;
-
-        list.append(gpa, .{ .name = group.name, .repos = repos, .color = group.color, .collapsed = group.collapsed, .workspace = group.ws }) catch {
-            gpa.free(repos);
-            return false;
-        };
-    }
-
-    var ws_list: std.ArrayList(store.Workspace) = .empty;
-    defer ws_list.deinit(gpa);
-    for (workspaces.items) |w| ws_list.append(gpa, .{ .name = w.name, .color = w.color, .group = w.group, .tab = w.tab }) catch return false;
-
-    return store.save(gpa, app_io, config_dir.items, .{
-        .groups = list.items,
-        .workspaces = ws_list.items,
-        .active_workspace = active_ws,
-        .active_group = active_group,
-        .active_repo = active_tab,
-        .dark = dark_theme,
-        .theme = style.themes[theme_index].name,
-        .ui_text = style.ui_scale,
-        .code_text = style.code_scale,
-        .recent = recent.items,
-        .auto_fetch_minutes = auto_fetch_minutes,
-        .show_remote_branches = graph_show_remote,
-        .first_parent = graph_first_parent,
-        .graph_width = graph_width,
-        .branch_width = branch_width,
-        .remember_tabs = remember_tabs,
-        .default_branch = default_branch.items,
-        .editor = editor_cmd.items,
-        .terminal = terminal_cmd.items,
-        .avatars = show_avatars,
-        .prune = prune_on_fetch,
-        .integrations = integrations,
-        .zoom = zoom,
-        .commit = prefs: {
-            var prefs = commit_prefs;
-            prefs.template = commit_template.items;
-            break :prefs prefs;
-        },
-    });
-}
-
-/// The whole window's zoom, over the system's own scale, as a browser's:
-/// Ctrl+= and Ctrl+- a tenth at a time, Ctrl+0 back to 100 %. Remembered.
-var zoom: f32 = 1.0;
-const ZOOM_MIN: f32 = 0.7;
-const ZOOM_MAX: f32 = 2.0;
-
-/// `to` on the tenths and within the bounds: dvui's own steps add 0.1 to a
-/// float, which drifts, and a file edited by hand can say anything.
-fn zoomStep(to: f32) f32 {
-    if (!std.math.isFinite(to)) return 1.0;
-    return std.math.clamp(@round(to * 10) / 10, ZOOM_MIN, ZOOM_MAX);
-}
-
-/// Within a frame: the next one is laid out at the new size.
-fn setZoom(to: f32) void {
-    const z = zoomStep(to);
-    dvui.currentWindow().content_scale = z;
-    dvui.refresh(null, @src(), null);
-    if (z == zoom) return;
-    zoom = z;
-    saveWorkspace();
-}
-
-/// The 6 key where it types a minus — AZERTY: SDL names the number row by
-/// its digits on a French keyboard, so its "-" comes as 6. Asked of the
-/// layout itself, so elsewhere Ctrl+6 stays nothing.
-fn minusOnSix(ke: dvui.Event.Key) bool {
-    if (ke.code != .six) return false;
-    if (@import("builtin").is_test) return false;
-    const c = dvui.backend.c;
-    return c.SDL_GetKeyFromScancode(c.SDL_SCANCODE_6, c.SDL_KMOD_NONE, false) == c.SDLK_MINUS;
-}
-
-/// A "+" with a key of its own — QWERTZ: SDL calls it SDLK_PLUS, which dvui
-/// has no name for, so it arrives unnamed. Whether the layout's "+" key is
-/// the one down, asked of SDL.
-fn plusKey(ke: dvui.Event.Key) bool {
-    if (ke.code != .unknown) return false;
-    if (@import("builtin").is_test) return false;
-    const c = dvui.backend.c;
-    const sc = c.SDL_GetScancodeFromKey(c.SDLK_PLUS, null);
-    if (sc == c.SDL_SCANCODE_UNKNOWN) return false;
-    const keys = c.SDL_GetKeyboardState(null);
-    return keys[@intCast(sc)];
-}
-
-/// What a key asks of the zoom: the step, or back to 100 %. The keypad's as
-/// well as the main row's; Cmd on a Mac, through dvui's own binds.
-fn zoomKey(ke: dvui.Event.Key) ?f32 {
-    const mod = ke.mod.control() and !ke.mod.alt();
-    if ((mod and (ke.code == .equal or ke.code == .kp_add or plusKey(ke))) or ke.matchBind("zoom_in")) return zoom + 0.1;
-    if ((mod and (ke.code == .minus or ke.code == .kp_subtract or minusOnSix(ke))) or ke.matchBind("zoom_out")) return zoom - 0.1;
-    if (mod and !ke.mod.shift() and (ke.code == .zero or ke.code == .kp_0)) return 1.0;
-    return null;
-}
-
-/// The General settings: what is saved with the workspace beside the tabs.
-var remember_tabs: bool = true;
-var prune_on_fetch: bool = true;
-/// GitHub: off, no pull requests or issues in the sidebar or the strip, no
-/// checks, no account — and no request goes to GitHub at all.
-var integrations: bool = true;
-
-/// The integrations turned on or off: what hangs off them is asked for
-/// again, or let go.
-fn setIntegrations(on: bool) void {
-    integrations = on;
-    avatars.use_github.store(on, .release);
-    me_loaded = false;
-    if (!on and active_view == .pulls) closePulls();
-    avatars.setGithubRepo(if (on) githubRemote() else null);
-    refreshRequests();
-    saveWorkspace();
-}
-var default_branch: std.ArrayList(u8) = .empty;
-/// The command a file opens with; empty for the system's own choice.
-var editor_cmd: std.ArrayList(u8) = .empty;
-/// The terminal Terminal opens, one of `known_terminals`; empty for the
-/// first found.
-var terminal_cmd: std.ArrayList(u8) = .empty;
-/// Authors' pictures on the graph's commits; off, a dot for each.
-var show_avatars: bool = true;
-
-/// The arguments of a fetch of every remote, pruning or not as set; `quiet`
-/// for the timer's own. Where git's own config says whether to prune — for
-/// this repository or everywhere — git decides.
-fn fetchAllArgs(quiet: bool) []const []const u8 {
-    if (git_fetch_prune_set) return if (quiet) &.{ "fetch", "--all", "--quiet" } else &.{ "fetch", "--all" };
-    return if (prune_on_fetch)
-        (if (quiet) &.{ "fetch", "--all", "--prune", "--quiet" } else &.{ "fetch", "--all", "--prune" })
-    else
-        (if (quiet) &.{ "fetch", "--all", "--quiet" } else &.{ "fetch", "--all" });
-}
-
-/// Repositories whose tab was closed, newest first, owned. What the start
-/// page lists besides the open tabs.
-var recent: std.ArrayList([]const u8) = .empty;
-/// Past this the oldest drop off: a list nobody scrolls is not a memory.
-const MAX_RECENT = 30;
-
-/// Put `path` at the front of the recent list, once. `front` false appends,
-/// for loading the saved list in its own order.
-fn addRecent(path: []const u8, front: bool) void {
-    removeRecent(path);
-    const owned = gpa.dupe(u8, path) catch return;
-    if (front) {
-        recent.insert(gpa, 0, owned) catch return gpa.free(owned);
-    } else {
-        recent.append(gpa, owned) catch return gpa.free(owned);
-    }
-    while (recent.items.len > MAX_RECENT) gpa.free(recent.pop().?);
-}
-
-fn removeRecent(path: []const u8) void {
-    for (recent.items, 0..) |p, i| {
-        if (std.mem.eql(u8, p, path)) {
-            gpa.free(recent.orderedRemove(i));
-            return;
-        }
-    }
-}
-
-fn clearRecent() void {
-    for (recent.items) |p| gpa.free(p);
-    recent.clearRetainingCapacity();
-}
-
-/// Forget a repository entirely: off the recent list and out of every tab.
-/// Nothing on disk is touched.
-fn forgetRepo(path: []const u8) void {
-    removeRecent(path);
-    // The other groups first, and only then the active one: closing its last
-    // tab drops the group from under this loop and opens the first tab left
-    // anywhere — which must not be this repository again.
-    for (groups.items, 0..) |*group, gi| {
-        if (gi == active_group) continue;
-        var i: usize = group.tabs.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (std.mem.eql(u8, group.tabs.items[i].path, path)) gpa.free(group.tabs.orderedRemove(i).path);
-        }
-    }
-    // A group it was the only tab of goes too, as when its last tab closes.
-    dropEmptyGroups();
-    // Looked up afresh each time: a close can move the active group.
-    while (activeGroup()) |group| {
-        const i = for (group.tabs.items, 0..) |tab, i| {
-            if (std.mem.eql(u8, tab.path, path)) break i;
-        } else break;
-        closeTab(i);
-    }
-    removeRecent(path);
-    saveWorkspace();
-}
-
-/// Open a repository and make it the active tab.
-fn openAndRemember(path: []const u8) void {
-    // Nothing on the strip has moved yet, so a folder that is no repository
-    // leaves the open one alone rather than closing it to show the error.
-    if (repo != null) {
-        var probe = git.Repo.open(path) catch return setCommandError("Not a git repository.");
-        defer probe.deinit();
-        if (probe.workdir() == null) return setCommandError("Bare repositories have no working tree to show.");
-    }
-    openRepo(path);
-    rememberActive();
-    // A tab again, so no longer only a memory.
-    if (repo != null) {
-        removeRecent(repo_path.items);
-        saveWorkspace();
-    }
-}
-
-/// Make whatever is open the active tab, adding it to the group if it is not
-/// in any group already.
-fn rememberActive() void {
-    if (repo == null) return;
-
-    const group = activeGroup() orelse return;
-
-    // Matched on the working directory libgit2 resolved, not on what was typed,
-    // so opening the same repository from a subdirectory reuses its tab — in
-    // whichever group it is.
-    for (groups.items, 0..) |other, g| {
-        for (other.tabs.items, 0..) |tab, i| {
-            if (std.mem.eql(u8, tab.path, repo_path.items)) {
-                active_group = g;
-                active_tab = i;
-                saveWorkspace();
-                return;
-            }
-        }
-    }
-
-    const owned = gpa.dupe(u8, repo_path.items) catch return;
-    group.tabs.append(gpa, .{ .path = owned }) catch {
-        gpa.free(owned);
-        return;
-    };
-    active_tab = group.tabs.items.len - 1;
-    saveWorkspace();
-}
-
-/// Reopen whatever was in front last time.
-fn restoreActiveTab() void {
-    const group = activeGroup() orelse return;
-    if (group.tabs.items.len == 0) return;
-
-    if (active_tab >= group.tabs.items.len) active_tab = 0;
-
-    // A tab whose directory has gone stays in the list: an unmounted drive is
-    // likelier than a deleted repository, and dropping it would lose the
-    // bookmark for good. `openRepo` says so in the graph pane.
-    openRepo(group.tabs.items[active_tab].path);
-}
-
-fn selectTab(index: usize) void {
-    selectTabIn(active_group, index);
-}
-
-fn selectTabIn(g: usize, index: usize) void {
-    if (g >= groups.items.len or index >= groups.items[g].tabs.items.len) return;
-    active_group = g;
-    active_tab = index;
-    openRepo(groups.items[g].tabs.items[index].path);
-    saveWorkspace();
-}
-
-/// A tab of any group closed; for the active group, `closeTab`'s way.
-fn closeTabIn(g: usize, index: usize) void {
-    if (g == active_group) return closeTab(index);
-    if (g >= groups.items.len or index >= groups.items[g].tabs.items.len) return;
-    const removed = groups.items[g].tabs.orderedRemove(index);
-    addRecent(removed.path, true);
-    gpa.free(removed.path);
-    dropEmptyGroups();
-    saveWorkspace();
-}
-
-/// A group with no tabs left goes, as in a browser — unless it is all
-/// there is, since everything downstream assumes a group exists.
-fn dropEmptyGroups() void {
-    var g: usize = groups.items.len;
-    while (g > 0 and groups.items.len > 1) {
-        g -= 1;
-        if (groups.items[g].tabs.items.len > 0) continue;
-        // A workspace keeps at least one group.
-        const others = for (groups.items, 0..) |other, o| {
-            if (o != g and other.ws == groups.items[g].ws) break true;
-        } else false;
-        if (!others) continue;
-        var removed = groups.orderedRemove(g);
-        removed.deinit();
-        if (active_group > g) active_group -= 1 else if (active_group == g) {
-            active_group = @min(g, groups.items.len - 1);
-            active_tab = 0;
-        }
-    }
-}
-
-/// After the active group lost its last tab: the first tab anywhere, or
-/// nothing open.
-fn selectAnyTab() void {
-    for (groups.items, 0..) |group, g| {
-        if (group.ws == active_ws and group.tabs.items.len > 0) return selectTabIn(g, 0);
-    }
-    // The workspace stays, empty, on its start page.
-    for (groups.items, 0..) |group, g| if (group.ws == active_ws) {
-        active_group = g;
-        active_tab = 0;
-        break;
-    };
-    closeRepo();
-    new_tab_open = true;
-}
-
-fn closeTab(index: usize) void {
-    const group = activeGroup() orelse return;
-    if (index >= group.tabs.items.len) return;
-
-    const was_active = index == active_tab;
-    const removed = group.tabs.orderedRemove(index);
-    // Closed, not forgotten: it moves to the start page's recent list.
-    addRecent(removed.path, true);
-    gpa.free(removed.path);
-
-    // Closing a tab to the left of the one you are looking at must not change
-    // which one that is.
-    if (!was_active and index < active_tab) active_tab -= 1;
-    if (active_tab >= group.tabs.items.len) active_tab = group.tabs.items.len -| 1;
-
-    if (group.tabs.items.len == 0) {
-        closeRepo();
-        dropEmptyGroups();
-        selectAnyTab();
-    } else if (was_active) {
-        openRepo(group.tabs.items[active_tab].path);
-    }
-
-    saveWorkspace();
-}
-
-fn selectGroup(index: usize) void {
-    if (index >= groups.items.len) return;
-    if (groups.items[index].tabs.items.len == 0) {
-        active_group = index;
-        active_tab = 0;
-        closeRepo();
-        return saveWorkspace();
-    }
-    selectTabIn(index, 0);
-}
-
-/// The palette's colours, a group each; the index is what is saved.
-const GROUP_COLORS = 7;
-
-fn groupColor(i: u8) dvui.Color {
-    const p = style.get();
-    return switch (i % GROUP_COLORS) {
-        0 => p.blue,
-        1 => p.purple,
-        2 => p.green,
-        3 => p.orange,
-        4 => p.red,
-        5 => p.yellow,
-        else => style.textMuted(),
-    };
-}
-
-/// What each of the palette's colours is called, as a group is referred to
-/// in a menu: groups have no name shown, only their colour.
-fn groupColorName(i: u8) []const u8 {
-    return switch (i % GROUP_COLORS) {
-        0 => "blue",
-        1 => "purple",
-        2 => "green",
-        3 => "orange",
-        4 => "red",
-        5 => "yellow",
-        else => "grey",
-    };
-}
-
-/// What a group left unnamed is called inside: never shown, it only marks
-/// the tabs as grouped — tabs in no group have no name. Not a name anyone
-/// types.
-const GROUP_MARK = "\x1f";
-/// What unnamed groups were called in the files of before group names.
-const LEGACY_GROUP_MARK = "group";
-
-/// A group's name as shown; empty for one left unnamed, which is its dot.
-fn groupLabel(group: TabGroup) []const u8 {
-    return if (std.mem.eql(u8, group.name, GROUP_MARK)) "" else group.name;
-}
-
-/// A new group named `name`, holding tab `t` of group `g`, right after it.
-fn groupTab(name: []const u8, g: usize, t: usize) void {
-    if (g >= groups.items.len or t >= groups.items[g].tabs.items.len) return;
-    const owned = gpa.dupe(u8, name) catch return;
-    // A colour the strip does not show yet, where there is one.
-    var color: u8 = 0;
-    while (color < GROUP_COLORS - 1) : (color += 1) {
-        const used = for (groups.items) |other| {
-            if (other.name.len > 0 and other.color == color) break true;
-        } else false;
-        if (!used) break;
-    }
-    groups.insert(gpa, g + 1, .{ .name = owned, .tabs = .empty, .color = color, .ws = groups.items[g].ws }) catch return gpa.free(owned);
-    if (active_group > g) active_group += 1;
-    moveTab(g, t, g + 1);
-}
-
-/// Tab `t` of group `from`, to the end of group `to`. The open repository
-/// stays open; only where its tab sits changes.
-fn moveTab(from: usize, t: usize, to: usize) void {
-    if (from == to) return;
-    moveTabTo(from, t, to, std.math.maxInt(usize));
-}
-
-/// Tab `t` of group `from` into slot `at` of group `to` — where a tab is
-/// dropped, it takes the place of the one it was dropped on, as in a browser.
-/// The tab you are looking at stays the one you are looking at.
-fn moveTabTo(from: usize, t: usize, to: usize, at: usize) void {
-    if (from >= groups.items.len or to >= groups.items.len) return;
-    if (t >= groups.items[from].tabs.items.len) return;
-    if (from == to and t == at) return;
-    // Found again by its path afterwards, whichever indices shifted.
-    const shown: ?[*]u8 = if (activeGroup()) |g| (if (active_tab < g.tabs.items.len) g.tabs.items[active_tab].path.ptr else null) else null;
-
-    const tab = groups.items[from].tabs.orderedRemove(t);
-    const list = &groups.items[to].tabs;
-    list.insert(gpa, @min(at, list.items.len), tab) catch {
-        gpa.free(tab.path);
-        return;
-    };
-    if (shown) |p| for (groups.items, 0..) |group, g| for (group.tabs.items, 0..) |other, i| {
-        if (other.path.ptr != p) continue;
-        active_group = g;
-        active_tab = i;
-    };
-    groups.items[to].collapsed = false;
-    dropEmptyGroups();
-    saveWorkspace();
-}
-
-/// Tab `t` of group `g` to the end of its workspace's strip, in no group:
-/// into the ungrouped run there, or a new one.
-fn tabToEnd(g: usize, t: usize) void {
-    if (g >= groups.items.len) return;
-    const ws = groups.items[g].ws;
-    var last = g;
-    for (groups.items, 0..) |other, i| {
-        if (other.ws == ws) last = i;
-    }
-    if (groups.items[last].name.len > 0) {
-        const owned = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
-        groups.insert(gpa, last + 1, .{ .name = owned, .tabs = .empty, .ws = ws }) catch return gpa.free(owned);
-        if (active_group > last) active_group += 1;
-        last += 1;
-    }
-    moveTabTo(g, t, last, std.math.maxInt(usize));
-}
-
-/// Tab `t` of group `g` out of it, into the tabs in no group just after.
-fn ungroupTab(g: usize, t: usize) void {
-    if (g >= groups.items.len or groups.items[g].name.len == 0) return;
-    const next = g + 1;
-    if (next >= groups.items.len or groups.items[next].name.len > 0) {
-        const owned = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
-        groups.insert(gpa, next, .{ .name = owned, .tabs = .empty, .ws = groups.items[g].ws }) catch return gpa.free(owned);
-        if (active_group > g) active_group += 1;
-    }
-    moveTab(g, t, next);
-}
-
-/// The label goes, the tabs stay where they are.
-fn ungroup(g: usize) void {
-    if (g >= groups.items.len) return;
-    const name = gpa.dupe(u8, DEFAULT_GROUP_NAME) catch return;
-    gpa.free(groups.items[g].name);
-    groups.items[g].name = name;
-    groups.items[g].collapsed = false;
-    saveWorkspace();
-}
-
-fn renameGroup(g: usize, name: []const u8) void {
-    if (g >= groups.items.len) return;
-    const owned = gpa.dupe(u8, name) catch return;
-    gpa.free(groups.items[g].name);
-    groups.items[g].name = owned;
-    saveWorkspace();
-}
-
-/// Every tab of the group closed, and the group with them.
-fn closeGroup(index: usize) void {
-    if (index >= groups.items.len) return;
-    const was_active = index == active_group;
-    var removed = groups.orderedRemove(index);
-    for (removed.tabs.items) |tab| addRecent(tab.path, true);
-    removed.deinit();
-    // Its workspace keeps a group, empty if need be.
-    ensureWorkspaceGroups();
-    if (groups.items.len == 0) {
-        if (gpa.dupe(u8, DEFAULT_GROUP_NAME)) |name| {
-            groups.append(gpa, .{ .name = name, .tabs = .empty }) catch gpa.free(name);
-        } else |_| {}
-    }
-    if (active_group > index) active_group -= 1;
-    if (was_active) {
-        active_group = 0;
-        active_tab = 0;
-        selectAnyTab();
-    }
-    saveWorkspace();
-}
-
-/// The networked command running on another thread, if any.
-///
-/// One at a time: two of these at once on the same repository is not something
-/// to encourage, and the second would race the first for the index lock.
-var job: ?*run.Job = null;
-/// What it is, for the toolbar. Always a literal, so there is nothing to free.
-var job_label: []const u8 = "";
-/// The job running is the background fetch: a failure there — no network —
-/// is not worth a red bar.
-var job_quiet: bool = false;
-
-/// Fetch every remote this often, from the settings; 0 never.
-var auto_fetch_minutes: u32 = 10;
-/// When the repository last fetched on its own, in seconds. Set back on
-/// opening, so the first one comes shortly after.
-var last_auto_fetch_s: i64 = 0;
-const AUTO_FETCH_FIRST_S = 20;
-
-/// True when the repository tracks anything through LFS, which is what puts the
-/// LFS button in the toolbar. There is nothing to offer a repository that does
-/// not use it.
-var uses_lfs: bool = false;
-
-/// Why there is no repository open, shown where the graph would be.
-var open_error: ?[]const u8 = null;
-/// stderr from the last failing git command, owned. Shown until the next one
-/// succeeds — a failed checkout that vanishes on the next frame is worse than
-/// no message at all.
-var command_error: ?[]u8 = null;
 
 // === UI state ===
 
@@ -1008,7 +228,7 @@ var no_split: f32 = 0;
 var all_split: f32 = 1;
 /// The new-tab page — GitKraken's "open, clone or start a repository" —
 /// over whatever is open, until a repository is picked or it is closed.
-var new_tab_open: bool = false;
+pub var new_tab_open: bool = false;
 /// The pull requests: a tab of their own, always at the strip's right end
 /// on a host that has them, showing when `active_view` is `.pulls`.
 fn openPulls() void {
@@ -1016,7 +236,7 @@ fn openPulls() void {
     active_view = .pulls;
 }
 
-fn closePulls() void {
+pub fn closePulls() void {
     active_view = .graph;
 }
 /// The two sides of the conflicts over the output they make.
@@ -1030,8 +250,8 @@ var commit_description: std.ArrayList(u8) = .empty;
 var amend: bool = false;
 /// The commit settings. `template` is unused here: the text lives in
 /// `commit_template`, which the settings window edits in place.
-var commit_prefs: store.CommitPrefs = .{};
-var commit_template: std.ArrayList(u8) = .empty;
+pub var commit_prefs: store.CommitPrefs = .{};
+pub var commit_template: std.ArrayList(u8) = .empty;
 /// The conventional-commit type picked for this message, an index into
 /// `COMMIT_TYPES`; null for none.
 var commit_type: ?usize = null;
@@ -1058,9 +278,9 @@ const ChangesView = enum { path, tree };
 var changes_view: ChangesView = .path;
 
 /// Which compiled-in theme is on.
-var dark_theme: bool = true;
+pub var dark_theme: bool = true;
 /// The theme on, by its place in `style.themes`.
-var theme_index: usize = 0;
+pub var theme_index: usize = 0;
 
 /// A destructive action waiting for a yes.
 ///
@@ -1960,7 +1180,7 @@ fn appInit(win: *dvui.Window) !void {
     var config_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (store.appDir(init.environ_map.*, &config_buf, .config, "")) |dir| {
         migrateFromZync(dir, "zit");
-        config_dir.appendSlice(gpa, dir) catch {};
+        tab_strip.config_dir.appendSlice(gpa, dir) catch {};
     }
 
     // Every program Zit starts reads its environment from here: the user's
@@ -1985,14 +1205,14 @@ fn appInit(win: *dvui.Window) !void {
     }
     initStatusCache(init.environ_map.*);
     pr.init(gpa, app_io);
-    github.init(gpa, app_io, config_dir.items);
+    github.init(gpa, app_io, tab_strip.config_dir.items);
 
     try git.init();
 
     // Before the theme, which is one of the things it remembers.
-    loadWorkspace();
+    tab_strip.loadWorkspace();
     applyTheme();
-    win.content_scale = zoom;
+    win.content_scale = tab_strip.zoom;
     try openRepoFromArgs();
 
     // A machine git has never been told who is using it: every commit would
@@ -2035,15 +1255,15 @@ fn appDeinit(win: *dvui.Window) void {
     // Before anything else is freed: the worker is writing into memory this
     // process is about to give back. A command that never returns would hang
     // the exit, which still beats the alternative.
-    if (job) |running| {
+    if (tab_strip.job) |running| {
         var outcome = running.finish(gpa, app_io);
         if (outcome) |*o| o.deinit(gpa);
-        job = null;
+        tab_strip.job = null;
     }
 
     // While the strip is still standing: the last chance to record it, and
     // the write of a change from the last 400 ms, which was still waiting.
-    saveWorkspace();
+    tab_strip.saveWorkspace();
 
     if (history_load) |load| load.free();
     history_load = null;
@@ -2111,9 +1331,9 @@ fn appDeinit(win: *dvui.Window) void {
     clearNames(&author_only);
     author_only.deinit(gpa);
     sidebar_filter.deinit(gpa);
-    default_branch.deinit(gpa);
-    editor_cmd.deinit(gpa);
-    terminal_cmd.deinit(gpa);
+    tab_strip.default_branch.deinit(gpa);
+    tab_strip.editor_cmd.deinit(gpa);
+    tab_strip.terminal_cmd.deinit(gpa);
     clearImagePair();
     signing_key.deinit(gpa);
     if (signing_job) |j| j.deinit(app_io);
@@ -2125,8 +1345,8 @@ fn appDeinit(win: *dvui.Window) void {
     if (repo_config_job) |j| j.deinit(app_io);
     git_template_path.deinit(gpa);
     commit_sent.deinit(gpa);
-    clearRecent();
-    recent.deinit(gpa);
+    tab_strip.clearRecent();
+    tab_strip.recent.deinit(gpa);
     clearForget();
     identity_name.deinit(gpa);
     identity_email.deinit(gpa);
@@ -2148,12 +1368,12 @@ fn appDeinit(win: *dvui.Window) void {
     if (action_input) |patch| gpa.free(patch);
     action_input = null;
 
-    for (groups.items) |*group| group.deinit();
-    groups.deinit(gpa);
-    freeWorkspaces();
-    workspaces.deinit(gpa);
+    for (tab_strip.groups.items) |*group| group.deinit();
+    tab_strip.groups.deinit(gpa);
+    tab_strip.freeWorkspaces();
+    tab_strip.workspaces.deinit(gpa);
     ws_name.deinit(gpa);
-    config_dir.deinit(gpa);
+    tab_strip.config_dir.deinit(gpa);
 }
 
 /// Open the repo named on the command line, or the one containing the current
@@ -2165,7 +1385,7 @@ fn openRepoFromArgs() !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len > 1) {
-        openAndRemember(args[1]);
+        tab_strip.openAndRemember(args[1]);
         return;
     }
 
@@ -2173,31 +1393,31 @@ fn openRepoFromArgs() !void {
     // Only when there is none does the last session come back.
     openRepo(".");
     if (repo != null) {
-        rememberActive();
+        tab_strip.rememberActive();
         return;
     }
 
-    restoreActiveTab();
+    tab_strip.restoreActiveTab();
 }
 
 /// Make `path` the open repository, replacing whatever was open.
 ///
 /// Failures are reported in the graph pane rather than in a dialog — pointing
 /// at the wrong folder is a normal thing to do, not an error to acknowledge.
-fn openRepo(path: []const u8) void {
+pub fn openRepo(path: []const u8) void {
     // A failure closes what was open: the strip already shows the tab asked
     // for, and the old repository under it would take every command meant
     // for the new one — while `open_error` only shows with nothing open.
     var opened = git.Repo.open(path) catch {
         closeRepo();
-        open_error = "Not a git repository. Use + in the tab bar to open one.";
+        tab_strip.open_error = "Not a git repository. Use + in the tab bar to open one.";
         return;
     };
 
     const workdir = opened.workdir() orelse {
         opened.deinit();
         closeRepo();
-        open_error = "Bare repositories have no working tree to show.";
+        tab_strip.open_error = "Bare repositories have no working tree to show.";
         return;
     };
 
@@ -2207,7 +1427,7 @@ fn openRepo(path: []const u8) void {
     next.appendSlice(gpa, workdir) catch {
         opened.deinit();
         closeRepo();
-        open_error = "Out of memory opening that repository.";
+        tab_strip.open_error = "Out of memory opening that repository.";
         return;
     };
 
@@ -2221,8 +1441,8 @@ fn openRepo(path: []const u8) void {
     // The real clock: before the first frame, `frame_now_s` is still 0, and
     // the first fetch would come at once instead of shortly after.
     const now_s: i64 = @intCast(@divFloor(std.Io.Timestamp.now(app_io, .real).nanoseconds, std.time.ns_per_s));
-    last_auto_fetch_s = now_s - @as(i64, auto_fetch_minutes) * 60 + AUTO_FETCH_FIRST_S;
-    open_error = null;
+    tab_strip.last_auto_fetch_s = now_s - @as(i64, tab_strip.auto_fetch_minutes) * 60 + tab_strip.AUTO_FETCH_FIRST_S;
+    tab_strip.open_error = null;
     new_tab_open = false;
 
     detectLfs();
@@ -2245,7 +1465,7 @@ fn openRepo(path: []const u8) void {
 /// What needs the history once it is there: the remotes it lists say where
 /// pictures and pull requests come from.
 fn historyArrived() void {
-    avatars.setGithubRepo(if (integrations) githubRemote() else null);
+    avatars.setGithubRepo(if (tab_strip.integrations) githubRemote() else null);
     refreshRequests();
 }
 
@@ -2286,10 +1506,10 @@ fn toggleOnly(name: []const u8) void {
 }
 
 /// Remote branches drawn in the graph; saved with the workspace.
-var graph_show_remote: bool = true;
+pub var graph_show_remote: bool = true;
 /// GitComet's two history modes: "All branches" (off) or "First-parent" (on),
 /// the mainline from HEAD — or from the branches picked — through its merges.
-var graph_first_parent: bool = false;
+pub var graph_first_parent: bool = false;
 
 /// The graph's filter changed this frame: read the history again once the
 /// frame is drawn — reading it now would free what the rest of the frame is
@@ -2300,7 +1520,7 @@ fn graphFilterChanged() void {
     // A test calling in from outside a frame reads it again at once. Inside
     // one — a click on a sidebar eye — the rows still to be drawn point into
     // this history: the frame's end reads it again, as in the app.
-    if (@import("builtin").is_test and !in_frame) return reloadHistory();
+    if (@import("builtin").is_test and !tab_strip.in_frame) return reloadHistory();
     graph_filter_dirty = true;
 }
 
@@ -2891,9 +2111,9 @@ fn askCi() void {
 }
 
 /// Re-list the open pull requests, if the repository is on GitHub.
-fn refreshRequests() void {
+pub fn refreshRequests() void {
     repo_slug.clearRetainingCapacity();
-    if (history == null or !integrations) return pr.refresh(repo_path.items, .none, "");
+    if (history == null or !tab_strip.integrations) return pr.refresh(repo_path.items, .none, "");
     // The first remote on GitHub, `origin` before the others.
     const found = firstRemote([]const u8, struct {
         fn pick(r: git.Remote) ?[]const u8 {
@@ -2918,7 +2138,7 @@ fn firstRemote(comptime T: type, comptime pick: fn (git.Remote) ?T) ?T {
 
 /// "owner/repo" of the remote a GitHub repository is known by — origin if it
 /// is on GitHub, else the first one that is.
-fn githubRemote() ?[]const u8 {
+pub fn githubRemote() ?[]const u8 {
     return firstRemote([]const u8, struct {
         fn pick(r: git.Remote) ?[]const u8 {
             return avatars.githubSlug(r.url);
@@ -2931,7 +2151,7 @@ fn githubRemote() ?[]const u8 {
 /// Checked once, on open: `.gitattributes` naming the lfs filter is how a
 /// repository declares it, and that does not change while you work in one.
 fn detectLfs() void {
-    uses_lfs = false;
+    tab_strip.uses_lfs = false;
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs = std.fmt.bufPrint(&path_buf, "{s}.gitattributes", .{repo_path.items}) catch return;
@@ -2940,7 +2160,7 @@ fn detectLfs() void {
     const text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(1 << 20)) catch return;
     defer gpa.free(text);
 
-    uses_lfs = std.mem.indexOf(u8, text, "filter=lfs") != null;
+    tab_strip.uses_lfs = std.mem.indexOf(u8, text, "filter=lfs") != null;
 }
 
 /// Ask for a folder and open whatever repository contains it.
@@ -2998,7 +2218,7 @@ fn takeFolder() void {
     folder_ready.store(0, .release);
     const path = folder_buf[0..folder_len];
     switch (folder_for) {
-        .open_repo => openAndRemember(path),
+        .open_repo => tab_strip.openAndRemember(path),
         .parent => {
             dialog_parent.clearRetainingCapacity();
             dialog_parent.appendSlice(gpa, path) catch {};
@@ -3008,7 +2228,7 @@ fn takeFolder() void {
 
 var watcher_failure_logged = false;
 
-fn closeRepo() void {
+pub fn closeRepo() void {
     stopWatching();
     watcher_failure_logged = false;
     // The picks were in this repository's file: nothing to take back in the
@@ -3032,8 +2252,8 @@ fn closeRepo() void {
 
     repo_path.clearAndFree(gpa);
     repo_name = "";
-    uses_lfs = false;
-    open_error = "No repository open. Use + in the tab bar to open one.";
+    tab_strip.uses_lfs = false;
+    tab_strip.open_error = "No repository open. Use + in the tab bar to open one.";
     clearConfirm();
     clearPrompt();
     clearSelection();
@@ -3190,13 +2410,13 @@ fn poll() void {
 fn autoFetch() void {
     // Tests drive their own fetches; one arriving on its own would race them.
     if (@import("builtin").is_test) return;
-    if (auto_fetch_minutes == 0 or job != null or action != .none) return;
-    if (frame_now_s - last_auto_fetch_s < @as(i64, auto_fetch_minutes) * 60) return;
-    last_auto_fetch_s = frame_now_s;
+    if (tab_strip.auto_fetch_minutes == 0 or tab_strip.job != null or action != .none) return;
+    if (frame_now_s - tab_strip.last_auto_fetch_s < @as(i64, tab_strip.auto_fetch_minutes) * 60) return;
+    tab_strip.last_auto_fetch_s = frame_now_s;
     const h = history orelse return;
     if (h.remotes.len == 0) return;
-    requestNetwork("Fetching", fetchAllArgs(true));
-    job_quiet = action == .network;
+    requestNetwork("Fetching", tab_strip.fetchAllArgs(true));
+    tab_strip.job_quiet = action == .network;
 }
 
 /// The desktop's own terminal, in the repository's folder: `$TERMINAL` if
@@ -3210,7 +2430,7 @@ fn openTerminal() void {
     // gives either its own window and returns.
     // The one picked in the settings first — only ever one of
     // `known_terminals`, so a name safe in a command line.
-    const chosen = std.mem.trim(u8, terminal_cmd.items, " ");
+    const chosen = std.mem.trim(u8, tab_strip.terminal_cmd.items, " ");
     const windows_line: []const u8 = if (std.mem.eql(u8, chosen, "wt"))
         "start wt -d ."
     else if (std.mem.eql(u8, chosen, "pwsh"))
@@ -3422,9 +2642,9 @@ fn requestNetwork(label: []const u8, args: []const []const u8) void {
     // The toolbar says one is running, but a held key or a double click can
     // still arrive before the frame showing that — and a click while a quiet
     // fetch runs would otherwise vanish without a word.
-    if (job != null) return setCommandError(BUSY);
+    if (tab_strip.job != null) return setCommandError(BUSY);
     if (!setArgv(args)) return;
-    job_label = label;
+    tab_strip.job_label = label;
     action = .network;
 }
 
@@ -3606,8 +2826,8 @@ fn collectApi() void {
     if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
     if (api_fetch_after) {
         api_fetch_after = false;
-        requestNetwork("Fetching", fetchAllArgs(true));
-        job_quiet = action == .network;
+        requestNetwork("Fetching", tab_strip.fetchAllArgs(true));
+        tab_strip.job_quiet = action == .network;
     }
 }
 
@@ -3792,12 +3012,12 @@ fn startJob() void {
     };
     const after = action_after;
     action_after = .remote;
-    if (repo == null or job != null) return;
-    job = run.Job.start(gpa, app_io, repo_path.items, action_argv[0..action_argc], .{ .input = action_input }) catch {
+    if (repo == null or tab_strip.job != null) return;
+    tab_strip.job = run.Job.start(gpa, app_io, repo_path.items, action_argv[0..action_argc], .{ .input = action_input }) catch {
         setCommandError("Could not start git.");
-        job_label = "";
+        tab_strip.job_label = "";
         // Left set, the next job's failure would be swallowed as a quiet one.
-        job_quiet = false;
+        tab_strip.job_quiet = false;
         return;
     };
     job_after = after;
@@ -3828,16 +3048,16 @@ fn requestLocal(label: []const u8, args: []const []const u8) void {
 /// deferred action.
 fn startNetwork(label: []const u8, args: []const []const u8) void {
     // A confirmed force push dropped here has to say so.
-    if (job != null) return setCommandError(BUSY);
+    if (tab_strip.job != null) return setCommandError(BUSY);
     if (!setArgv(args)) return;
-    job_label = label;
+    tab_strip.job_label = label;
     startJob();
 }
 
 /// As `startNetwork`, for a command of the repository's own, with what to
 /// do once it lands.
 fn startLocal(label: []const u8, args: []const []const u8, after: JobAfter) void {
-    if (job != null) return setCommandError(BUSY);
+    if (tab_strip.job != null) return setCommandError(BUSY);
     action_after = after;
     startNetwork(label, args);
 }
@@ -3847,19 +3067,19 @@ fn startLocal(label: []const u8, args: []const []const u8, after: JobAfter) void
 var clone_dest: std.ArrayList(u8) = .empty;
 
 fn startClone(url: []const u8, dest: []const u8) void {
-    if (job != null) return;
+    if (tab_strip.job != null) return;
 
     clone_dest.clearRetainingCapacity();
     clone_dest.appendSlice(gpa, dest) catch return;
 
     // From the process's own directory: there may be no repository to run in,
     // and a relative destination then means what it does in a terminal.
-    job = run.Job.start(gpa, app_io, ".", &.{ "clone", "--", url, dest }, .{}) catch {
+    tab_strip.job = run.Job.start(gpa, app_io, ".", &.{ "clone", "--", url, dest }, .{}) catch {
         clone_dest.clearRetainingCapacity();
         setCommandError("Could not start git.");
         return;
     };
-    job_label = "Cloning";
+    tab_strip.job_label = "Cloning";
     clearCommandError();
 }
 
@@ -3868,12 +3088,12 @@ fn startClone(url: []const u8, dest: []const u8) void {
 /// On the UI thread, and only between frames: it rebuilds the snapshots every
 /// panel is iterating, which is the same rule `runAction` follows.
 fn collectJob() void {
-    const running = job orelse return;
+    const running = tab_strip.job orelse return;
     if (!running.finished()) return;
 
     if (clone_dest.items.len > 0) {
-        job = null;
-        job_label = "";
+        tab_strip.job = null;
+        tab_strip.job_label = "";
         defer clone_dest.clearRetainingCapacity();
 
         var result = running.finish(gpa, app_io) orelse return setCommandError("Could not run git. Is it on your PATH?");
@@ -3881,7 +3101,7 @@ fn collectJob() void {
         if (!result.ok) return setCommandError(if (result.message.len > 0) result.message else "git clone failed.");
 
         clearCommandError();
-        openAndRemember(clone_dest.items);
+        tab_strip.openAndRemember(clone_dest.items);
         return;
     }
 
@@ -3890,13 +3110,13 @@ fn collectJob() void {
     // about whatever is on screen now.
     const still_current = repo != null and std.mem.eql(u8, running.cwd, repo_path.items);
 
-    job = null;
+    tab_strip.job = null;
     // Its words go on over the changes while they are read again after it.
     // A literal, as every job's label is: it outlives the job.
-    command_label = if (job_label.len > 0) job_label else "Reading the changes";
-    job_label = "";
-    const quiet = job_quiet;
-    job_quiet = false;
+    command_label = if (tab_strip.job_label.len > 0) tab_strip.job_label else "Reading the changes";
+    tab_strip.job_label = "";
+    const quiet = tab_strip.job_quiet;
+    tab_strip.job_quiet = false;
     const after = job_after;
     job_after = .remote;
 
@@ -4125,7 +3345,7 @@ fn runRebase() void {
     // Refused before it began — a dirty tree, say: the plan stays on screen,
     // to run again once that is sorted. Otherwise it finished or stopped on
     // a conflict, the toolbar takes it from there, and the list is done.
-    if (command_error != null and r.state() == .none) return;
+    if (tab_strip.command_error != null and r.state() == .none) return;
     clearSelection();
 }
 
@@ -4136,7 +3356,7 @@ fn closeShownTab() void {
         new_tab_open = false;
     } else if (active_view != .graph) {
         active_view = .graph;
-    } else requestTab(.{ .close = active_tab });
+    } else requestTab(.{ .close = tab_strip.active_tab });
 }
 
 fn requestTab(what: TabAction) void {
@@ -4158,31 +3378,31 @@ fn runTabAction() void {
 
     switch (what) {
         .none => {},
-        .select => |i| selectTab(i),
-        .close => |i| closeTab(i),
-        .select_group => |i| selectGroup(i),
-        .close_group => |i| closeGroup(i),
-        .select_in => |gt| selectTabIn(gt[0], gt[1]),
-        .close_in => |gt| closeTabIn(gt[0], gt[1]),
-        .group_toggle => |g| if (g < groups.items.len) {
-            groups.items[g].collapsed = !groups.items[g].collapsed;
-            saveWorkspace();
+        .select => |i| tab_strip.selectTab(i),
+        .close => |i| tab_strip.closeTab(i),
+        .select_group => |i| tab_strip.selectGroup(i),
+        .close_group => |i| tab_strip.closeGroup(i),
+        .select_in => |gt| tab_strip.selectTabIn(gt[0], gt[1]),
+        .close_in => |gt| tab_strip.closeTabIn(gt[0], gt[1]),
+        .group_toggle => |g| if (g < tab_strip.groups.items.len) {
+            tab_strip.groups.items[g].collapsed = !tab_strip.groups.items[g].collapsed;
+            tab_strip.saveWorkspace();
         },
-        .group_color => |gc| if (gc[0] < groups.items.len) {
-            groups.items[gc[0]].color = @intCast(gc[1]);
-            saveWorkspace();
+        .group_color => |gc| if (gc[0] < tab_strip.groups.items.len) {
+            tab_strip.groups.items[gc[0]].color = @intCast(gc[1]);
+            tab_strip.saveWorkspace();
         },
-        .ungroup => |g| ungroup(g),
-        .tab_to => |m| moveTab(m[0], m[1], m[2]),
-        .tab_at => |m| moveTabTo(m[0], m[1], m[2], m[3]),
-        .tab_end => |m| tabToEnd(m[0], m[1]),
+        .ungroup => |g| tab_strip.ungroup(g),
+        .tab_to => |m| tab_strip.moveTab(m[0], m[1], m[2]),
+        .tab_at => |m| tab_strip.moveTabTo(m[0], m[1], m[2], m[3]),
+        .tab_end => |m| tab_strip.tabToEnd(m[0], m[1]),
         .select_ws => |w| selectWorkspace(w),
         .close_ws => |w| deleteWorkspace(w),
         .workspace_named => applyWorkspaceDialog(),
-        .tab_out => |gt| ungroupTab(gt[0], gt[1]),
+        .tab_out => |gt| tab_strip.ungroupTab(gt[0], gt[1]),
         .open => |path| {
             defer gpa.free(path);
-            openAndRemember(path);
+            tab_strip.openAndRemember(path);
         },
     }
 }
@@ -4294,11 +3514,11 @@ fn runTakeFile() void {
         // Deleted on the other side: what is on disk is already this one's.
         if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) {
             gitDo(&.{ "--literal-pathspecs", "checkout", if (side == .theirs) "--theirs" else "--ours", "--", file });
-            if (command_error != null) return;
+            if (tab_strip.command_error != null) return;
         }
         gitDo(&.{ "--literal-pathspecs", "add", "--", file });
     }
-    if (command_error != null) return;
+    if (tab_strip.command_error != null) return;
     clearResolveUndo();
     open_first_conflict = true;
     workChanged("Resolving");
@@ -4312,7 +3532,7 @@ fn runStageNext() void {
     const file = path_buf[0..selected_path.items.len];
     if (markersLeft(file)) return ask(.stage_markers, file);
     gitDo(&.{ "--literal-pathspecs", "add", "--", file });
-    if (command_error != null) return;
+    if (tab_strip.command_error != null) return;
     clearResolveUndo();
     open_first_conflict = true;
     workChanged("Resolving");
@@ -4407,14 +3627,14 @@ pub fn checkout(ref: git.Ref) void {
     requestNetwork("Switching branch", &.{ "switch", name });
 }
 
-fn setCommandError(message: []const u8) void {
+pub fn setCommandError(message: []const u8) void {
     clearCommandError();
-    command_error = gpa.dupe(u8, message) catch null;
+    tab_strip.command_error = gpa.dupe(u8, message) catch null;
 }
 
 fn clearCommandError() void {
-    if (command_error) |m| gpa.free(m);
-    command_error = null;
+    if (tab_strip.command_error) |m| gpa.free(m);
+    tab_strip.command_error = null;
 }
 
 fn ask(kind: Confirm.Kind, arg: []const u8) void {
@@ -4502,7 +3722,7 @@ fn runConfirmed() void {
         // stages: every pick made in the file goes.
         .restart_file => {
             gitDo(&.{ "--literal-pathspecs", "checkout", "-m", "--", c.arg });
-            if (command_error == null) clearResolveUndo();
+            if (tab_strip.command_error == null) clearResolveUndo();
             diff_stale = true;
         },
     }
@@ -4662,16 +3882,16 @@ fn runPrompt() void {
         },
         // Nothing to run and nothing to fail: these only rearrange the strip.
         .new_group => {
-            groupTab(name, group_target[0], group_target[1]);
+            tab_strip.groupTab(name, group_target[0], group_target[1]);
             return clearPrompt();
         },
         .rename_group => {
-            renameGroup(group_target[0], name);
+            tab_strip.renameGroup(group_target[0], name);
             return clearPrompt();
         },
     }
 
-    if (command_error == null) clearPrompt();
+    if (tab_strip.command_error == null) clearPrompt();
 }
 
 /// Throw away working-tree changes. Untracked files need `clean`; tracked ones
@@ -4693,7 +3913,7 @@ fn doDiscard(path: []const u8) void {
         } else {
             gitDo(&.{ "--literal-pathspecs", "restore", "--worktree", "--", oldPathOf(.unstaged, path) });
         }
-        if (command_error != null) return;
+        if (tab_strip.command_error != null) return;
     }
     if (path.len == 0) {
         gitDo(&.{ "clean", "-fd", "--", "." });
@@ -4769,7 +3989,7 @@ var commit_sent: std.ArrayList(u8) = .empty;
 /// identity asked for when git said it has none.
 fn commitLanded() void {
     // git's own words for an identity it does not have.
-    if (command_error) |message| {
+    if (tab_strip.command_error) |message| {
         if (std.mem.indexOf(u8, message, "tell me who you are") != null or std.mem.indexOf(u8, message, "user.email") != null) openIdentity();
         return;
     }
@@ -5019,7 +4239,7 @@ var repo_config_job: ?*run.Capture = null;
 var git_template_path: std.ArrayList(u8) = .empty;
 /// git's config says whether a fetch prunes, here or everywhere: the
 /// setting of Zit's own then gives way to it.
-var git_fetch_prune_set = false;
+pub var git_fetch_prune_set = false;
 
 fn startRepoConfig() void {
     if (repo_config_job) |old| old.deinit(app_io);
@@ -5059,7 +4279,7 @@ fn collectRepoConfig() void {
     }
     // Whose picture is the signed-in GitHub account's: the address this
     // repository commits with — not with the integrations off.
-    avatars.setSelfEmail(if (integrations) email else "");
+    avatars.setSelfEmail(if (tab_strip.integrations) email else "");
 }
 
 /// Start an empty message from the template: git's `commit.template` when it
@@ -5096,8 +4316,8 @@ fn applyTemplate() void {
 // === Frame ===
 
 fn appFrame() !dvui.App.Result {
-    in_frame = true;
-    defer in_frame = false;
+    tab_strip.in_frame = true;
+    defer tab_strip.in_frame = false;
     frame_now_s = @intCast(@divFloor(std.Io.Timestamp.now(app_io, .real).nanoseconds, std.time.ns_per_s));
     // Before anything is collected: a worker finishing after this point
     // wakes the window again rather than finding the flag still set.
@@ -5113,7 +4333,7 @@ fn appFrame() !dvui.App.Result {
     updateWindowTitle();
     // A zoom key that reached dvui rather than `shortcuts` — under a modal,
     // say: bounded and remembered all the same.
-    if (dvui.currentWindow().content_scale != zoom) setZoom(dvui.currentWindow().content_scale);
+    if (dvui.currentWindow().content_scale != tab_strip.zoom) tab_strip.setZoom(dvui.currentWindow().content_scale);
     // The zoom's keys before any widget: a focused text field would claim
     // them, and they mean nothing there. Held down, they repeat, as a
     // browser's do.
@@ -5124,9 +4344,9 @@ fn appFrame() !dvui.App.Result {
             else => continue,
         };
         if (ke.action == .up) continue;
-        if (zoomKey(ke)) |to| {
+        if (tab_strip.zoomKey(ke)) |to| {
             e.handled = true;
-            setZoom(to);
+            tab_strip.setZoom(to);
         }
     }
     no_split = 0;
@@ -5153,7 +4373,7 @@ fn appFrame() !dvui.App.Result {
 
     // One timer, hung off the root widget's id, is the whole refresh story.
     const poll_id = root.data().id;
-    flushWorkspace(poll_id.update("workspace"));
+    tab_strip.flushWorkspace(poll_id.update("workspace"));
     // Back in front: whatever the editor just saved shows now, not at the
     // next tick.
     const focused = windowFocused();
@@ -8211,16 +7431,16 @@ fn cycleTab(delta: i2) void {
     if (repo == null) return;
     var total: usize = 0;
     var at: usize = 0;
-    for (groups.items, 0..) |group, g| {
-        if (group.ws != active_ws) continue;
-        if (g == active_group) at = total + active_tab;
+    for (tab_strip.groups.items, 0..) |group, g| {
+        if (group.ws != tab_strip.active_ws) continue;
+        if (g == tab_strip.active_group) at = total + tab_strip.active_tab;
         total += group.tabs.items.len;
     }
     if (total < 2) return;
     const next = (at + total + @as(usize, if (delta > 0) 1 else total - 1)) % total;
     var base: usize = 0;
-    for (groups.items, 0..) |group, g| {
-        if (group.ws != active_ws) continue;
+    for (tab_strip.groups.items, 0..) |group, g| {
+        if (group.ws != tab_strip.active_ws) continue;
         if (next < base + group.tabs.items.len) return requestTab(.{ .select_in = .{ g, next - base } });
         base += group.tabs.items.len;
     }
@@ -8229,9 +7449,9 @@ fn cycleTab(delta: i2) void {
 /// The tab shown, one place left or right in its group.
 fn shiftTab(delta: i2) void {
     if (repo == null or new_tab_open) return;
-    if (delta < 0 and active_tab == 0) return;
-    const to = if (delta < 0) active_tab - 1 else active_tab + 1;
-    requestTab(.{ .tab_at = .{ active_group, active_tab, active_group, to } });
+    if (delta < 0 and tab_strip.active_tab == 0) return;
+    const to = if (delta < 0) tab_strip.active_tab - 1 else tab_strip.active_tab + 1;
+    requestTab(.{ .tab_at = .{ tab_strip.active_group, tab_strip.active_tab, tab_strip.active_group, to } });
 }
 
 /// Whether a text field has the keyboard — the one a focused text entry asks
@@ -8406,13 +7626,13 @@ fn titlebar() void {
 
         // A command the bar started, running: its button spins, and the
         // others that write wait for it.
-        const running: []const u8 = if (job != null and !job_quiet) job_label else "";
-        const idle = job == null or job_quiet;
+        const running: []const u8 = if (tab_strip.job != null and !tab_strip.job_quiet) tab_strip.job_label else "";
+        const idle = tab_strip.job == null or tab_strip.job_quiet;
         const arena = dvui.currentWindow().arena();
         const on_branch = if (history) |h| h.head != null else false;
 
         if (toolButton(@src(), "Fetch", dvui.entypo.cw, .{ .busy = std.mem.eql(u8, running, "Fetching"), .usable = idle, .hint = "Fetch every remote, nothing merged" })) {
-            requestNetwork("Fetching", fetchAllArgs(false));
+            requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
         }
         // After a rebase the branch and its upstream have parted: a plain
         // push is refused, and Pull would merge the old commits back in.
@@ -8477,7 +7697,7 @@ fn titlebar() void {
         // Only where there is LFS to pull. `git lfs pull` fetches the real contents
         // for the pointers a checkout left behind, which is the one LFS operation
         // that comes up in ordinary work.
-        if (uses_lfs) {
+        if (tab_strip.uses_lfs) {
             toolbarDivider(@src(), 2);
             if (toolButton(@src(), "LFS", dvui.entypo.cloud, .{ .busy = std.mem.eql(u8, running, "Fetching LFS files"), .usable = idle, .hint = "Fetch the LFS files this checkout points to" })) {
                 requestNetwork("Fetching LFS files", &.{ "lfs", "pull" });
@@ -8821,7 +8041,7 @@ fn openRepoDialog(kind: RepoDialog) void {
     dialog_name.clearRetainingCapacity();
     dialog_name_edited = false;
     dialog_branch.clearRetainingCapacity();
-    dialog_branch.appendSlice(gpa, if (default_branch.items.len > 0) default_branch.items else "main") catch {};
+    dialog_branch.appendSlice(gpa, if (tab_strip.default_branch.items.len > 0) tab_strip.default_branch.items else "main") catch {};
     dialog_readme = true;
 
     // Beside the repository that is open, else in the home folder: where the
@@ -8896,7 +8116,7 @@ fn submitRepoDialog() void {
             const url = std.mem.trim(u8, dialog_url.items, " ");
             if (url.len == 0) return;
             startClone(url, path);
-            if (job == null) return;
+            if (tab_strip.job == null) return;
         },
         .create => {
             // `git init` in a folder that has things in it adopts them, and the
@@ -8919,7 +8139,7 @@ fn submitRepoDialog() void {
             // regardless, and left unopened a second try is refused as a
             // folder that is not empty.
             if (dialog_readme) firstCommit(path);
-            openAndRemember(path);
+            tab_strip.openAndRemember(path);
         },
     }
     repo_dialog = .none;
@@ -9367,11 +8587,11 @@ fn settingsDialog() void {
             });
             defer section.deinit();
 
-            var changed = settingsSwitch(0, &remember_tabs, "Reopen your tabs", "Start where you left off, rather than on the start page");
+            var changed = settingsSwitch(0, &tab_strip.remember_tabs, "Reopen your tabs", "Start where you left off, rather than on the start page");
 
             settingsField(@src(), "Default branch", "The first branch of a repository made here");
             const branch = textField(@src(), .{
-                .text = .{ .array_list = .{ .backing = &default_branch, .allocator = gpa, .limit = 128 } },
+                .text = .{ .array_list = .{ .backing = &tab_strip.default_branch, .allocator = gpa, .limit = 128 } },
                 .placeholder = "main",
             }, settingsInput().override(.{
                 .tag = "default_branch",
@@ -9394,15 +8614,15 @@ fn settingsDialog() void {
                     const caption = if (minutes == 0) "Never" else std.fmt.bufPrint(&buf, "every {d} min", .{minutes}) catch "?";
                     var chip = dvui.box(@src(), .{}, .{ .id_extra = i, .background = false });
                     defer chip.deinit();
-                    if (chipButton(@src(), if (auto_fetch_minutes == minutes) dvui.entypo.check else dvui.entypo.clock, caption, auto_fetch_minutes == minutes)) {
-                        auto_fetch_minutes = minutes;
+                    if (chipButton(@src(), if (tab_strip.auto_fetch_minutes == minutes) dvui.entypo.check else dvui.entypo.clock, caption, tab_strip.auto_fetch_minutes == minutes)) {
+                        tab_strip.auto_fetch_minutes = minutes;
                         changed = true;
                     }
                 }
             }
-            changed = settingsSwitch(1, &prune_on_fetch, "Prune when fetching", "Drop the remote branches deleted on the remote") or changed;
+            changed = settingsSwitch(1, &tab_strip.prune_on_fetch, "Prune when fetching", "Drop the remote branches deleted on the remote") or changed;
 
-            if (changed) saveWorkspace();
+            if (changed) tab_strip.saveWorkspace();
         }
         if (SettingsCard.begin(3)) |card| {
             defer card.end();
@@ -9412,10 +8632,10 @@ fn settingsDialog() void {
                 .padding = settings_body_pad,
             });
             defer section.deinit();
-            var on = integrations;
-            if (settingsSwitch(0, &on, "Use GitHub", "Pull requests, issues, checks and the account. Off: none of it, and nothing asked of GitHub")) setIntegrations(on);
+            var on = tab_strip.integrations;
+            if (settingsSwitch(0, &on, "Use GitHub", "Pull requests, issues, checks and the account. Off: none of it, and nothing asked of GitHub")) tab_strip.setIntegrations(on);
             // Who Zit is connected as, and the way in or out.
-            if (integrations) {
+            if (tab_strip.integrations) {
                 loadMe();
                 settingsField(@src(), "Account", "A code typed on github.com — the token it gives is kept readable by you alone");
                 var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
@@ -9464,19 +8684,19 @@ fn settingsDialog() void {
                 const ui_steps = [_]f32{ 0.9, 1, 1.08, 1.16 };
                 if (choiceChips(10, &.{ "Small", "Default", "Large", "Larger" }, nearestStep(&ui_steps, style.ui_scale))) |i| {
                     style.ui_scale = ui_steps[i];
-                    saveWorkspace();
+                    tab_strip.saveWorkspace();
                 }
                 settingsField(@src(), "Editor text size", "The code of a diff or a blame");
                 const code_steps = [_]f32{ 10.0 / 11.0, 1, 12.0 / 11.0, 13.0 / 11.0, 14.0 / 11.0 };
                 if (choiceChips(11, &.{ "10", "11", "12", "13", "14" }, nearestStep(&code_steps, style.code_scale))) |i| {
                     style.code_scale = code_steps[i];
-                    saveWorkspace();
+                    tab_strip.saveWorkspace();
                 }
             }
             {
                 var section = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .padding = settings_body_pad });
                 defer section.deinit();
-                if (settingsSwitch(0, &show_avatars, "Pictures in the graph", "Each commit its author's picture. Off: a dot")) saveWorkspace();
+                if (settingsSwitch(0, &tab_strip.show_avatars, "Pictures in the graph", "Each commit its author's picture. Off: a dot")) tab_strip.saveWorkspace();
             }
         }
         if (SettingsCard.begin(REPO_PAGE)) |card| {
@@ -9542,7 +8762,7 @@ fn settingsDialog() void {
             if (te.text_changed) changed = true;
             te.deinit();
 
-            if (changed) saveWorkspace();
+            if (changed) tab_strip.saveWorkspace();
         }
         if (SettingsCard.begin(6)) |card| {
             defer card.end();
@@ -9582,7 +8802,7 @@ fn settingsDialog() void {
 
             var changed = settingsSwitch(0, &commit_prefs.sign, "Sign every commit", "-S on each commit made here; git's own commit.gpgsign signs the rest");
             changed = settingsSwitch(1, &commit_prefs.sign_tags, "Sign tags", "The tags made here are annotated and signed") or changed;
-            if (changed) saveWorkspace();
+            if (changed) tab_strip.saveWorkspace();
 
             settingsField(@src(), "Format", "Saved in git's global config, gpg.format");
             {
@@ -9729,7 +8949,7 @@ fn setTheme(dark: bool) void {
 fn pickTheme(index: usize) void {
     theme_index = index;
     applyTheme();
-    saveWorkspace();
+    tab_strip.saveWorkspace();
 }
 
 const settings_body_pad: dvui.Rect = .{ .x = 0, .y = style.space.xs, .w = 0, .h = style.space.sm };
@@ -10144,10 +9364,10 @@ fn knownRepos() []const []const u8 {
     const a = dvui.currentWindow().arena();
     var known: std.ArrayList([]const u8) = .empty;
     if (repo != null and !isOpenTab(repo_path.items)) known.append(a, repo_path.items) catch {};
-    for (groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
+    for (tab_strip.groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
         if (!listedEarlier(gi, ti, tab.path)) known.append(a, tab.path) catch {};
     };
-    for (recent.items) |path| if (!isOpenTab(path)) known.append(a, path) catch {};
+    for (tab_strip.recent.items) |path| if (!isOpenTab(path)) known.append(a, path) catch {};
     return known.items;
 }
 
@@ -10324,7 +9544,7 @@ fn loadEditors() void {
 /// found here. True when it changed.
 fn editorChoice() bool {
     loadEditors();
-    const current = std.mem.trim(u8, editor_cmd.items, " ");
+    const current = std.mem.trim(u8, tab_strip.editor_cmd.items, " ");
     var face: []const u8 = if (current.len == 0) "System default" else current;
     for (known_editors) |e| if (std.mem.eql(u8, e[0], current)) {
         face = e[1];
@@ -10343,8 +9563,8 @@ fn editorChoice() bool {
     }
     const cmd = picked orelse return false;
     m.close();
-    editor_cmd.clearRetainingCapacity();
-    editor_cmd.appendSlice(gpa, cmd) catch {};
+    tab_strip.editor_cmd.clearRetainingCapacity();
+    tab_strip.editor_cmd.appendSlice(gpa, cmd) catch {};
     return true;
 }
 
@@ -10352,7 +9572,7 @@ fn editorChoice() bool {
 /// installed here. True when it changed.
 fn terminalChoice() bool {
     loadEditors();
-    const current = std.mem.trim(u8, terminal_cmd.items, " ");
+    const current = std.mem.trim(u8, tab_strip.terminal_cmd.items, " ");
     var face: []const u8 = "Automatic";
     for (known_terminals) |e| if (std.mem.eql(u8, e[0], current)) {
         face = e[1];
@@ -10371,8 +9591,8 @@ fn terminalChoice() bool {
     }
     const cmd = picked orelse return false;
     m.close();
-    terminal_cmd.clearRetainingCapacity();
-    terminal_cmd.appendSlice(gpa, cmd) catch {};
+    tab_strip.terminal_cmd.clearRetainingCapacity();
+    tab_strip.terminal_cmd.appendSlice(gpa, cmd) catch {};
     return true;
 }
 
@@ -10386,7 +9606,7 @@ fn openInEditor(path: []const u8) void {
     if (repo == null) return;
     const a = dvui.currentWindow().arena();
     const full = std.fs.path.join(a, &.{ repo_path.items, path }) catch return;
-    const cmd = std.mem.trim(u8, editor_cmd.items, " ");
+    const cmd = std.mem.trim(u8, tab_strip.editor_cmd.items, " ");
     if (cmd.len == 0) return run.open(app_io, repo_path.items, full) catch setCommandError("Could not open the file.");
     var argv: std.ArrayList([]const u8) = .empty;
     var words = std.mem.tokenizeScalar(u8, cmd, ' ');
@@ -10615,7 +9835,7 @@ const commands = [_]Command{
     .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = midOperation, .run = requestAbortOperation },
     .{ .name = "Fetch all remotes", .icon = dvui.entypo.cw, .run = struct {
         fn f() void {
-            requestNetwork("Fetching", fetchAllArgs(false));
+            requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
         }
     }.f },
     .{ .name = "Pull", .icon = dvui.entypo.download, .run = struct {
@@ -10724,17 +9944,17 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Zoom in", .icon = dvui.entypo.plus, .keys = "Ctrl+=", .needs_repo = false, .run = struct {
         fn f() void {
-            setZoom(zoom + 0.1);
+            tab_strip.setZoom(tab_strip.zoom + 0.1);
         }
     }.f },
     .{ .name = "Zoom out", .icon = dvui.entypo.minus, .keys = "Ctrl+-", .needs_repo = false, .run = struct {
         fn f() void {
-            setZoom(zoom - 0.1);
+            tab_strip.setZoom(tab_strip.zoom - 0.1);
         }
     }.f },
     .{ .name = "Reset the zoom to 100 %", .icon = dvui.entypo.resize_100, .keys = "Ctrl+0", .needs_repo = false, .run = struct {
         fn f() void {
-            setZoom(1.0);
+            tab_strip.setZoom(1.0);
         }
     }.f },
     .{ .name = "Create a pull request for this branch", .icon = dvui.entypo.merge, .run = requestCreateRequest },
@@ -10818,7 +10038,7 @@ fn palette() void {
             n += 1;
         }
     }
-    for (groups.items, 0..) |group, gi| {
+    for (tab_strip.groups.items, 0..) |group, gi| {
         for (group.tabs.items, 0..) |tab, ti| {
             if (n == PALETTE_ROWS) break;
             if (listedEarlier(gi, ti, tab.path)) continue;
@@ -10914,7 +10134,7 @@ fn palette() void {
     switch (items[pick]) {
         .command => |i| commands[i].run(),
         .ref => |i| checkout(history.?.refs[i]),
-        .repo => |r| requestOpenKnown(groups.items[r.group].tabs.items[r.tab].path),
+        .repo => |r| requestOpenKnown(tab_strip.groups.items[r.group].tabs.items[r.tab].path),
     }
 }
 
@@ -11133,10 +10353,10 @@ fn tabList() void {
     // Only recorded here, run after the frame: selecting or closing one
     // rebuilds the snapshots the rest of this frame is drawn from.
     var flat: usize = 0;
-    for (groups.items, 0..) |group, g| {
-        if (group.ws != active_ws) continue;
+    for (tab_strip.groups.items, 0..) |group, g| {
+        if (group.ws != tab_strip.active_ws) continue;
         const named = group.name.len > 0;
-        const hue = groupColor(group.color);
+        const hue = tab_strip.groupColor(group.color);
         // A group is one run, as Chrome has it: a line in its colour from the
         // label to its last tab, which goes up and over the active one —
         // outlined in that colour — rather than under it.
@@ -11157,7 +10377,7 @@ fn tabList() void {
         }
         defer if (named) groupUnderline(span.data().contentRectScale(), hue);
         for (group.tabs.items, 0..) |tab, t| {
-            const current = repo != null and g == active_group and t == active_tab;
+            const current = repo != null and g == tab_strip.active_group and t == tab_strip.active_tab;
             const active = !new_tab_open and current;
             var rect: dvui.Rect.Physical = .{};
             switch (tabButton(@src(), flat, git.repoName(tab.path), tab.path, active, width, &rect, .{ .slot = .{ g, t }, .hue = if (named) hue else null })) {
@@ -11237,7 +10457,7 @@ var me_name: std.ArrayList(u8) = .empty;
 var me_email: std.ArrayList(u8) = .empty;
 /// The GitHub login Zit is connected as; empty when it is not.
 var me_gh: std.ArrayList(u8) = .empty;
-var me_loaded = false;
+pub var me_loaded = false;
 
 fn loadMe() void {
     if (me_loaded) return;
@@ -11245,7 +10465,7 @@ fn loadMe() void {
     _ = readIdentity(&me_name, &me_email);
     // The login Zit's own sign-in saved, from the disk: no request per frame.
     me_gh.clearRetainingCapacity();
-    if (!integrations) return;
+    if (!tab_strip.integrations) return;
     github.login(&me_gh);
 }
 
@@ -11322,7 +10542,7 @@ fn userMenu() void {
     if (menuIcon(@src(), dvui.entypo.book, "Documentation", false)) pick = .docs;
     if (menuIcon(@src(), dvui.entypo.info_with_circle, "About Zit", false)) pick = .about;
     // GitHub's account, only while Zit talks to GitHub at all.
-    if (integrations) {
+    if (tab_strip.integrations) {
         menuSeparator(1);
         if (me_gh.items.len > 0) {
             var buf: [96]u8 = undefined;
@@ -11467,7 +10687,7 @@ fn pumpConnect(timer_id: dvui.Id) void {
                 github.saveUser(user.login) catch {};
                 connect_state = .done;
                 me_loaded = false;
-                if (!integrations) setIntegrations(true) else refreshRequests();
+                if (!tab_strip.integrations) tab_strip.setIntegrations(true) else refreshRequests();
                 avatars.setGithubRepo(githubRemote());
                 if (connect_fills_identity) {
                     connect_fills_identity = false;
@@ -11546,7 +10766,7 @@ fn connectDialog() void {
 /// A group's label: a dot in its colour, as Chrome marks a group with no
 /// name — and how many tabs, folded. A click folds or unfolds it; a
 /// right-click offers the rest.
-fn groupChip(g: usize, group: TabGroup, hue: dvui.Color) dvui.Rect.Physical {
+fn groupChip(g: usize, group: tab_strip.TabGroup, hue: dvui.Color) dvui.Rect.Physical {
     const lit = if (tab_drop_over) |o| o[0] == g and o[1] == std.math.maxInt(usize) else false;
     var bw: dvui.ButtonWidget = undefined;
     bw.init(@src(), .{ .draw_focus = false }, .{
@@ -11574,7 +10794,7 @@ fn groupChip(g: usize, group: TabGroup, hue: dvui.Color) dvui.Rect.Physical {
             .gravity_y = 0.5,
         });
         dot.deinit();
-        const label = groupLabel(group);
+        const label = tab_strip.groupLabel(group);
         if (label.len > 0) {
             var fit_buf: [MAX_SHOWN_LINE]u8 = undefined;
             dvui.label(@src(), "{s}", .{fitText(&fit_buf, label, style.smallBold(), 140)}, .{ .font = style.smallBold(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
@@ -11601,14 +10821,14 @@ fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
     {
         var swatches = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
         defer swatches.deinit();
-        for (0..GROUP_COLORS) |c| {
-            const current = groups.items[g].color == c;
+        for (0..tab_strip.GROUP_COLORS) |c| {
+            const current = tab_strip.groups.items[g].color == c;
             var bw: dvui.ButtonWidget = undefined;
             bw.init(@src(), .{ .draw_focus = false }, .{
                 .id_extra = c,
                 .min_size_content = .{ .w = 16, .h = 16 },
                 .background = true,
-                .color_fill = .{ .color = groupColor(@intCast(c)) },
+                .color_fill = .{ .color = tab_strip.groupColor(@intCast(c)) },
                 .corners = .all(8),
                 .border = dvui.Rect.all(if (current) 2 else 0),
                 .color_border = .{ .color = style.text() },
@@ -11641,68 +10861,68 @@ fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
 /// Switch to workspace `w`, in this window and this view: the group and tab
 /// it was on, its first tab, or its start page when it has none.
 fn selectWorkspace(w: usize) void {
-    if (w >= workspaces.items.len) return;
-    active_ws = w;
-    const at = workspaces.items[w];
-    if (at.group < groups.items.len and groups.items[at.group].ws == w and at.tab < groups.items[at.group].tabs.items.len) {
+    if (w >= tab_strip.workspaces.items.len) return;
+    tab_strip.active_ws = w;
+    const at = tab_strip.workspaces.items[w];
+    if (at.group < tab_strip.groups.items.len and tab_strip.groups.items[at.group].ws == w and at.tab < tab_strip.groups.items[at.group].tabs.items.len) {
         new_tab_open = false;
-        return selectTabIn(at.group, at.tab);
+        return tab_strip.selectTabIn(at.group, at.tab);
     }
-    selectAnyTab();
-    saveWorkspace();
+    tab_strip.selectAnyTab();
+    tab_strip.saveWorkspace();
 }
 
 /// A new workspace, with an empty group to open repositories into, switched
 /// to. Its index.
 fn newWorkspace(name: []const u8, color: u8) ?usize {
     const owned = gpa.dupe(u8, name) catch return null;
-    workspaces.append(gpa, .{ .name = owned, .color = color }) catch {
+    tab_strip.workspaces.append(gpa, .{ .name = owned, .color = color }) catch {
         gpa.free(owned);
         return null;
     };
-    const w = workspaces.items.len - 1;
-    ensureWorkspaceGroups();
+    const w = tab_strip.workspaces.items.len - 1;
+    tab_strip.ensureWorkspaceGroups();
     return w;
 }
 
 /// Workspace `w` and its tabs gone — the tabs to the recent list — unless
 /// it is the last one.
 fn deleteWorkspace(w: usize) void {
-    if (w >= workspaces.items.len or workspaces.items.len <= 1) return;
-    var g: usize = groups.items.len;
+    if (w >= tab_strip.workspaces.items.len or tab_strip.workspaces.items.len <= 1) return;
+    var g: usize = tab_strip.groups.items.len;
     while (g > 0) {
         g -= 1;
-        if (groups.items[g].ws == w) {
-            var removed = groups.orderedRemove(g);
-            for (removed.tabs.items) |tab| addRecent(tab.path, true);
+        if (tab_strip.groups.items[g].ws == w) {
+            var removed = tab_strip.groups.orderedRemove(g);
+            for (removed.tabs.items) |tab| tab_strip.addRecent(tab.path, true);
             removed.deinit();
-        } else if (groups.items[g].ws > w) groups.items[g].ws -= 1;
+        } else if (tab_strip.groups.items[g].ws > w) tab_strip.groups.items[g].ws -= 1;
     }
-    gpa.free(workspaces.orderedRemove(w).name);
-    active_group = 0;
-    active_tab = 0;
+    gpa.free(tab_strip.workspaces.orderedRemove(w).name);
+    tab_strip.active_group = 0;
+    tab_strip.active_tab = 0;
     closeRepo();
     selectWorkspace(if (w > 0) w - 1 else 0);
 }
 
 fn firstGroupOf(w: usize) usize {
-    for (groups.items, 0..) |group, g| if (group.ws == w) return g;
+    for (tab_strip.groups.items, 0..) |group, g| if (group.ws == w) return g;
     return 0;
 }
 
 /// Tab `t` of group `g` into workspace `w`: its first group.
 fn moveTabToWorkspace(g: usize, t: usize, w: usize) void {
-    for (groups.items, 0..) |group, to| if (group.ws == w) return moveTab(g, t, to);
+    for (tab_strip.groups.items, 0..) |group, to| if (group.ws == w) return tab_strip.moveTab(g, t, to);
 }
 
 /// The workspace shown, at the strip's start: its colour, its name, and a
 /// menu of every workspace, with new, rename, colour and delete.
 fn workspaceSwitcher() void {
-    if (active_ws >= workspaces.items.len) return;
-    const current = workspaces.items[active_ws];
+    if (tab_strip.active_ws >= tab_strip.workspaces.items.len) return;
+    const current = tab_strip.workspaces.items[tab_strip.active_ws];
     // On its own colour, the name dark on it, as a tab group's label was:
     // which workspace this is reads before its name does.
-    const hue = groupColor(current.color);
+    const hue = tab_strip.groupColor(current.color);
     const button = DropButton.begin(@src(), .{
         .tag = "workspace:switcher",
         .gravity_y = 0.5,
@@ -11718,7 +10938,7 @@ fn workspaceSwitcher() void {
         var face = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false, .expand = .horizontal });
         defer face.deinit();
         const ink = style.background();
-        dvui.label(@src(), "{s}", .{workspaceName(current)}, .{ .font = style.smallBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
+        dvui.label(@src(), "{s}", .{tab_strip.workspaceName(current)}, .{ .font = style.smallBold(), .color_text = .{ .color = ink }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
         dvui.icon(@src(), "workspace_chevron", dvui.entypo.chevron_small_down, .{ .fill_color = .{ .color = ink } }, .{
             .min_size_content = .{ .w = 12, .h = 12 },
             .gravity_y = 0.5,
@@ -11730,10 +10950,10 @@ fn workspaceSwitcher() void {
     const m = menu orelse return;
 
     dropHeading(@src(), 0, "WORKSPACES");
-    for (workspaces.items, 0..) |w, i| {
+    for (tab_strip.workspaces.items, 0..) |w, i| {
         var mi = dvui.menuItem(@src(), .{}, .{
             .id_extra = i,
-            .tag = frameTag("workspace", workspaceName(w)),
+            .tag = frameTag("workspace", tab_strip.workspaceName(w)),
             .expand = .horizontal,
             .min_size_content = .{ .w = 260 },
             .corners = style.radius.input,
@@ -11743,13 +10963,13 @@ fn workspaceSwitcher() void {
             var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
             defer row.deinit();
             workspaceDot(@src(), i + 1, w.color);
-            dvui.label(@src(), "{s}", .{workspaceName(w)}, .{ .font = if (i == active_ws) style.smallBold() else style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
+            dvui.label(@src(), "{s}", .{tab_strip.workspaceName(w)}, .{ .font = if (i == tab_strip.active_ws) style.smallBold() else style.small(), .color_text = .{ .color = style.text() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0), .margin = .{ .x = style.space.sm } });
             var n: usize = 0;
-            for (groups.items) |g| {
+            for (tab_strip.groups.items) |g| {
                 if (g.ws == i) n += g.tabs.items.len;
             }
             dvui.label(@src(), "{d} {s}", .{ n, if (n == 1) "repository" else "repositories" }, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
-            if (i == active_ws) dvui.icon(@src(), "workspace_on", dvui.entypo.check, .{ .fill_color = .{ .color = style.accent() } }, .{
+            if (i == tab_strip.active_ws) dvui.icon(@src(), "workspace_on", dvui.entypo.check, .{ .fill_color = .{ .color = style.accent() } }, .{
                 .min_size_content = .{ .w = 11, .h = 11 },
                 .gravity_y = 0.5,
                 .margin = .{ .x = style.space.sm },
@@ -11759,7 +10979,7 @@ fn workspaceSwitcher() void {
         mi.deinit();
         if (picked) {
             m.close();
-            if (i != active_ws) requestTab(.{ .select_ws = i });
+            if (i != tab_strip.active_ws) requestTab(.{ .select_ws = i });
         }
     }
 
@@ -11774,12 +10994,12 @@ fn workspaceSwitcher() void {
     }
     if (colorSwatches(@src(), current.color, .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm })) |c| {
         m.close();
-        workspaces.items[active_ws].color = @intCast(c);
-        saveWorkspace();
+        tab_strip.workspaces.items[tab_strip.active_ws].color = @intCast(c);
+        tab_strip.saveWorkspace();
     }
-    if (workspaces.items.len > 1 and menuIcon(@src(), dvui.entypo.trash, "Delete this workspace", true)) {
+    if (tab_strip.workspaces.items.len > 1 and menuIcon(@src(), dvui.entypo.trash, "Delete this workspace", true)) {
         m.close();
-        requestTab(.{ .close_ws = active_ws });
+        requestTab(.{ .close_ws = tab_strip.active_ws });
     }
 }
 
@@ -11789,13 +11009,13 @@ fn colorSwatches(src: std.builtin.SourceLocation, current: u8, pad: dvui.Rect) ?
     var swatches = dvui.box(src, .{ .dir = .horizontal }, .{ .background = false, .padding = pad });
     defer swatches.deinit();
     var picked: ?usize = null;
-    for (0..GROUP_COLORS) |c| {
+    for (0..tab_strip.GROUP_COLORS) |c| {
         var bw: dvui.ButtonWidget = undefined;
         bw.init(@src(), .{ .draw_focus = false }, .{
             .id_extra = c,
             .min_size_content = .{ .w = 16, .h = 16 },
             .background = true,
-            .color_fill = .{ .color = groupColor(@intCast(c)) },
+            .color_fill = .{ .color = tab_strip.groupColor(@intCast(c)) },
             .corners = .all(8),
             .border = dvui.Rect.all(if (current == c) 2 else 0),
             .color_border = .{ .color = style.text() },
@@ -11829,24 +11049,24 @@ fn openWorkspaceDialog(kind: WorkspaceDialog) void {
     ws_dialog = kind;
     ws_rect = .{};
     ws_name.clearRetainingCapacity();
-    ws_color = @intCast(workspaces.items.len % GROUP_COLORS);
+    ws_color = @intCast(tab_strip.workspaces.items.len % tab_strip.GROUP_COLORS);
     // A group: a colour no other shows yet, where there is one.
     if (kind == .group) {
         ws_color = 0;
-        while (ws_color < GROUP_COLORS - 1) : (ws_color += 1) {
-            const used = for (groups.items) |other| {
+        while (ws_color < tab_strip.GROUP_COLORS - 1) : (ws_color += 1) {
+            const used = for (tab_strip.groups.items) |other| {
                 if (other.name.len > 0 and other.color == ws_color) break true;
             } else false;
             if (!used) break;
         }
     }
-    if (kind == .rename and active_ws < workspaces.items.len) {
-        ws_name.appendSlice(gpa, workspaces.items[active_ws].name) catch {};
-        ws_color = workspaces.items[active_ws].color;
+    if (kind == .rename and tab_strip.active_ws < tab_strip.workspaces.items.len) {
+        ws_name.appendSlice(gpa, tab_strip.workspaces.items[tab_strip.active_ws].name) catch {};
+        ws_color = tab_strip.workspaces.items[tab_strip.active_ws].color;
     }
-    if (kind == .group_rename and group_target[0] < groups.items.len) {
-        const group = groups.items[group_target[0]];
-        ws_name.appendSlice(gpa, groupLabel(group)) catch {};
+    if (kind == .group_rename and group_target[0] < tab_strip.groups.items.len) {
+        const group = tab_strip.groups.items[group_target[0]];
+        ws_name.appendSlice(gpa, tab_strip.groupLabel(group)) catch {};
         ws_color = group.color;
     }
 }
@@ -11890,7 +11110,7 @@ fn applyWorkspaceDialog() void {
     const kind = ws_dialog orelse return;
     ws_dialog = null;
     const typed = std.mem.trim(u8, ws_name.items, " \t");
-    const name = if ((kind == .group or kind == .group_rename) and typed.len == 0) GROUP_MARK else typed;
+    const name = if ((kind == .group or kind == .group_rename) and typed.len == 0) tab_strip.GROUP_MARK else typed;
     if (name.len == 0) return;
     switch (kind) {
         .new => if (newWorkspace(name, ws_color)) |w| selectWorkspace(w),
@@ -11901,28 +11121,28 @@ fn applyWorkspaceDialog() void {
         .group => {
             const g0 = group_target[0];
             const t0 = group_target[1];
-            if (g0 >= groups.items.len or t0 >= groups.items[g0].tabs.items.len) return;
+            if (g0 >= tab_strip.groups.items.len or t0 >= tab_strip.groups.items[g0].tabs.items.len) return;
             // Found again by its tab: the group it left may go, empty.
-            const tab = groups.items[g0].tabs.items[t0].path.ptr;
-            groupTab(name, g0, t0);
-            for (groups.items) |*group| for (group.tabs.items) |other| {
+            const tab = tab_strip.groups.items[g0].tabs.items[t0].path.ptr;
+            tab_strip.groupTab(name, g0, t0);
+            for (tab_strip.groups.items) |*group| for (group.tabs.items) |other| {
                 if (other.path.ptr == tab) group.color = ws_color;
             };
-            saveWorkspace();
+            tab_strip.saveWorkspace();
         },
         .group_rename => {
             const g = group_target[0];
             // Only a group: tabs in no group are not renamed into one.
-            if (g >= groups.items.len or groups.items[g].name.len == 0) return;
-            groups.items[g].color = ws_color;
-            renameGroup(g, name);
+            if (g >= tab_strip.groups.items.len or tab_strip.groups.items[g].name.len == 0) return;
+            tab_strip.groups.items[g].color = ws_color;
+            tab_strip.renameGroup(g, name);
         },
-        .rename => if (active_ws < workspaces.items.len) {
+        .rename => if (tab_strip.active_ws < tab_strip.workspaces.items.len) {
             const owned = gpa.dupe(u8, name) catch return;
-            gpa.free(workspaces.items[active_ws].name);
-            workspaces.items[active_ws].name = owned;
-            workspaces.items[active_ws].color = ws_color;
-            saveWorkspace();
+            gpa.free(tab_strip.workspaces.items[tab_strip.active_ws].name);
+            tab_strip.workspaces.items[tab_strip.active_ws].name = owned;
+            tab_strip.workspaces.items[tab_strip.active_ws].color = ws_color;
+            tab_strip.saveWorkspace();
         },
     }
 }
@@ -11934,7 +11154,7 @@ fn workspaceDot(src: std.builtin.SourceLocation, id: usize, color: u8) void {
         .min_size_content = .{ .w = 8, .h = 8 },
         .max_size_content = .size(.{ .w = 8, .h = 8 }),
         .background = true,
-        .color_fill = .{ .color = groupColor(color) },
+        .color_fill = .{ .color = tab_strip.groupColor(color) },
         .corners = .all(4),
         .gravity_y = 0.5,
     });
@@ -11955,25 +11175,25 @@ fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
         group_target = .{ g, t };
         openWorkspaceDialog(.group);
     }
-    for (groups.items, 0..) |other, gi| {
-        if (gi == g or other.name.len == 0 or other.ws != groups.items[g].ws) continue;
-        const label = groupLabel(other);
+    for (tab_strip.groups.items, 0..) |other, gi| {
+        if (gi == g or other.name.len == 0 or other.ws != tab_strip.groups.items[g].ws) continue;
+        const label = tab_strip.groupLabel(other);
         const caption = (if (label.len > 0)
             std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to {s}", .{label})
         else
-            std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to the {s} group", .{groupColorName(other.color)})) catch continue;
+            std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to the {s} group", .{tab_strip.groupColorName(other.color)})) catch continue;
         if (menuIconAt(@src(), gi, dvui.entypo.layers, caption)) {
             fw.close();
             requestTab(.{ .tab_to = .{ g, t, gi } });
         }
     }
-    if (groups.items[g].name.len > 0 and menuIcon(@src(), dvui.entypo.squared_minus, "Remove from the group", false)) {
+    if (tab_strip.groups.items[g].name.len > 0 and menuIcon(@src(), dvui.entypo.squared_minus, "Remove from the group", false)) {
         fw.close();
         requestTab(.{ .tab_out = .{ g, t } });
     }
-    for (workspaces.items, 0..) |w, wi| {
-        if (wi == groups.items[g].ws) continue;
-        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to workspace {s}", .{workspaceName(w)}) catch continue;
+    for (tab_strip.workspaces.items, 0..) |w, wi| {
+        if (wi == tab_strip.groups.items[g].ws) continue;
+        const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to workspace {s}", .{tab_strip.workspaceName(w)}) catch continue;
         if (menuIconAt(@src(), wi + 1000, dvui.entypo.layers, caption)) {
             fw.close();
             requestTab(.{ .tab_to = .{ g, t, firstGroupOf(wi) } });
@@ -12015,11 +11235,11 @@ var tab_drop_seen: ?[2]usize = null;
 /// name, a little below and right of the pointer, deaf to the mouse.
 fn tabGhost() void {
     const g = tab_drag[0];
-    if (g >= groups.items.len or tab_drag[1] >= groups.items[g].tabs.items.len) return;
-    const name = git.repoName(groups.items[g].tabs.items[tab_drag[1]].path);
+    if (g >= tab_strip.groups.items.len or tab_drag[1] >= tab_strip.groups.items[g].tabs.items.len) return;
+    const name = git.repoName(tab_strip.groups.items[g].tabs.items[tab_drag[1]].path);
     const scale = dvui.windowNaturalScale();
     const at = dvui.currentWindow().mouse_pt;
-    const named = groups.items[g].name.len > 0;
+    const named = tab_strip.groups.items[g].name.len > 0;
     // Sized by hand: a floating widget takes its rect as given.
     const text = style.tab().textSize(name);
     var fw: dvui.FloatingWidget = undefined;
@@ -12028,7 +11248,7 @@ fn tabGhost() void {
         .background = true,
         .color_fill = .{ .color = style.surface() },
         .border = dvui.Rect.all(2),
-        .color_border = .{ .color = if (named) groupColor(groups.items[g].color) else style.accent() },
+        .color_border = .{ .color = if (named) tab_strip.groupColor(tab_strip.groups.items[g].color) else style.accent() },
         .corners = style.radius.tag,
         .box_shadow = .{ .color = .black, .offset = .{ .x = 0, .y = 2 }, .fade = 8, .alpha = 0.25 },
         .padding = .{ .x = style.space.md, .y = 4, .w = style.space.md, .h = 4 },
@@ -12162,7 +11382,7 @@ fn tabButton(src: std.builtin.SourceLocation, id: usize, name: []const u8, hint:
     // the accent's on the active one; the new-tab page's plus.
     // A command running in it — commands run in the repository on show —
     // spins where its initials were.
-    if (look.slot != null and active and job != null and !job_quiet) dvui.spinner(@src(), .{
+    if (look.slot != null and active and tab_strip.job != null and !tab_strip.job_quiet) dvui.spinner(@src(), .{
         .min_size_content = .{ .w = 18, .h = 18 },
         .gravity_y = 0.5,
         .margin = .{ .w = style.space.sm },
@@ -12246,7 +11466,7 @@ fn dropAffordance(dd: *dvui.DropdownWidget, color: dvui.Color) void {
 /// Whether this path already appeared before (`group_index`, `tab_index`) in
 /// the tabs' own order, group by group.
 fn listedEarlier(group_index: usize, tab_index: usize, path: []const u8) bool {
-    for (groups.items, 0..) |group, gi| {
+    for (tab_strip.groups.items, 0..) |group, gi| {
         for (group.tabs.items, 0..) |tab, ti| {
             if (gi > group_index or (gi == group_index and ti >= tab_index)) return false;
             if (std.mem.eql(u8, tab.path, path)) return true;
@@ -12817,12 +12037,12 @@ fn graphBranchMenu(src: std.builtin.SourceLocation) void {
     if (all) setSolo(null);
     if (mode) |first_parent| if (first_parent != graph_first_parent) {
         graph_first_parent = first_parent;
-        saveWorkspace();
+        tab_strip.saveWorkspace();
         graphFilterChanged();
     };
     if (flip_remote) {
         graph_show_remote = !graph_show_remote;
-        saveWorkspace();
+        tab_strip.saveWorkspace();
         graphFilterChanged();
     }
 }
@@ -13790,7 +13010,7 @@ fn sectionMenu(
             }
             if (menuIcon(@src(), dvui.entypo.cw, "Fetch them all", false)) {
                 fw.close();
-                requestNetwork("Fetching", fetchAllArgs(false));
+                requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
             }
         },
         .pulls => {
@@ -13890,7 +13110,7 @@ fn remoteRow(src: std.builtin.SourceLocation, entry: git.Remote, id: usize) void
     // line reads as a heading the rest of the time.
     if (hover) {
         if (iconButton(@src(), "remote_fetch", "Fetch from this remote", dvui.entypo.cw, style.textMuted())) {
-            requestNetwork("Fetching", if (prune_on_fetch) &.{ "fetch", "--prune", entry.name } else &.{ "fetch", entry.name });
+            requestNetwork("Fetching", if (tab_strip.prune_on_fetch) &.{ "fetch", "--prune", entry.name } else &.{ "fetch", entry.name });
         }
         if (iconButton(@src(), "remote_rename", "Rename this remote", dvui.entypo.pencil, style.textFaint())) {
             askNameWith(.rename_remote, entry.name, entry.name);
@@ -14031,7 +13251,7 @@ fn openPrCreate() void {
         const name = std.mem.trim(u8, answer.out, " \r\n");
         if (answer.ok and std.mem.startsWith(u8, name, remote) and name.len > remote.len + 1) pr_new_base.appendSlice(gpa, name[remote.len + 1 ..]) catch {};
     } else |_| {}
-    if (pr_new_base.items.len == 0) pr_new_base.appendSlice(gpa, if (default_branch.items.len > 0) default_branch.items else "main") catch {};
+    if (pr_new_base.items.len == 0) pr_new_base.appendSlice(gpa, if (tab_strip.default_branch.items.len > 0) tab_strip.default_branch.items else "main") catch {};
 
     // The commits it brings, oldest first.
     var range_buf: [256]u8 = undefined;
@@ -14169,7 +13389,7 @@ fn prCreateDialog() void {
         labelPicker(4, &pr_new_labels, "pr_new:labels");
     }
     // What GitHub refused, where it was asked.
-    if (!pr_creating) if (command_error) |why| {
+    if (!pr_creating) if (tab_strip.command_error) |why| {
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .max_size_content = .width(0), .background = false, .padding = dvui.Rect.all(0) });
         tl.addText(firstLine(why), .{ .font = style.small(), .color_text = .{ .color = style.danger() } });
         tl.deinit();
@@ -15186,7 +14406,7 @@ fn runDrop() void {
         // Into the target: it has to be checked out to take a merge.
         .merge => {
             gitDo(&.{ "switch", localName(d.target) });
-            if (command_error != null) return;
+            if (tab_strip.command_error != null) return;
             gitDo(&.{ "merge", "--no-edit", refArg(&ref_buf, d.source, if (isLocalBranch(d.source)) .local else .remote) });
         },
         // `rebase <upstream> <branch>` checks the branch out itself. A
@@ -15494,7 +14714,7 @@ fn graphPanel() void {
     defer if (search_open or commit_filter.items.len > 0) floatingSearch();
 
     if (commits.len == 0) {
-        emptyState(@src(), open_error orelse if (author_only.items.len > 0) "No commit by the authors picked." else "No commits yet.");
+        emptyState(@src(), tab_strip.open_error orelse if (author_only.items.len > 0) "No commit by the authors picked." else "No commits yet.");
         return;
     }
 
@@ -15610,14 +14830,14 @@ fn columnHeader(src: std.builtin.SourceLocation, with_lanes: bool) void {
             columnHandleDir(@src(), 3, rs.r.x + graphRuleX() * rs.s, rs, &graph_width_drag, 1, GRAPH_MIN_W, GRAPH_MAX_W);
             if (graph_width_drag != before) {
                 graph_width = graph_width_drag;
-                saveWorkspace();
+                tab_strip.saveWorkspace();
             }
             // The branch column's right edge: wider shows more of each name.
             branch_width_drag = branchColumn();
             columnHandleDir(@src(), 4, rs.r.x + branchColumn() * rs.s, rs, &branch_width_drag, 1, BRANCH_MIN_W, BRANCH_MAX_W);
             if (branch_width_drag != branchColumn()) {
                 branch_width = branch_width_drag;
-                saveWorkspace();
+                tab_strip.saveWorkspace();
             }
         }
 
@@ -15972,7 +15192,7 @@ fn authorsChanged() void {
     graph_scroll.viewport.y = 0;
     // Not in the middle of a frame: the rows being drawn index the history
     // as it is. Once the frame is done.
-    if (in_frame) authors_dirty = true else refilterHistory();
+    if (tab_strip.in_frame) authors_dirty = true else refilterHistory();
 }
 
 var authors_dirty = false;
@@ -17121,14 +16341,14 @@ fn commitMenu(
 /// leaves when the lanes are gone.
 fn avatar(src: std.builtin.SourceLocation, id: usize, commit: git.Commit, at: ?dvui.Point, ring: ?dvui.Color) void {
     // Pictures off in the settings — in the graph only: a dot there.
-    if (!show_avatars) return avatarDot(src, id, commit, at, ring, style.avatar);
+    if (!tab_strip.show_avatars) return avatarDot(src, id, commit, at, ring, style.avatar);
     avatarSized(src, id, commit, at, ring, style.avatar);
 }
 
 /// How far from a commit's centre its node reaches: its picture's radius,
 /// or its dot's with pictures off — where lines to it stop.
 fn nodeRadius() f32 {
-    return if (show_avatars) style.avatar / 2 else style.avatar * DOT_SCALE / 2;
+    return if (tab_strip.show_avatars) style.avatar / 2 else style.avatar * DOT_SCALE / 2;
 }
 /// A dot's size against a picture's.
 const DOT_SCALE: f32 = 0.5;
@@ -17646,7 +16866,7 @@ fn graphColumn() f32 {
 
 /// The graph column as dragged in its header; 0 for as wide as its lanes
 /// need. Narrower than `GRAPH_COMPACT_BELOW`, it is the compact graph.
-var graph_width: f32 = 0;
+pub var graph_width: f32 = 0;
 const GRAPH_MIN_W: f32 = 40;
 const GRAPH_MAX_W: f32 = 600;
 const GRAPH_COMPACT_BELOW: f32 = 70;
@@ -17873,7 +17093,7 @@ fn branchColumn() f32 {
 }
 
 /// The branch column as dragged in its header; 0 for its default.
-var branch_width: f32 = 0;
+pub var branch_width: f32 = 0;
 var branch_width_drag: f32 = 0;
 const BRANCH_DEFAULT_W: f32 = 160;
 /// The branch menu's room at the end of the column's name.
@@ -20431,7 +19651,7 @@ fn workingDetail() void {
 /// What the changes are waiting on, while they wait: a job that changes the
 /// working tree — staging, a stash, a commit — or the read after a command.
 fn changesWaiting() ?[]const u8 {
-    if (job != null and job_after != .remote) return job_label;
+    if (tab_strip.job != null and job_after != .remote) return tab_strip.job_label;
     if (work_settling) return settling_label;
     return null;
 }
@@ -21470,11 +20690,11 @@ fn commitBox() void {
         coAuthorMenu(@src());
         if (iconButtonTagged(@src(), "commit_sign", if (commit_prefs.sign) "Signed (-S) — click to stop signing" else "Not signed — click to sign with -S", dvui.entypo.lock, if (commit_prefs.sign) style.success() else style.textFaint(), "commit:sign")) {
             commit_prefs.sign = !commit_prefs.sign;
-            saveWorkspace();
+            tab_strip.saveWorkspace();
         }
         if (iconButtonTagged(@src(), "commit_signoff", if (commit_prefs.signoff) "Signed-off-by — click to drop it" else "No Signed-off-by — click to add one", dvui.entypo.check, if (commit_prefs.signoff) style.accent() else style.textFaint(), "commit:signoff")) {
             commit_prefs.signoff = !commit_prefs.signoff;
-            saveWorkspace();
+            tab_strip.saveWorkspace();
         }
         // No `color_text`: dvui draws the tick in it, and a muted one
         // vanishes into the accent fill. Not while a merge or a rebase is
@@ -21912,12 +21132,12 @@ fn statusBar() void {
     // on a pill of its colour. Both at once: a job clears the line as it
     // starts, so a failure beside it came after — a click refused because
     // it is running, say — and would otherwise sit unseen behind it.
-    if (job != null) {
-        statusPill(@src(), style.accent(), dvui.entypo.cycle, job_label, "…");
+    if (tab_strip.job != null) {
+        statusPill(@src(), style.accent(), dvui.entypo.cycle, tab_strip.job_label, "…");
     } else if (api_job != null) {
         statusPill(@src(), style.accent(), dvui.entypo.cycle, api_label, "…");
     }
-    if (command_error) |message| {
+    if (tab_strip.command_error) |message| {
         statusPill(@src(), style.danger(), dvui.entypo.warning, firstLine(message), "");
         if (iconButton(@src(), "dismiss_error", "Dismiss", dvui.entypo.cross, style.textMuted())) {
             clearCommandError();
@@ -21934,10 +21154,10 @@ fn statusBar() void {
     });
 
     // The zoom, only when it is not 100 %: a click puts it back.
-    if (zoom != 1.0) {
+    if (tab_strip.zoom != 1.0) {
         var buf: [8]u8 = undefined;
-        const caption = std.fmt.bufPrint(&buf, "{d}%", .{@round(zoom * 100)}) catch "";
-        if (linkButtonTagged(@src(), caption, style.textMuted(), "status:zoom")) setZoom(1.0);
+        const caption = std.fmt.bufPrint(&buf, "{d}%", .{@round(tab_strip.zoom * 100)}) catch "";
+        if (linkButtonTagged(@src(), caption, style.textMuted(), "status:zoom")) tab_strip.setZoom(1.0);
     }
 
     // The keys, then the changes panel's fold, on its side.
@@ -22266,7 +21486,7 @@ fn startScreen() void {
         dvui.label(@src(), "Pick up where you left off, or bring a repository in.", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .y = style.space.xxs } });
     }
 
-    if (open_error) |message| {
+    if (tab_strip.open_error) |message| {
         if (repo == null) dvui.label(@src(), "{s}", .{message}, .{
             .font = style.small(),
             .color_text = .{ .color = style.textFaint() },
@@ -22293,12 +21513,12 @@ fn startScreen() void {
     defer shown.deinit(dvui.currentWindow().arena());
     const arena = dvui.currentWindow().arena();
     var open_n: usize = 0;
-    for (groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
+    for (tab_strip.groups.items, 0..) |group, gi| for (group.tabs.items, 0..) |tab, ti| {
         if (listedEarlier(gi, ti, tab.path) or !startMatches(needle, tab.path)) continue;
         shown.append(arena, tab.path) catch {};
         open_n += 1;
     };
-    for (recent.items) |path| {
+    for (tab_strip.recent.items) |path| {
         if (isOpenTab(path) or !startMatches(needle, path)) continue;
         shown.append(arena, path) catch {};
     }
@@ -22391,7 +21611,7 @@ fn startAction(src: std.builtin.SourceLocation, icon: []const u8, caption: []con
 }
 
 fn isOpenTab(path: []const u8) bool {
-    for (groups.items) |group| {
+    for (tab_strip.groups.items) |group| {
         for (group.tabs.items) |tab| {
             if (std.mem.eql(u8, tab.path, path)) return true;
         }
@@ -22579,7 +21799,7 @@ fn forgetDialog() void {
 fn runForget() void {
     const path = forget_path orelse return;
     defer clearForget();
-    forgetRepo(path);
+    tab_strip.forgetRepo(path);
 }
 
 /// Centred message for a pane with nothing in it yet.
@@ -22711,7 +21931,7 @@ test "stage, commit and switch branches through the real git commands" {
 
     // Stage.
     gitDo(&.{ "add", "-A" });
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), work.?.staged.len);
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
 
@@ -22725,7 +21945,7 @@ test "stage, commit and switch branches through the real git commands" {
     try commit_summary.appendSlice(gpa, "first commit");
     doCommit();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     try std.testing.expectEqualStrings("first commit", history.?.commits[0].summary);
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
@@ -22756,7 +21976,7 @@ test "stage, commit and switch branches through the real git commands" {
     checkout(branch);
     try std.testing.expect(runAction());
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("hello.txt", history.?.head.?);
     // The file is still there: this switched branch, it did not restore a path.
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
@@ -22797,7 +22017,7 @@ fn freeViews() void {
 /// Reset, not merely freed: `deinit` leaves an ArrayList undefined rather than
 /// empty, and the next test to render a frame reads straight through it.
 fn resetUiGlobals() void {
-    zoom = 1.0;
+    tab_strip.zoom = 1.0;
     commit_scroll = .{};
     clearPickedChanges();
     picked_changes.deinit(gpa);
@@ -22829,16 +22049,16 @@ fn resetUiGlobals() void {
     left_squeezed = false;
     section_collapsed = @splat(true);
     forgetTabs();
-    groups.deinit(gpa);
-    groups = .empty;
-    workspaces.deinit(gpa);
-    workspaces = .empty;
+    tab_strip.groups.deinit(gpa);
+    tab_strip.groups = .empty;
+    tab_strip.workspaces.deinit(gpa);
+    tab_strip.workspaces = .empty;
     ws_name.deinit(gpa);
     ws_name = .empty;
     ws_dialog = null;
     tab_revealed = null;
-    config_dir.deinit(gpa);
-    config_dir = .empty;
+    tab_strip.config_dir.deinit(gpa);
+    tab_strip.config_dir = .empty;
 
     commit_filter.deinit(gpa);
     commit_summary.deinit(gpa);
@@ -22869,12 +22089,12 @@ fn resetUiGlobals() void {
     author_only = .empty;
     freeViews();
     sidebar_filter.deinit(gpa);
-    default_branch.deinit(gpa);
-    default_branch = .empty;
-    editor_cmd.deinit(gpa);
-    editor_cmd = .empty;
-    terminal_cmd.deinit(gpa);
-    terminal_cmd = .empty;
+    tab_strip.default_branch.deinit(gpa);
+    tab_strip.default_branch = .empty;
+    tab_strip.editor_cmd.deinit(gpa);
+    tab_strip.editor_cmd = .empty;
+    tab_strip.terminal_cmd.deinit(gpa);
+    tab_strip.terminal_cmd = .empty;
     clearImagePair();
     signing_key.deinit(gpa);
     signing_key = .empty;
@@ -22903,9 +22123,9 @@ fn resetUiGlobals() void {
     action_after = .remote;
     sidebar_filter = .empty;
 
-    clearRecent();
-    recent.deinit(gpa);
-    recent = .empty;
+    tab_strip.clearRecent();
+    tab_strip.recent.deinit(gpa);
+    tab_strip.recent = .empty;
     pick_open = null;
     clearJobSteps();
     job_steps.deinit(gpa);
@@ -22965,12 +22185,12 @@ fn resetUiGlobals() void {
 /// Drop the strip without freeing the list itself, which is what a restart does
 /// to it — the file on disk is the only thing that survives one.
 fn forgetTabs() void {
-    for (groups.items) |*group| group.deinit();
-    groups.clearRetainingCapacity();
-    freeWorkspaces();
-    clearRecent();
-    active_group = 0;
-    active_tab = 0;
+    for (tab_strip.groups.items) |*group| group.deinit();
+    tab_strip.groups.clearRetainingCapacity();
+    tab_strip.freeWorkspaces();
+    tab_strip.clearRecent();
+    tab_strip.active_group = 0;
+    tab_strip.active_tab = 0;
 }
 
 fn findCommit(summary: []const u8) ?git.Commit {
@@ -23135,7 +22355,7 @@ test "staging one hunk moves that hunk and leaves the other alone" {
         requestHunk(unstaged.files[0], 0, .unstaged);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     {
         // One hunk on each side: the one that was staged, and the one that was
@@ -23155,7 +22375,7 @@ test "staging one hunk moves that hunk and leaves the other alone" {
         requestHunk(staged.files[0], 0, .staged);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     var empty = try r.readWorkDiff(gpa, .staged, "lines.txt");
     defer empty.deinit();
@@ -23238,24 +22458,24 @@ test "the zoom steps a tenth at a time, within its bounds, and Ctrl+0 or the sta
 
     try pressFrame(.equal, .lcontrol);
     try pressFrame(.kp_add, .lcontrol);
-    try std.testing.expectEqual(@as(f32, 1.2), zoom);
+    try std.testing.expectEqual(@as(f32, 1.2), tab_strip.zoom);
     try std.testing.expectEqual(@as(f32, 1.2), dvui.currentWindow().content_scale);
     // Held at the top, whatever is pressed past it.
     for (0..12) |_| try pressFrame(.equal, .lcontrol);
-    try std.testing.expectEqual(ZOOM_MAX, zoom);
+    try std.testing.expectEqual(tab_strip.ZOOM_MAX, tab_strip.zoom);
     try pressFrame(.zero, .lcontrol);
-    try std.testing.expectEqual(@as(f32, 1.0), zoom);
+    try std.testing.expectEqual(@as(f32, 1.0), tab_strip.zoom);
     for (0..6) |_| try pressFrame(.minus, .lcontrol);
-    try std.testing.expectEqual(ZOOM_MIN, zoom);
+    try std.testing.expectEqual(tab_strip.ZOOM_MIN, tab_strip.zoom);
 
     // Off 100 %, the status bar says so, and its click comes back.
     try clickAt(try tagCenter("status:zoom"));
     try dvui.testing.settle(frameArrowCursor);
-    try std.testing.expectEqual(@as(f32, 1.0), zoom);
+    try std.testing.expectEqual(@as(f32, 1.0), tab_strip.zoom);
     try expectNoTag("status:zoom");
     // A file edited by hand.
-    try std.testing.expectEqual(@as(f32, 1.0), zoomStep(std.math.nan(f32)));
-    try std.testing.expectEqual(@as(f32, 1.3), zoomStep(1.27));
+    try std.testing.expectEqual(@as(f32, 1.0), tab_strip.zoomStep(std.math.nan(f32)));
+    try std.testing.expectEqual(@as(f32, 1.3), tab_strip.zoomStep(1.27));
 }
 
 test "down and up walk the history, and the commit pane follows" {
@@ -23501,7 +22721,7 @@ test "a conflicted merge is resolved and continued" {
     // the toolbar never says it is under way. A stop is not an error: no red line,
     // and the conflicted file is open.
     gitDo(&.{ "merge", "--no-edit", "other" });
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(selection == .change);
     try std.testing.expectEqualStrings("lines.txt", selected_path.items);
     try std.testing.expectEqual(git.State.merge, history.?.state);
@@ -23514,7 +22734,7 @@ test "a conflicted merge is resolved and continued" {
 
     const cmd = history.?.state.command() orelse return error.NoCommandForState;
     gitDo(&.{ "-c", "core.editor=true", cmd, "--continue" });
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
 
     // The merge commit is there, with both sides under it.
@@ -23548,7 +22768,7 @@ test "a conflicted merge aborts back to a clean tree" {
 
     const cmd = history.?.state.command() orelse return error.NoCommandForState;
     gitDo(&.{ cmd, "--abort" });
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expectEqual(@as(usize, 0), conflictCount());
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
@@ -23602,7 +22822,7 @@ test "a merge under way is driven from the toolbar, its abort asked in a toast" 
     try clickAt(try tagCenter("op:abort"));
     try clickAt(try tagCenter("confirm:yes"));
     try pumpJobFrame();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
     try expectNoTag("op:abort");
 }
@@ -23646,7 +22866,7 @@ test "mid-merge, staging markers and aborting are asked first, and undo is refus
 
     // Undo would reset under the merge.
     requestUndo();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(@as(Action, .none), action);
     try std.testing.expectEqual(git.State.merge, history.?.state);
     clearCommandError();
@@ -23657,7 +22877,7 @@ test "mid-merge, staging markers and aborting are asked first, and undo is refus
     try std.testing.expectEqual(git.State.merge, history.?.state);
     runConfirmed();
     _ = runAction();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
 }
 
@@ -23691,7 +22911,7 @@ test "a pick refuses to write over a file changed since it was shown" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "lines.txt", .data = edited });
     requestResolve(0, .ours);
     _ = runAction();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
 
     const now = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(1024));
     defer gpa.free(now);
@@ -23730,7 +22950,7 @@ test "a refused interactive rebase keeps its plan" {
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed\n" });
     rebase_steps.items[0].action = .drop;
     runRebase();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expect(selection == .rebase);
     try std.testing.expectEqual(@as(usize, 1), rebase_steps.items.len);
@@ -23774,7 +22994,7 @@ test "a rebase stopped on a conflict says where it is, and continues" {
     defer clearCommandError();
 
     gitDo(&.{ "rebase", "main" });
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.rebase, history.?.state);
     try std.testing.expectEqualStrings("feat", op_info.branch);
     try std.testing.expectEqualStrings("main", op_info.onto);
@@ -23797,7 +23017,7 @@ test "a rebase stopped on a conflict says where it is, and continues" {
     requestContinue();
     _ = runAction();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expectEqualStrings("feat adds g", history.?.commits[0].summary);
     try std.testing.expectEqualStrings("feat changes f", history.?.commits[1].summary);
@@ -23894,7 +23114,7 @@ test "a pull request is checked out tracking its branch, brought up to date, and
     checkoutRequest(3, "feat", false);
     _ = runAction();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("feat", history.?.head.?);
     try std.testing.expectEqualStrings("origin/feat", history.?.tracking.upstream.?);
 
@@ -23905,7 +23125,7 @@ test "a pull request is checked out tracking its branch, brought up to date, and
     checkoutRequest(3, "feat", false);
     _ = runAction();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("feat", history.?.head.?);
     try std.testing.expectEqualStrings("feat two", history.?.commits[0].summary);
 
@@ -23915,7 +23135,7 @@ test "a pull request is checked out tracking its branch, brought up to date, and
     checkoutRequest(7, "main", true);
     _ = runAction();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("pr/7", history.?.head.?);
     try std.testing.expectEqualStrings("feat two", history.?.commits[0].summary);
     try std.testing.expect(isLocalBranch("main"));
@@ -23957,7 +23177,7 @@ test "a pull request in conflict is rebased onto its base here, stopping at the 
     resolveRequestLocally(.{ .number = 3, .head = "feat", .base = "main", .mergeable = "CONFLICTING" }, true);
     _ = runAction();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.rebase, history.?.state);
     try std.testing.expect(conflictCount() > 0);
     try std.testing.expectEqualStrings("feat", op_info.branch);
@@ -24005,7 +23225,7 @@ test "after a rebase, Push is a force push that says what it replaces" {
     try std.testing.expect(!rebasedSinceUpstream());
 
     gitDo(&.{ "rebase", "main" });
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(rebasedSinceUpstream());
     var buf: [512]u8 = undefined;
     const text = forcePushText(&buf);
@@ -24101,7 +23321,7 @@ test "a conflict of changes on neighbouring lines is resolved safely, with its b
 
     requestAction(.resolve_safe);
     _ = runAction();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     const now = try tmp.dir.readFileAlloc(app_io, "n.txt", gpa, .limited(4096));
     defer gpa.free(now);
     try std.testing.expect(git.sameText("a = 10\nb = 20\nc = 30\n", now));
@@ -24142,7 +23362,7 @@ test "a file deleted on one side is kept or deleted in one click" {
     // "Delete it": the side that deleted it.
     takeFile(.theirs);
     _ = runAction();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 0), conflictCount());
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(app_io, "notes.txt", .{}));
 }
@@ -24193,7 +23413,7 @@ test "a conflict is resolved region by region, then staged" {
 
     requestResolve(0, .ours);
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     // Our side is what landed, and no marker survived it.
     const resolved = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(64 * 1024));
@@ -24210,7 +23430,7 @@ test "a conflict is resolved region by region, then staged" {
     try std.testing.expectEqual(@as(usize, 0), conflictCount());
 
     gitDo(&.{ "-c", "core.editor=true", "merge", "--continue" });
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
 }
 
@@ -24249,7 +23469,7 @@ test "an interactive rebase folds one commit into the one before it" {
     // list is composed from its parent.
     const second = findCommit("second") orelse return error.CommitNotFound;
     beginRebase(if (second.parents.len > 0) second.parents[0] else null);
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 2), rebase_steps.items.len);
 
     // Newest first, the order the graph shows — the todo gets reversed.
@@ -24259,7 +23479,7 @@ test "an interactive rebase folds one commit into the one before it" {
     rebase_steps.items[0].action = .fixup;
     runRebase();
 
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expectEqual(@as(usize, 2), history.?.commits.len);
     try std.testing.expectEqualStrings("second", history.?.commits[0].summary);
@@ -24298,7 +23518,7 @@ test "a rebase onto a commit off the current branch is refused, not attempted" {
     const other = findCommit("other side") orelse return error.CommitNotFound;
     beginRebase(other.id);
 
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(@as(usize, 0), rebase_steps.items.len);
     try std.testing.expectEqual(Selection.none, std.meta.activeTag(selection));
 
@@ -24309,7 +23529,7 @@ test "a rebase onto a commit off the current branch is refused, not attempted" {
     clearCommandError();
     const main_side = findCommit("main side") orelse return error.CommitNotFound;
     beginRebase(main_side.parents[0]);
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(@as(usize, 0), rebase_steps.items.len);
     try std.testing.expectEqual(Selection.none, std.meta.activeTag(selection));
 }
@@ -24343,7 +23563,7 @@ test "a branch named like a tag merges the branch, not the tag" {
 
     request(&.{ "merge", "--no-edit", "--no-ff", refArg(&ref_buf, "v1", .local) });
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 2), history.?.commits[0].parents.len);
 }
 
@@ -24430,7 +23650,7 @@ test "a hard reset waits for the confirmation" {
     try std.testing.expectEqual(@as(usize, 2), history.?.commits.len);
 
     runConfirmed();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     // Answered once, and gone.
     try std.testing.expect(confirm == null);
@@ -24460,7 +23680,7 @@ test "the new branch dialog creates a branch, and stays open when the name is ta
     try prompt_text.appendSlice(gpa, "feature");
     runPrompt();
 
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("feature") != null);
     // A create that worked closes the dialog.
     try std.testing.expect(prompt == null);
@@ -24470,7 +23690,7 @@ test "the new branch dialog creates a branch, and stays open when the name is ta
     askName(.new_branch, "");
     try prompt_text.appendSlice(gpa, "feature");
     runPrompt();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expect(prompt != null);
 
     // A dash would make it an option: `--force`, `-D`. Refused before git
@@ -24479,7 +23699,7 @@ test "the new branch dialog creates a branch, and stays open when the name is ta
     askName(.new_branch, "");
     try prompt_text.appendSlice(gpa, "-D");
     runPrompt();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expect(prompt != null);
     try std.testing.expect(findRef("-D") == null);
 
@@ -24494,7 +23714,7 @@ test "the new branch dialog creates a branch, and stays open when the name is ta
     _ = try tagRect("prompt:go");
     try typeText("typed");
     try pressFrame(.enter, .none);
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("typed") != null);
     try std.testing.expect(prompt == null);
     askName(.new_tag, "");
@@ -24579,19 +23799,19 @@ test "LFS is offered only where the repository actually uses it" {
     defer clearCommandError();
 
     // No `.gitattributes` at all, which is most repositories.
-    try std.testing.expect(!uses_lfs);
+    try std.testing.expect(!tab_strip.uses_lfs);
 
     // One that mentions another filter is still not an LFS repository.
     try tmp.dir.writeFile(app_io, .{ .sub_path = ".gitattributes", .data = "*.txt text\n" });
     openRepo(dir);
-    try std.testing.expect(!uses_lfs);
+    try std.testing.expect(!tab_strip.uses_lfs);
 
     try tmp.dir.writeFile(app_io, .{
         .sub_path = ".gitattributes",
         .data = "*.psd filter=lfs diff=lfs merge=lfs -text\n",
     });
     openRepo(dir);
-    try std.testing.expect(uses_lfs);
+    try std.testing.expect(tab_strip.uses_lfs);
 }
 
 /// Two repositories, the second with the first as its `origin`.
@@ -24629,11 +23849,11 @@ fn absPath(buf: []u8, rel: []const u8) ![]const u8 {
 /// Let a job land, the way a frame would.
 fn pumpJob() !void {
     var waited: usize = 0;
-    while (job != null and waited < 1000) : (waited += 1) {
+    while (tab_strip.job != null and waited < 1000) : (waited += 1) {
         collectJob();
-        if (job != null) try std.Io.sleep(app_io, .fromMilliseconds(10), .awake);
+        if (tab_strip.job != null) try std.Io.sleep(app_io, .fromMilliseconds(10), .awake);
     }
-    if (job != null) return error.JobNeverFinished;
+    if (tab_strip.job != null) return error.JobNeverFinished;
 }
 
 /// As `pumpJob`, then the frames after it: what the job changed is on screen,
@@ -24676,12 +23896,12 @@ test "a networked command runs off the UI thread and folds its result in" {
     requestNetwork("Fetching", &.{ "fetch", "origin" });
     try std.testing.expect(runAction());
 
-    const started = job orelse return error.NoJobStarted;
+    const started = tab_strip.job orelse return error.NoJobStarted;
     // Ran inline on this thread instead: every fetch would freeze the window.
     try std.testing.expect(!started.inline_run);
 
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     // The result was folded in, not merely awaited: the snapshot has the ref.
     try std.testing.expect(findRef("origin/main") != null);
@@ -24820,14 +24040,14 @@ test "a command that lands after the repository changed is discarded, not report
 
     requestNetwork("Fetching", &.{ "fetch", "origin" });
     try std.testing.expect(runAction());
-    try std.testing.expect(job != null);
+    try std.testing.expect(tab_strip.job != null);
 
     // Away before it lands.
     closeRepo();
     try pumpJob();
 
     // The failure belonged to a repository nobody is looking at any more.
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 }
 
 /// A config directory of its own, under the test's temporary directory.
@@ -24835,8 +24055,8 @@ test "a command that lands after the repository changed is discarded, not report
 /// Without this every one of these tests would write the real workspace file,
 /// and running the suite would rearrange the tabs of whoever ran it.
 fn useTestConfig(root: []const u8) !void {
-    try config_dir.appendSlice(gpa, root);
-    try config_dir.appendSlice(gpa, "/cfg");
+    try tab_strip.config_dir.appendSlice(gpa, root);
+    try tab_strip.config_dir.appendSlice(gpa, "/cfg");
 }
 
 test "the tab strip comes back after a restart" {
@@ -24864,30 +24084,30 @@ test "the tab strip comes back after a restart" {
     try expectGit(root, &.{ "init", "-q", "-b", "main", "b" });
 
     // A first run, with nothing to restore.
-    loadWorkspace();
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqual(@as(usize, 0), activeGroup().?.tabs.items.len);
+    tab_strip.loadWorkspace();
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.activeGroup().?.tabs.items.len);
 
-    openAndRemember(a);
-    openAndRemember(b);
-    try std.testing.expectEqual(@as(usize, 2), activeGroup().?.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 1), active_tab);
+    tab_strip.openAndRemember(a);
+    tab_strip.openAndRemember(b);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.activeGroup().?.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.active_tab);
 
     // The restart: everything in memory goes, and only the file is left.
     closeRepo();
     forgetTabs();
-    loadWorkspace();
+    tab_strip.loadWorkspace();
 
-    const group = activeGroup() orelse return error.NoGroup;
+    const group = tab_strip.activeGroup() orelse return error.NoGroup;
     try std.testing.expectEqual(@as(usize, 2), group.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 1), active_tab);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.active_tab);
     // Stored as the working directory libgit2 resolved, not as the relative
     // path they were opened with.
     try std.testing.expect(std.mem.endsWith(u8, group.tabs.items[0].path, "/a/"));
     try std.testing.expect(std.mem.endsWith(u8, group.tabs.items[1].path, "/b/"));
 
     // And the one that was in front opens again.
-    restoreActiveTab();
+    tab_strip.restoreActiveTab();
     try std.testing.expect(repo != null);
     try std.testing.expectEqualStrings("b", repo_name);
 
@@ -24923,14 +24143,14 @@ test "the same repository opened from inside itself reuses its tab" {
     var deep_buf: [std.fs.max_path_bytes]u8 = undefined;
     const deep = try std.fmt.bufPrint(&deep_buf, "{s}/a/deep/inside", .{root});
 
-    loadWorkspace();
-    openAndRemember(a);
-    openAndRemember(deep);
+    tab_strip.loadWorkspace();
+    tab_strip.openAndRemember(a);
+    tab_strip.openAndRemember(deep);
 
     // One repository, one tab: libgit2 searched upward and resolved both to the
     // same working directory, which is what the tab is keyed on.
-    try std.testing.expectEqual(@as(usize, 1), activeGroup().?.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 0), active_tab);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.activeGroup().?.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.active_tab);
 }
 
 test "closing a tab falls onto its neighbour, and closing the last leaves nothing open" {
@@ -24960,17 +24180,17 @@ test "closing a tab falls onto its neighbour, and closing the last leaves nothin
     try expectGit(root, &.{ "init", "-q", "-b", "main", "b" });
     try expectGit(root, &.{ "init", "-q", "-b", "main", "c" });
 
-    loadWorkspace();
-    openAndRemember(a);
-    openAndRemember(b);
-    openAndRemember(c);
-    try std.testing.expectEqual(@as(usize, 2), active_tab);
+    tab_strip.loadWorkspace();
+    tab_strip.openAndRemember(a);
+    tab_strip.openAndRemember(b);
+    tab_strip.openAndRemember(c);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.active_tab);
 
     // Picking a folder that is no repository leaves the open one open.
     var buf_none: [std.fs.max_path_bytes]u8 = undefined;
-    openAndRemember(try std.fmt.bufPrint(&buf_none, "{s}/none", .{root}));
+    tab_strip.openAndRemember(try std.fmt.bufPrint(&buf_none, "{s}/none", .{root}));
     try std.testing.expectEqualStrings("c", repo_name);
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     clearCommandError();
 
     // Amend ticked here, or a branch dropped on another, does not follow
@@ -24980,21 +24200,21 @@ test "closing a tab falls onto its neighbour, and closing the last leaves nothin
     setDrop("feat", "main");
 
     // Close the one in front: the neighbour takes over, and opens.
-    closeTab(2);
+    tab_strip.closeTab(2);
     try std.testing.expect(!amend);
     try std.testing.expect(drop == null);
-    try std.testing.expectEqual(@as(usize, 2), activeGroup().?.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 1), active_tab);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.activeGroup().?.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.active_tab);
     try std.testing.expectEqualStrings("b", repo_name);
 
     // Closing one to the left of where you are looking must leave you looking
     // at the same repository, at its new index.
-    closeTab(0);
-    try std.testing.expectEqual(@as(usize, 0), active_tab);
+    tab_strip.closeTab(0);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.active_tab);
     try std.testing.expectEqualStrings("b", repo_name);
 
-    closeTab(0);
-    try std.testing.expectEqual(@as(usize, 0), activeGroup().?.tabs.items.len);
+    tab_strip.closeTab(0);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.activeGroup().?.tabs.items.len);
     try std.testing.expect(repo == null);
 }
 
@@ -25015,15 +24235,15 @@ test "a tab dragged onto another takes its place, and the one shown stays shown"
     defer closeRepo();
     defer clearCommandError();
 
-    loadWorkspace();
+    tab_strip.loadWorkspace();
     var bufs: [3][std.fs.max_path_bytes]u8 = undefined;
     for ([_][]const u8{ "a", "b", "c" }, 0..) |name, i| {
         try expectGit(root, &.{ "init", "-q", "-b", "main", name });
-        openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
+        tab_strip.openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
     }
-    const tabs = &groups.items[0].tabs;
+    const tabs = &tab_strip.groups.items[0].tabs;
     const order = struct {
-        fn of(list: []const Tab, buf: *[3]u8) []const u8 {
+        fn of(list: []const tab_strip.Tab, buf: *[3]u8) []const u8 {
             for (list, 0..) |tab, i| buf[i] = git.repoName(tab.path)[0];
             return buf[0..list.len];
         }
@@ -25033,29 +24253,29 @@ test "a tab dragged onto another takes its place, and the one shown stays shown"
     try std.testing.expectEqualStrings("c", repo_name);
 
     // a onto c, rightwards: it lands after it.
-    moveTabTo(0, 0, 0, 2);
+    tab_strip.moveTabTo(0, 0, 0, 2);
     try std.testing.expectEqualStrings("bca", order.of(tabs.items, &buf));
-    try std.testing.expectEqual(@as(usize, 1), active_tab);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.active_tab);
 
     // a back onto b, leftwards: it lands before it.
-    moveTabTo(0, 2, 0, 0);
+    tab_strip.moveTabTo(0, 2, 0, 0);
     try std.testing.expectEqualStrings("abc", order.of(tabs.items, &buf));
-    try std.testing.expectEqual(@as(usize, 2), active_tab);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.active_tab);
 
     // Onto itself, or past the end: nothing, then the end.
-    moveTabTo(0, 1, 0, 1);
+    tab_strip.moveTabTo(0, 1, 0, 1);
     try std.testing.expectEqualStrings("abc", order.of(tabs.items, &buf));
-    moveTabTo(0, 2, 0, 99);
+    tab_strip.moveTabTo(0, 2, 0, 99);
     try std.testing.expectEqualStrings("abc", order.of(tabs.items, &buf));
     try std.testing.expectEqualStrings("c", repo_name);
 
     // Into another group, before the tab it was dropped on.
-    groupTab("Side", 0, 0);
-    try std.testing.expectEqualStrings("bc", order.of(groups.items[0].tabs.items, &buf));
-    moveTabTo(0, 1, 1, 0);
-    try std.testing.expectEqualStrings("ca", order.of(groups.items[1].tabs.items, &buf));
-    try std.testing.expectEqual(@as(usize, 1), active_group);
-    try std.testing.expectEqual(@as(usize, 0), active_tab);
+    tab_strip.groupTab("Side", 0, 0);
+    try std.testing.expectEqualStrings("bc", order.of(tab_strip.groups.items[0].tabs.items, &buf));
+    tab_strip.moveTabTo(0, 1, 1, 0);
+    try std.testing.expectEqualStrings("ca", order.of(tab_strip.groups.items[1].tabs.items, &buf));
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.active_group);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.active_tab);
     try std.testing.expectEqualStrings("c", repo_name);
 }
 
@@ -25082,46 +24302,46 @@ test "workspaces hold their own groups, and switching opens the tab each was on"
     const c = try std.fmt.bufPrint(&buf_c, "{s}/c", .{root});
     inline for (.{ "a", "b", "c" }) |name| try expectGit(root, &.{ "init", "-q", "-b", "main", name });
 
-    loadWorkspace();
-    try std.testing.expectEqual(@as(usize, 1), workspaces.items.len);
-    openAndRemember(a);
-    openAndRemember(b);
+    tab_strip.loadWorkspace();
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.workspaces.items.len);
+    tab_strip.openAndRemember(a);
+    tab_strip.openAndRemember(b);
     // Groups as ever, inside the workspace.
-    groupTab("Side", 0, 1);
-    try std.testing.expectEqualStrings("Side", groups.items[1].name);
-    try std.testing.expectEqual(@as(usize, 0), groups.items[1].ws);
+    tab_strip.groupTab("Side", 0, 1);
+    try std.testing.expectEqualStrings("Side", tab_strip.groups.items[1].name);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.groups.items[1].ws);
 
     // A new workspace: empty, its own group, nothing open.
     const w = newWorkspace("Client", 3).?;
     selectWorkspace(w);
-    try std.testing.expectEqual(w, active_ws);
+    try std.testing.expectEqual(w, tab_strip.active_ws);
     try std.testing.expect(repo == null and new_tab_open);
-    openAndRemember(c);
-    try std.testing.expectEqual(w, groups.items[active_group].ws);
+    tab_strip.openAndRemember(c);
+    try std.testing.expectEqual(w, tab_strip.groups.items[tab_strip.active_group].ws);
 
     // Back: b, where it was, in its group.
     selectWorkspace(0);
     try std.testing.expectEqualStrings("b", repo_name);
-    try std.testing.expectEqualStrings("Side", groups.items[active_group].name);
+    try std.testing.expectEqualStrings("Side", tab_strip.groups.items[tab_strip.active_group].name);
     selectWorkspace(w);
     try std.testing.expectEqualStrings("c", repo_name);
 
     // All of it after a restart.
-    saveWorkspace();
+    tab_strip.saveWorkspace();
     closeRepo();
     forgetTabs();
-    loadWorkspace();
-    try std.testing.expectEqual(@as(usize, 2), workspaces.items.len);
-    try std.testing.expectEqualStrings("Client", workspaces.items[1].name);
-    try std.testing.expectEqual(@as(u8, 3), workspaces.items[1].color);
+    tab_strip.loadWorkspace();
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.workspaces.items.len);
+    try std.testing.expectEqualStrings("Client", tab_strip.workspaces.items[1].name);
+    try std.testing.expectEqual(@as(u8, 3), tab_strip.workspaces.items[1].color);
     var side = false;
-    for (groups.items) |g| side = side or (std.mem.eql(u8, g.name, "Side") and g.ws == 0);
+    for (tab_strip.groups.items) |g| side = side or (std.mem.eql(u8, g.name, "Side") and g.ws == 0);
     try std.testing.expect(side);
 
     // Deleted: its tabs to the recent list, the other workspace stays.
     deleteWorkspace(1);
-    try std.testing.expectEqual(@as(usize, 1), workspaces.items.len);
-    for (groups.items) |g| try std.testing.expectEqual(@as(usize, 0), g.ws);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.workspaces.items.len);
+    for (tab_strip.groups.items) |g| try std.testing.expectEqual(@as(usize, 0), g.ws);
 }
 
 test "a group is made in a dialog, with its colour and no name" {
@@ -25139,8 +24359,8 @@ test "a group is made in a dialog, with its colour and no name" {
     var buf_a: [std.fs.max_path_bytes]u8 = undefined;
     const a = try std.fmt.bufPrint(&buf_a, "{s}/a", .{root});
     try expectGit(root, &.{ "init", "-q", "-b", "main", "a" });
-    loadWorkspace();
-    openAndRemember(a);
+    tab_strip.loadWorkspace();
+    tab_strip.openAndRemember(a);
 
     group_target = .{ 0, 0 };
     openWorkspaceDialog(.group);
@@ -25151,11 +24371,11 @@ test "a group is made in a dialog, with its colour and no name" {
     applyWorkspaceDialog();
     try std.testing.expect(ws_dialog == null);
     // Its only tab gone, the group it came from goes too.
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqualStrings(GROUP_MARK, groups.items[0].name);
-    try std.testing.expectEqual(@as(u8, 4), groups.items[0].color);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
-    try std.testing.expectEqualStrings("", groupLabel(groups.items[0]));
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items.len);
+    try std.testing.expectEqualStrings(tab_strip.GROUP_MARK, tab_strip.groups.items[0].name);
+    try std.testing.expectEqual(@as(u8, 4), tab_strip.groups.items[0].color);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items[0].tabs.items.len);
+    try std.testing.expectEqualStrings("", tab_strip.groupLabel(tab_strip.groups.items[0]));
 
     // Named, then the name taken off again: still a group, its dot alone.
     group_target = .{ 0, 0 };
@@ -25163,19 +24383,19 @@ test "a group is made in a dialog, with its colour and no name" {
     try std.testing.expectEqual(@as(u8, 4), ws_color);
     ws_name.appendSlice(gpa, " Client ") catch unreachable;
     applyWorkspaceDialog();
-    try std.testing.expectEqualStrings("Client", groupLabel(groups.items[0]));
+    try std.testing.expectEqualStrings("Client", tab_strip.groupLabel(tab_strip.groups.items[0]));
     openWorkspaceDialog(.group_rename);
     try std.testing.expectEqualStrings("Client", ws_name.items);
     ws_name.clearRetainingCapacity();
     applyWorkspaceDialog();
-    try std.testing.expectEqualStrings(GROUP_MARK, groups.items[0].name);
+    try std.testing.expectEqualStrings(tab_strip.GROUP_MARK, tab_strip.groups.items[0].name);
 
     // Let go past the last tab: out of the group, which goes, empty.
-    tabToEnd(0, 0);
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqual(@as(usize, 0), groups.items[0].name.len);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 0), active_group);
+    tab_strip.tabToEnd(0, 0);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.groups.items[0].name.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items[0].tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.active_group);
 }
 
 test "a group keeps its own tabs, and the last group cannot be closed" {
@@ -25202,49 +24422,49 @@ test "a group keeps its own tabs, and the last group cannot be closed" {
     try expectGit(root, &.{ "init", "-q", "-b", "main", "a" });
     try expectGit(root, &.{ "init", "-q", "-b", "main", "b" });
 
-    loadWorkspace();
-    openAndRemember(a);
+    tab_strip.loadWorkspace();
+    tab_strip.openAndRemember(a);
 
-    openAndRemember(b);
+    tab_strip.openAndRemember(b);
     // Two tabs in no group to begin with.
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqualStrings("", groups.items[0].name);
-    try std.testing.expectEqual(@as(usize, 2), groups.items[0].tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items.len);
+    try std.testing.expectEqualStrings("", tab_strip.groups.items[0].name);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.groups.items[0].tabs.items.len);
 
     // b into a group of its own, still the one open.
-    groupTab("Side", 0, 1);
-    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqualStrings("Side", groups.items[1].name);
-    try std.testing.expectEqual(@as(usize, 1), active_group);
+    tab_strip.groupTab("Side", 0, 1);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.groups.items.len);
+    try std.testing.expectEqualStrings("Side", tab_strip.groups.items[1].name);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.active_group);
     try std.testing.expectEqualStrings("b", repo_name);
 
     // A tab of the other group, picked straight from the strip.
-    selectTabIn(0, 0);
+    tab_strip.selectTabIn(0, 0);
     try std.testing.expectEqualStrings("a", repo_name);
 
     // Both groups survive the restart, with their tabs, colour and fold.
-    groups.items[1].collapsed = true;
-    groups.items[1].color = 3;
-    saveWorkspace();
+    tab_strip.groups.items[1].collapsed = true;
+    tab_strip.groups.items[1].color = 3;
+    tab_strip.saveWorkspace();
     closeRepo();
     forgetTabs();
-    loadWorkspace();
-    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqualStrings("Side", groups.items[1].name);
-    try std.testing.expect(groups.items[1].collapsed);
-    try std.testing.expectEqual(@as(u8, 3), groups.items[1].color);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[1].tabs.items.len);
+    tab_strip.loadWorkspace();
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.groups.items.len);
+    try std.testing.expectEqualStrings("Side", tab_strip.groups.items[1].name);
+    try std.testing.expect(tab_strip.groups.items[1].collapsed);
+    try std.testing.expectEqual(@as(u8, 3), tab_strip.groups.items[1].color);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items[1].tabs.items.len);
 
     // Out of the group again: the group, empty, goes.
-    ungroupTab(1, 0);
-    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    try std.testing.expectEqualStrings("", groups.items[1].name);
+    tab_strip.ungroupTab(1, 0);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.groups.items.len);
+    try std.testing.expectEqualStrings("", tab_strip.groups.items[1].name);
 
     // Closing a group closes its tabs; the last one standing stays.
-    closeGroup(0);
-    closeGroup(0);
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqual(@as(usize, 0), groups.items[0].tabs.items.len);
+    tab_strip.closeGroup(0);
+    tab_strip.closeGroup(0);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.groups.items[0].tabs.items.len);
 }
 
 test "First-parent shows the mainline through a merge, All branches the side branch too" {
@@ -25322,7 +24542,7 @@ test "renames, a named stash and a forced delete go through git" {
     // Pre-filled with the old name, so a typo is fixed rather than retyped.
     try std.testing.expectEqualStrings("feat", prompt_text.items);
     try answerPrompt("renamed");
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("renamed") != null);
     try std.testing.expect(findRef("feat") == null);
     try std.testing.expectEqual(@as(?Prompt, null), prompt);
@@ -25331,7 +24551,7 @@ test "renames, a named stash and a forced delete go through git" {
     try answerPrompt("up");
     askNameWith(.remote_url, "up", "/nowhere");
     try answerPrompt("/elsewhere");
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("up", history.?.remotes[0].name);
     try std.testing.expectEqualStrings("/elsewhere", history.?.remotes[0].url);
 
@@ -25339,7 +24559,7 @@ test "renames, a named stash and a forced delete go through git" {
     askName(.stash, "");
     try answerPrompt("half a thought");
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expect(std.mem.indexOf(u8, history.?.stashes[0].message, "half a thought") != null);
 
@@ -25351,7 +24571,7 @@ test "renames, a named stash and a forced delete go through git" {
     try expectGit(dir, &.{ "stash", "push", "-m", "newer" });
     try answerConfirm();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
     try std.testing.expect(std.mem.indexOf(u8, history.?.stashes[0].message, "newer") != null);
 
@@ -25363,7 +24583,7 @@ test "renames, a named stash and a forced delete go through git" {
     requestStash("pop", newer);
     try std.testing.expect(runAction());
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     const popped = try tmp.dir.readFileAlloc(app_io, "a.txt", gpa, .limited(64));
     defer gpa.free(popped);
     try std.testing.expectEqualStrings("changed again\n", popped);
@@ -25381,10 +24601,10 @@ test "renames, a named stash and a forced delete go through git" {
     reloadHistory();
 
     gitDo(&.{ "branch", "-d", "lost" });
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     ask(.delete_branch_force, "lost");
     try answerConfirm();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("lost") == null);
 }
 
@@ -25418,7 +24638,7 @@ test "a hunk is discarded alone, and a file comes back from a commit" {
         askDiscardHunk(unstaged.files[0], 0);
     }
     try answerConfirm();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     const after = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(1 << 16));
     defer gpa.free(after);
@@ -25433,7 +24653,7 @@ test "a hunk is discarded alone, and a file comes back from a commit" {
     var sha_buf: [8]u8 = undefined;
     ask(.restore_file, try std.fmt.bufPrint(&arg_buf, "{s} lines.txt", .{git.oidShort(base.id, &sha_buf)}));
     try answerConfirm();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     const restored = try tmp.dir.readFileAlloc(app_io, "lines.txt", gpa, .limited(1 << 16));
     defer gpa.free(restored);
@@ -25521,7 +24741,7 @@ test "ignoring a file appends it to .gitignore and it drops out of the changes" 
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
 
     ignorePath("scratch.txt");
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     const text = try tmp.dir.readFileAlloc(app_io, ".gitignore", gpa, .limited(1 << 16));
     defer gpa.free(text);
@@ -25536,7 +24756,7 @@ test "ignoring a file appends it to .gitignore and it drops out of the changes" 
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a1.txt", .data = "x\n" });
     reloadWork();
     ignorePath("a[1].txt");
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 2), work.?.unstaged.len);
     for (work.?.unstaged) |change| try std.testing.expect(!std.mem.eql(u8, change.path, "a[1].txt"));
 }
@@ -25575,7 +24795,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
     try std.testing.expect(runAction());
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("origin/feat") != null);
     try std.testing.expect(history.?.tracking.upstream != null);
 
@@ -25585,7 +24805,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     ask(.force_push, "");
     try answerConfirm();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     // The remote now has the rewritten commit, not the one it had.
     try std.testing.expect(findCommit("rewritten") != null);
     try std.testing.expectEqual(@as(usize, 0), history.?.tracking.ahead);
@@ -25594,7 +24814,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     ask(.delete_remote_branch, "origin/feat");
     try answerConfirm();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     {
         var gone = try run.git(gpa, app_io, up, &.{ "rev-parse", "--verify", "-q", "refs/heads/feat" });
         defer gone.deinit(gpa);
@@ -25611,7 +24831,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     ask(.delete_remote_tag, "v1");
     try answerConfirm();
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     {
         var gone = try run.git(gpa, app_io, up, &.{ "rev-parse", "--verify", "-q", "refs/tags/v1" });
         defer gone.deinit(gpa);
@@ -25677,14 +24897,14 @@ test "fetch, and each pull the menu offers, through the toolbar" {
     try commitFile(&tmp, up, "up/b.txt", "upstream two");
     try clickAt(try tagCenter("toolbar:Fetch"));
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.tracking.behind);
 
     // Fast-forward only, from behind.
     try clickAt(try tagCenter("toolbar:pull_menu"));
     try clickAt(try tagCenter("menu:Pull, fast-forward only"));
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectSubject(down, "HEAD", "upstream two");
     try std.testing.expectEqual(@as(usize, 0), history.?.tracking.behind);
 
@@ -25696,7 +24916,7 @@ test "fetch, and each pull the menu offers, through the toolbar" {
     try clickAt(try tagCenter("toolbar:pull_menu"));
     try clickAt(try tagCenter("menu:Pull, rebasing local commits"));
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectSubject(down, "HEAD", "local one");
     try expectSubject(down, "HEAD~1", "upstream three");
 
@@ -25708,7 +24928,7 @@ test "fetch, and each pull the menu offers, through the toolbar" {
     try clickAt(try tagCenter("toolbar:pull_menu"));
     try clickAt(try tagCenter("menu:Pull, merging"));
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectSubject(down, "HEAD^1", "local two");
     try expectSubject(down, "HEAD^2", "upstream four");
 }
@@ -25755,7 +24975,7 @@ test "a commit's menu leads with check out, and resets from a submenu" {
 
     try clickAt(reset_row);
     try clickAt(try tagCenter("menu:Soft — keep changes staged"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectSubject(dir, "HEAD", "base");
     // Soft: what the second commit added is staged, not lost.
     {
@@ -25803,7 +25023,7 @@ test "cherry-pick and revert from a commit's menu, a merge's too" {
     // Cherry-picked from feat onto main.
     try rightClickAt(try commitCenter("feat work"));
     try clickAt(try tagCenter("menu:Cherry-pick onto current branch"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectSubject(dir, "HEAD", "feat work");
     try expectGit(dir, &.{ "rev-parse", "--verify", "-q", "HEAD:g.txt" });
 
@@ -25817,7 +25037,7 @@ test "cherry-pick and revert from a commit's menu, a merge's too" {
         try rightClickAt(try tagCenter(tag));
     }
     try clickAt(try tagCenter("menu:Revert"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectSubject(dir, "HEAD", "Revert \"feat work\"");
     {
         var gone = try run.git(gpa, app_io, dir, &.{ "rev-parse", "--verify", "-q", "HEAD:g.txt" });
@@ -25831,7 +25051,7 @@ test "cherry-pick and revert from a commit's menu, a merge's too" {
     try dvui.testing.settle(frameArrowCursor);
     try rightClickAt(try commitCenter("merge feat"));
     try clickAt(try tagCenter("menu:Revert"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectSubject(dir, "HEAD", "Revert \"merge feat\"");
     try expectSubject(dir, "HEAD~1", "merge feat");
 }
@@ -25875,7 +25095,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
         try clickAt(try tagCenter(try std.fmt.bufPrint(&tag_buf, "stash_apply:{s}", .{git.oidShort(history.?.stashes[0].id, &short)})));
     }
     try pumpJobFrame();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), changeCount());
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
 
@@ -25892,7 +25112,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     // the commit not in the history yet, the job left running into the
     // next test.
     try pumpJobFrame();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     try expectSubject(dir, "HEAD", "first");
     try expectGit(dir, &.{ "diff", "--quiet", "HEAD", "--", "a.txt" });
@@ -25903,7 +25123,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
     try std.testing.expect(prompt != null);
     try typeText("v0.1");
     try clickAt(try tagCenter("prompt:go"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("v0.1") != null);
 }
 
@@ -25946,7 +25166,7 @@ test "the toolbar's branch menu filters and switches branches" {
     try std.testing.expect(dvui.tagGet("switch:main") == null);
     try clickAt(try tagCenter("switch:feature"));
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("feature", history.?.head.?);
 
     // A branch only the remote has: switched to, and tracked.
@@ -25954,7 +25174,7 @@ test "the toolbar's branch menu filters and switches branches" {
     try std.testing.expectEqual(@as(usize, 0), switch_filter.items.len);
     try clickAt(try tagCenter("switch:origin/remote-only"));
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("remote-only", history.?.head.?);
     try expectGit(down, &.{ "rev-parse", "--verify", "-q", "remote-only@{upstream}" });
 }
@@ -26348,7 +25568,7 @@ test "the request's sidebar picks its labels from a list, sent at once" {
     try clickAt(try tagCenter("pick:bug"));
     try std.testing.expect(listHas(side_list.items, "bug"));
     try std.testing.expect(listHas(side_list.items, "enhancement"));
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
 
     // The edit dialog opens on the request as it is.
     openPrEdit(pr.detail.?);
@@ -26500,7 +25720,7 @@ test "changes asked for: threads under their review, a suggestion applied from i
     // The suggestion, into the file here; its button then says so, and
     // leads to the change.
     try clickAt(try tagCenter("pr:apply:T1"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectNoTag("pr:apply:T1");
     _ = try tagRect("pr:applied:T1");
     const now = try tmp.dir.readFileAlloc(app_io, "login.ts", gpa, .limited(1024));
@@ -26677,7 +25897,7 @@ test "a clone opens in a tab" {
     requestAction(.repo_dialog);
     try std.testing.expect(runAction());
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(std.mem.endsWith(u8, repo_path.items, "cloned/"));
     try std.testing.expect(findCommit("upstream commit") != null);
     try std.testing.expect(findRef("origin/main") != null);
@@ -26718,7 +25938,7 @@ test "undo takes back a commit and a checkout, and undoing an undo redoes" {
     // The commit by its full sha: seven characters can be ambiguous.
     try std.testing.expectEqual(@as(usize, 40), action_argv[2].len);
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findCommit("second") == null);
     // Nothing lost: what the commit carried is staged again.
     try std.testing.expectEqual(@as(usize, 1), work.?.staged.len);
@@ -26735,7 +25955,7 @@ test "undo takes back a commit and a checkout, and undoing an undo redoes" {
     try std.testing.expectEqualStrings("elsewhere", history.?.head.?);
     requestUndo();
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("main", history.?.head.?);
 
     // A reset outside Zit onto the commit HEAD is already on: same oid, same
@@ -26766,7 +25986,7 @@ test "redo takes back the last undo, and only while nothing has moved since" {
 
     // Nothing undone yet: nothing to redo.
     requestRedo();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     clearCommandError();
 
     requestUndo();
@@ -26774,11 +25994,11 @@ test "redo takes back the last undo, and only while nothing has moved since" {
     try std.testing.expect(findCommit("second") == null);
     requestRedo();
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findCommit("second") != null);
     // Redone once; a second redo has nothing to take back.
     requestRedo();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     clearCommandError();
 
     // Undone, then something else moves HEAD: the redo is gone with it.
@@ -26788,7 +26008,7 @@ test "redo takes back the last undo, and only while nothing has moved since" {
     poll();
     try std.testing.expect(!canRedo());
     requestRedo();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expect(findCommit("second") == null);
     clearCommandError();
 
@@ -26813,7 +26033,7 @@ test "with the integrations off, no pull requests, issues or GitHub account" {
     gpa = std.testing.allocator;
     app_io = std.testing.io;
     defer resetUiGlobals();
-    defer integrations = true;
+    defer tab_strip.integrations = true;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -26838,7 +26058,7 @@ test "with the integrations off, no pull requests, issues or GitHub account" {
     try std.testing.expect(dvui.tagGet("menu:Sign in with GitHub") != null);
     try pressFrame(.escape, .none);
 
-    setIntegrations(false);
+    tab_strip.setIntegrations(false);
     try std.testing.expectEqual(pr.Host.none, pr.host);
     try std.testing.expectEqual(.graph, active_view);
     try dvui.testing.settle(frameArrowCursor);
@@ -27204,7 +26424,7 @@ test "changes picked together are stashed or staged together, and only they" {
     try std.testing.expectEqual(@as(usize, 0), picked_changes.items.len);
     try std.testing.expect(runAction());
     try pumpJob();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
     try std.testing.expectEqualStrings("b.txt", work.?.unstaged[0].path);
     try std.testing.expectEqual(@as(usize, 1), history.?.stashes.len);
@@ -27259,7 +26479,7 @@ test "picked lines of a new file go into the index alone" {
         requestLines(file, 0, .unstaged, false);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     const index = try run.capture(gpa, app_io, dir, &.{ "git", "show", ":new.txt" });
     defer gpa.free(index.out);
@@ -27318,7 +26538,7 @@ test "picked lines are staged and unstaged alone" {
         requestLines(file, 0, .unstaged, false);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
     var staged = try run.git(gpa, app_io, dir, &.{ "diff", "--cached", "--quiet", "--", "f.txt" });
     staged.deinit(gpa);
@@ -27343,7 +26563,7 @@ test "picked lines are staged and unstaged alone" {
         requestLines(show.files[0], 0, .staged, false);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     var none = try r.readWorkDiff(gpa, .staged, "f.txt");
     defer none.deinit();
     try std.testing.expectEqual(@as(usize, 0), none.files.len);
@@ -27360,14 +26580,14 @@ test "picked lines are staged and unstaged alone" {
         requestHunk(d.files[0], 0, .unstaged);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     {
         var d = try r.readWorkDiff(gpa, .staged, "f.txt");
         defer d.deinit();
         requestHunk(d.files[0], 0, .staged);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     {
         var d = try r.readWorkDiff(gpa, .unstaged, "f.txt");
         defer d.deinit();
@@ -27378,7 +26598,7 @@ test "picked lines are staged and unstaged alone" {
         requestLines(d.files[0], 0, .unstaged, false);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     var nonl_rest = try r.readWorkDiff(gpa, .unstaged, "f.txt");
     defer nonl_rest.deinit();
     try std.testing.expectEqual(@as(usize, 0), nonl_rest.files.len);
@@ -27394,7 +26614,7 @@ test "picked lines are staged and unstaged alone" {
         requestHunk(d.files[0], 0, .unstaged);
         try std.testing.expect(runAction());
     }
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     var crlf_rest = try r.readWorkDiff(gpa, .unstaged, "f.txt");
     defer crlf_rest.deinit();
     try std.testing.expectEqual(@as(usize, 0), crlf_rest.files.len);
@@ -27428,7 +26648,7 @@ test "picked lines are staged and unstaged alone" {
         try std.testing.expectEqual(git.Status.renamed, d.files[0].status);
     }
     doDiscard("[g].txt");
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     const back = try tmp.dir.readFileAlloc(app_io, "f.txt", gpa, .limited(1 << 16));
     defer gpa.free(back);
     try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(app_io, "[g].txt", gpa, .limited(1 << 16)));
@@ -27466,7 +26686,7 @@ test "discarding everything stops at a restore that failed, and needs none for u
     defer expectRun(&.{ "chmod", "755", ro }) catch {};
     reloadWork();
     doDiscard("");
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     const kept = try tmp.dir.readFileAlloc(app_io, "u.txt", gpa, .limited(64));
     gpa.free(kept);
     clearCommandError();
@@ -27476,7 +26696,7 @@ test "discarding everything stops at a restore that failed, and needs none for u
     try expectGit(dir, &.{ "checkout", "--", "ro/f.txt" });
     reloadWork();
     doDiscard("");
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(app_io, "u.txt", gpa, .limited(64)));
 }
 
@@ -27510,13 +26730,13 @@ test "a worktree is added, listed, and removed" {
     var answer_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
     askName(.add_worktree, "");
     try answerPrompt(try std.fmt.bufPrint(&answer_buf, "{s} feature", .{wt}));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.worktrees.len);
     try std.testing.expect(findRef("feature") != null);
 
     ask(.remove_worktree, history.?.worktrees[0].path);
     try answerConfirm();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 0), history.?.worktrees.len);
 }
 
@@ -27537,7 +26757,7 @@ test "the new repository dialog makes the folder, the first commit, and a tab" {
     defer git.shutdown();
     defer closeRepo();
     defer clearCommandError();
-    loadWorkspace();
+    tab_strip.loadWorkspace();
 
     try std.testing.expectEqualStrings("zync", nameFromUrl("https://github.com/me/zync.git"));
     try std.testing.expectEqualStrings("zync", nameFromUrl("git@github.com:me/zync"));
@@ -27568,7 +26788,7 @@ test "the new repository dialog makes the folder, the first commit, and a tab" {
     try std.testing.expectEqual(RepoDialog.none, repo_dialog);
     try std.testing.expect(repo != null);
     try std.testing.expect(std.mem.endsWith(u8, repo_path.items, "fresh/"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("main", history.?.head.?);
     try std.testing.expect(findCommit("Initial commit") != null);
 
@@ -27580,7 +26800,7 @@ test "the new repository dialog makes the folder, the first commit, and a tab" {
     try dialog_name.appendSlice(gpa, "fresh");
     requestAction(.repo_dialog);
     _ = runAction();
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(RepoDialog.create, repo_dialog);
     reloadHistory();
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
@@ -27618,7 +26838,7 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
     drop_action = .merge;
     requestAction(.drop);
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("main", history.?.head.?);
     try std.testing.expect(drop == null);
     var feature_hex: [41]u8 = undefined;
@@ -27629,7 +26849,7 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
     drop_action = .rebase;
     requestAction(.drop);
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectGit(dir, &.{ "merge-base", "--is-ancestor", "main", "other" });
 
     // A remote branch rebases the local one tracking it, whatever its name,
@@ -27644,12 +26864,12 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
     drop_action = .rebase;
     requestAction(.drop);
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try expectGit(dir, &.{ "merge-base", "--is-ancestor", "other", "feat" });
     setDrop("origin/lone", "other");
     requestAction(.drop);
     try std.testing.expect(runAction());
-    try std.testing.expect(command_error != null);
+    try std.testing.expect(tab_strip.command_error != null);
 }
 
 // The gesture itself: press on one branch row, move across to another, let
@@ -27736,7 +26956,7 @@ test "dragging a branch row onto another opens the drop menu where it was let go
     try dvui.testing.settle(frameArrow);
     try clickAt(try tagCenter("menu:Merge feat into main"));
     try pumpJobFrame();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(drop == null);
     try expectNoTag("menu:Merge feat into main");
 }
@@ -28520,11 +27740,11 @@ test "dragging a tab onto another moves it there" {
     defer git.shutdown();
     defer closeRepo();
 
-    loadWorkspace();
+    tab_strip.loadWorkspace();
     var bufs: [3][std.fs.max_path_bytes]u8 = undefined;
     for ([_][]const u8{ "a", "b", "c" }, 0..) |name, i| {
         try expectGit(root, &.{ "init", "-q", "-b", "main", name });
-        openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
+        tab_strip.openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
     }
 
     // See "dragging a branch row onto another opens the drop menu where it was let go".
@@ -28555,7 +27775,7 @@ test "dragging a tab onto another moves it there" {
     _ = try cw.addEventMouseButton(.left, .release);
     try dvui.testing.settle(frameArrow);
 
-    const tabs = groups.items[0].tabs.items;
+    const tabs = tab_strip.groups.items[0].tabs.items;
     try std.testing.expectEqualStrings("b", git.repoName(tabs[0].path));
     try std.testing.expectEqualStrings("c", git.repoName(tabs[1].path));
     try std.testing.expectEqualStrings("a", git.repoName(tabs[2].path));
@@ -28580,12 +27800,12 @@ test "more tabs than fit scroll, and leave the window's buttons where they are" 
     defer git.shutdown();
     defer closeRepo();
 
-    loadWorkspace();
+    tab_strip.loadWorkspace();
     const names = [_][]const u8{ "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa" };
     var bufs: [names.len][std.fs.max_path_bytes]u8 = undefined;
     for (names, 0..) |name, i| {
         try expectGit(root, &.{ "init", "-q", "-b", "main", name });
-        openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
+        tab_strip.openAndRemember(try std.fmt.bufPrint(&bufs[i], "{s}/{s}", .{ root, name }));
     }
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 700, .h = 600 } });
@@ -28800,30 +28020,30 @@ test "a closed tab is remembered, and only forgetting removes it" {
     const a = try std.fmt.bufPrint(&a_buf, "{s}/a", .{root});
     try expectGit(root, &.{ "init", "-q", "-b", "main", "a" });
 
-    loadWorkspace();
-    openAndRemember(a);
+    tab_strip.loadWorkspace();
+    tab_strip.openAndRemember(a);
     const path = try gpa.dupe(u8, repo_path.items);
     defer gpa.free(path);
-    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.recent.items.len);
 
-    closeTab(0);
-    try std.testing.expectEqual(@as(usize, 1), recent.items.len);
-    try std.testing.expectEqualStrings(path, recent.items[0]);
+    tab_strip.closeTab(0);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.recent.items.len);
+    try std.testing.expectEqualStrings(path, tab_strip.recent.items[0]);
 
     // Through a restart.
     forgetTabs();
-    loadWorkspace();
-    try std.testing.expectEqual(@as(usize, 1), recent.items.len);
+    tab_strip.loadWorkspace();
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.recent.items.len);
 
     // Opened again: a tab, so not also a recent one.
-    openAndRemember(path);
-    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
-    closeTab(0);
+    tab_strip.openAndRemember(path);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.recent.items.len);
+    tab_strip.closeTab(0);
 
     askForget(path);
     requestAction(.forget);
     try std.testing.expect(runAction());
-    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.recent.items.len);
     try std.testing.expect(forget_path == null);
     // Nothing on disk went with it.
     try expectGit(a, &.{ "rev-parse", "--git-dir" });
@@ -28832,33 +28052,33 @@ test "a closed tab is remembered, and only forgetting removes it" {
     var b_buf: [std.fs.max_path_bytes]u8 = undefined;
     const b = try std.fmt.bufPrint(&b_buf, "{s}/b", .{root});
     try expectGit(root, &.{ "init", "-q", "-b", "main", "b" });
-    openAndRemember(a);
-    openAndRemember(b);
+    tab_strip.openAndRemember(a);
+    tab_strip.openAndRemember(b);
     const b_path = try gpa.dupe(u8, repo_path.items);
     defer gpa.free(b_path);
-    groupTab("Side", 0, 1);
-    selectTabIn(0, 0);
-    openAndRemember(b);
-    try std.testing.expectEqual(@as(usize, 1), active_group);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
+    tab_strip.groupTab("Side", 0, 1);
+    tab_strip.selectTabIn(0, 0);
+    tab_strip.openAndRemember(b);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.active_group);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items[0].tabs.items.len);
 
     // Forgotten while it is the only tab of the active group and a tab of
     // another one too: the group goes, and what opens is not b again.
-    try groups.items[0].tabs.append(gpa, .{ .path = try gpa.dupe(u8, b_path) });
-    forgetRepo(b_path);
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
-    try std.testing.expectEqual(@as(usize, 1), groups.items[0].tabs.items.len);
+    try tab_strip.groups.items[0].tabs.append(gpa, .{ .path = try gpa.dupe(u8, b_path) });
+    tab_strip.forgetRepo(b_path);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items[0].tabs.items.len);
     try std.testing.expectEqualStrings("a", repo_name);
-    try std.testing.expectEqual(@as(usize, 0), recent.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tab_strip.recent.items.len);
 
     // Forgotten while the only tab of a group that is not the active one: no
     // empty group left behind.
-    openAndRemember(b);
-    groupTab("Solo", 0, 1);
-    selectTabIn(0, 0);
-    try std.testing.expectEqual(@as(usize, 2), groups.items.len);
-    forgetRepo(b_path);
-    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
+    tab_strip.openAndRemember(b);
+    tab_strip.groupTab("Solo", 0, 1);
+    tab_strip.selectTabIn(0, 0);
+    try std.testing.expectEqual(@as(usize, 2), tab_strip.groups.items.len);
+    tab_strip.forgetRepo(b_path);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.groups.items.len);
     try std.testing.expectEqualStrings("a", repo_name);
 }
 
@@ -29023,9 +28243,9 @@ test "audit: the main controls do what they say when clicked" {
     try expectGit(a, &.{ "branch", "feat" });
     try expectGit(root, &.{ "init", "-q", "-b", "main", "b" });
 
-    loadWorkspace();
-    openAndRemember(b);
-    openAndRemember(a);
+    tab_strip.loadWorkspace();
+    tab_strip.openAndRemember(b);
+    tab_strip.openAndRemember(a);
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a/one.txt", .data = "one, edited\n" });
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a/two.txt", .data = "two\n" });
     reloadWork();
@@ -29098,7 +28318,7 @@ test "audit: the main controls do what they say when clicked" {
     // the commit not in the history yet, the job left running into the
     // next test.
     try pumpJobFrame();
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findCommit("audit commit") != null);
     try std.testing.expectEqual(@as(usize, 0), commit_summary.items.len);
 
@@ -29114,7 +28334,7 @@ test "audit: the main controls do what they say when clicked" {
     try std.testing.expectEqualStrings("feat", prompt_text.items);
     try typeText("ure");
     try clickAt(try tagCenter("prompt:go"));
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("feature") != null);
 
     // Double-click a branch to check it out.
@@ -29154,8 +28374,8 @@ test "audit: the main controls do what they say when clicked" {
         const name = (dvui.tagGet("tab:0") orelse return error.TagNotFound).rect;
         try clickAt(.{ .x = name.x + name.w + 12, .y = name.y + name.h / 2 });
     }
-    try std.testing.expectEqual(@as(usize, 1), activeGroup().?.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 1), recent.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.activeGroup().?.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_strip.recent.items.len);
 
     // A new tab, and the Clone card on its page opens the dialog.
     try pressFrame(.t, .lcontrol);
@@ -29393,7 +28613,7 @@ test "a repository's own settings are written to its config and read back" {
     setLocalConfig("pull.ff", "");
     while (!repo_prefs_loaded) loadRepoPrefs();
     try std.testing.expect(repo_pull == .global);
-    try std.testing.expectEqual(@as(?[]u8, null), command_error);
+    try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 }
 
 test "a summary typed past 72 goes on in the description, and says so" {
@@ -29451,8 +28671,8 @@ test "docs screenshots" {
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1440, .h = 900 }, .allocator = std.heap.c_allocator });
     defer t.deinit();
     const demo = "/tmp/acme-web";
-    try recent.append(gpa, try gpa.dupe(u8, "/home/alice/dev/acme-api/"));
-    try recent.append(gpa, try gpa.dupe(u8, "/home/alice/dev/design-system/"));
+    try tab_strip.recent.append(gpa, try gpa.dupe(u8, "/home/alice/dev/acme-api/"));
+    try tab_strip.recent.append(gpa, try gpa.dupe(u8, "/home/alice/dev/design-system/"));
 
     for ([_]bool{ true, false }) |dark| {
         dark_theme = dark;
