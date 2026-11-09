@@ -13,6 +13,7 @@ const diff_view = @import("../ui/diff_view.zig");
 const rebase_view = @import("../ui/rebase_view.zig");
 const commit_view = @import("../ui/commit_view.zig");
 const dialog_views = @import("../ui/dialog_views.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Working tree, read in the background ===
@@ -322,7 +323,7 @@ pub fn askCi() void {
 
 /// Re-list the open pull requests, if the repository is on GitHub.
 pub fn refreshRequests() void {
-    app.repo_slug.clearRetainingCapacity();
+    github_actions.repo_slug.clearRetainingCapacity();
     if (app.history == null or !tab_strip.integrations) return pr.refresh(app.repo_path.items, .none, "");
     // The first remote on GitHub, `origin` before the others.
     const found = firstRemote([]const u8, struct {
@@ -330,8 +331,8 @@ pub fn refreshRequests() void {
             return avatars.githubSlug(r.url);
         }
     }.pick);
-    if (found) |s| app.repo_slug.appendSlice(app.gpa, s) catch {};
-    pr.refresh(app.repo_path.items, if (found != null) .github else .none, app.repo_slug.items);
+    if (found) |s| github_actions.repo_slug.appendSlice(app.gpa, s) catch {};
+    pr.refresh(app.repo_path.items, if (found != null) .github else .none, github_actions.repo_slug.items);
     pr.refreshIssues(app.repo_path.items);
 }
 
@@ -387,12 +388,12 @@ pub fn reloadHistory() void {
     graph_view.history_gen +%= 1;
 
     var next_history = r.readHistoryFiltered(app.gpa, graph_view.graphFilter()) catch {
-        app.setCommandError(git.lastError());
+        github_actions.setCommandError(git.lastError());
         return;
     };
     var next_lanes = graph.build(app.gpa, next_history.commits, next_history.head_oid) catch {
         next_history.deinit();
-        app.setCommandError("Out of memory laying out the graph.");
+        github_actions.setCommandError("Out of memory laying out the graph.");
         return;
     };
 
@@ -424,8 +425,8 @@ fn swapWork(next: git.Work) void {
     app.work = next;
     commit_view.work_version +%= 1;
 
-    if (app.open_first_conflict) {
-        app.open_first_conflict = false;
+    if (github_actions.open_first_conflict) {
+        github_actions.open_first_conflict = false;
         for (next.unstaged) |change| {
             if (change.status != .conflicted) continue;
             app.active_view = .graph;
@@ -568,8 +569,8 @@ pub fn openTerminal() void {
             ,
             "sh", chosen,
         };
-    const ok = run.launch(app.app_io, app.repo_path.items, argv) catch return app.setCommandError("Could not start a terminal.");
-    if (!ok) app.setCommandError("No terminal found. Set $TERMINAL to the one you use.");
+    const ok = run.launch(app.app_io, app.repo_path.items, argv) catch return github_actions.setCommandError("Could not start a terminal.");
+    if (!ok) github_actions.setCommandError("No terminal found. Set $TERMINAL to the one you use.");
 }
 
 // === Writing ===
@@ -629,7 +630,7 @@ pub fn setArgv(args: []const []const u8) bool {
     _ = action_arena.reset(.retain_capacity);
     for (args, 0..) |a, i| {
         action_argv[i] = action_arena.allocator().dupe(u8, a) catch {
-            app.setCommandError("Out of memory.");
+            github_actions.setCommandError("Out of memory.");
             return false;
         };
     }
@@ -702,21 +703,21 @@ pub fn runAction() bool {
     switch (pending) {
         .none => return false,
         .run => {
-            app.gitDoInput(action_argv[0..action_argc], action_input);
+            github_actions.gitDoInput(action_argv[0..action_argc], action_input);
             if (action_input) |patch| app.gpa.free(patch);
             action_input = null;
         },
-        .commit => app.doCommit(),
-        .confirmed => app.runConfirmed(),
-        .prompt => app.runPrompt(),
-        .resolve => app.runResolve(),
-        .resolve_safe => app.runResolveSafe(),
-        .undo_resolve => app.runUndoResolve(),
-        .take_file => app.runTakeFile(),
-        .stage_next => app.runStageNext(),
-        .rebase => app.runRebase(),
-        .network => app.startJob(),
-        .tabs => app.runTabAction(),
+        .commit => github_actions.doCommit(),
+        .confirmed => github_actions.runConfirmed(),
+        .prompt => github_actions.runPrompt(),
+        .resolve => github_actions.runResolve(),
+        .resolve_safe => github_actions.runResolveSafe(),
+        .undo_resolve => github_actions.runUndoResolve(),
+        .take_file => github_actions.runTakeFile(),
+        .stage_next => github_actions.runStageNext(),
+        .rebase => github_actions.runRebase(),
+        .network => github_actions.startJob(),
+        .tabs => github_actions.runTabAction(),
         .refresh => {
             graph_view.refreshHistory();
             workChanged("Refreshing");
@@ -746,7 +747,7 @@ pub fn requestNetwork(label: []const u8, args: []const []const u8) void {
     // The toolbar says one is running, but a held key or a double click can
     // still arrive before the frame showing that — and a click while a quiet
     // fetch runs would otherwise vanish without a word.
-    if (tab_strip.job != null) return app.setCommandError(BUSY);
+    if (tab_strip.job != null) return github_actions.setCommandError(BUSY);
     if (!setArgv(args)) return;
     tab_strip.job_label = label;
     action = .network;

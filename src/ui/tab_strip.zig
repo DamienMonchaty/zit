@@ -12,6 +12,7 @@ const search_view = @import("search_view.zig");
 const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Tabs and groups ===
@@ -449,9 +450,9 @@ pub fn openAndRemember(path: []const u8) void {
     // Nothing on the strip has moved yet, so a folder that is no repository
     // leaves the open one alone rather than closing it to show the error.
     if (app.repo != null) {
-        var probe = git.Repo.open(path) catch return app.setCommandError("Not a git repository.");
+        var probe = git.Repo.open(path) catch return github_actions.setCommandError("Not a git repository.");
         defer probe.deinit();
-        if (probe.workdir() == null) return app.setCommandError("Bare repositories have no working tree to show.");
+        if (probe.workdir() == null) return github_actions.setCommandError("Bare repositories have no working tree to show.");
     }
     app.openRepo(path);
     rememberActive();

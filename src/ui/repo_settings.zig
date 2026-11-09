@@ -9,6 +9,7 @@ const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const home_page = @import("home_page.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === This repository's settings ===
@@ -85,10 +86,10 @@ pub fn setLocalConfig(key: []const u8, value: []const u8) void {
     var outcome = (if (value.len == 0)
         run.git(app.gpa, app.app_io, where, &.{ "config", "--local", "--unset-all", key })
     else
-        run.git(app.gpa, app.app_io, where, &.{ "config", "--local", key, value })) catch return app.setCommandError("Could not run git. Is it on your PATH?");
+        run.git(app.gpa, app.app_io, where, &.{ "config", "--local", key, value })) catch return github_actions.setCommandError("Could not run git. Is it on your PATH?");
     defer outcome.deinit(app.gpa);
     // Unsetting what was never set is git's exit 5: nothing to say.
-    if (!outcome.ok and value.len > 0) app.setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
+    if (!outcome.ok and value.len > 0) github_actions.setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
     repo_prefs_loaded = false;
 }
 
@@ -366,13 +367,13 @@ pub fn openInEditor(path: []const u8) void {
     const a = dvui.currentWindow().arena();
     const full = std.fs.path.join(a, &.{ app.repo_path.items, path }) catch return;
     const cmd = std.mem.trim(u8, tab_strip.editor_cmd.items, " ");
-    if (cmd.len == 0) return run.open(app.app_io, app.repo_path.items, full) catch app.setCommandError("Could not open the file.");
+    if (cmd.len == 0) return run.open(app.app_io, app.repo_path.items, full) catch github_actions.setCommandError("Could not open the file.");
     var argv: std.ArrayList([]const u8) = .empty;
     var words = std.mem.tokenizeScalar(u8, cmd, ' ');
     while (words.next()) |w| argv.append(a, w) catch return;
     argv.append(a, full) catch return;
     // Not waited on: an editor can stay open for hours.
-    run.startDetached(app.app_io, app.repo_path.items, argv.items) catch app.setCommandError("Could not start the editor. Is it on your PATH?");
+    run.startDetached(app.app_io, app.repo_path.items, argv.items) catch github_actions.setCommandError("Could not start the editor. Is it on your PATH?");
 }
 
 /// `git config --global key value` — the empty value unsets it — then read
@@ -381,9 +382,9 @@ pub fn setGlobalConfig(key: []const u8, value: []const u8) void {
     var outcome = (if (value.len == 0)
         run.git(app.gpa, app.app_io, ".", &.{ "config", "--global", "--unset", key })
     else
-        run.git(app.gpa, app.app_io, ".", &.{ "config", "--global", key, value })) catch return app.setCommandError("Could not run git. Is it on your PATH?");
+        run.git(app.gpa, app.app_io, ".", &.{ "config", "--global", key, value })) catch return github_actions.setCommandError("Could not run git. Is it on your PATH?");
     defer outcome.deinit(app.gpa);
-    if (!outcome.ok and value.len > 0) app.setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
+    if (!outcome.ok and value.len > 0) github_actions.setCommandError(if (outcome.message.len > 0) outcome.message else "git config failed.");
     identity_view.signing_loaded = false;
 }
 

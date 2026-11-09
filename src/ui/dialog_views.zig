@@ -15,6 +15,7 @@ const commit_view = @import("commit_view.zig");
 const identity_view = @import("identity_view.zig");
 const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Folder picker ===
@@ -103,8 +104,8 @@ pub fn closeRepo() void {
     app.repo_name = "";
     tab_strip.uses_lfs = false;
     tab_strip.open_error = "No repository open. Use + in the tab bar to open one.";
-    app.clearConfirm();
-    app.clearPrompt();
+    github_actions.clearConfirm();
+    github_actions.clearPrompt();
     app.clearSelection();
     graph_view.clearFileHistory();
     // What belonged to the repository that was open: its pull request, the
@@ -157,7 +158,7 @@ pub fn openRepoDialog(kind: RepoDialog) void {
     if (app.repo_path.items.len > 1) {
         const trimmed = std.mem.trimEnd(u8, app.repo_path.items, "/");
         dialog_parent.appendSlice(app.gpa, std.fs.path.dirname(trimmed) orelse trimmed) catch {};
-    } else if (app.homeDir()) |home| {
+    } else if (github_actions.homeDir()) |home| {
         dialog_parent.appendSlice(app.gpa, home) catch {};
     }
 }
@@ -178,7 +179,7 @@ fn dialogPath(buf: []u8) ?[]const u8 {
     if (name.len == 0 or parent.len == 0) return null;
     var joined_buf: [std.fs.max_path_bytes]u8 = undefined;
     const joined = std.fmt.bufPrint(&joined_buf, "{s}/{s}", .{ parent, name }) catch return null;
-    const out = app.expandHome(buf, joined);
+    const out = github_actions.expandHome(buf, joined);
     if (out.ptr == joined.ptr) {
         if (out.len > buf.len) return null;
         @memcpy(buf[0..out.len], out);
@@ -205,11 +206,11 @@ fn firstCommit(path: []const u8) void {
     var text_buf: [512]u8 = undefined;
     const text = std.fmt.bufPrint(&text_buf, "# {s}\n", .{std.mem.trim(u8, dialog_name.items, " ")}) catch "# README\n";
     std.Io.Dir.cwd().writeFile(app.app_io, .{ .sub_path = readme, .data = text }) catch
-        return app.setCommandError("Could not write README.md.");
+        return github_actions.setCommandError("Could not write README.md.");
     for ([_][]const []const u8{ &.{ "add", "README.md" }, &.{ "commit", "-q", "-m", "Initial commit" } }) |args| {
-        var step = run.git(app.gpa, app.app_io, path, args) catch return app.setCommandError("Could not run git. Is it on your PATH?");
+        var step = run.git(app.gpa, app.app_io, path, args) catch return github_actions.setCommandError("Could not run git. Is it on your PATH?");
         defer step.deinit(app.gpa);
-        if (!step.ok) return app.setCommandError(if (step.message.len > 0) step.message else "The first commit failed.");
+        if (!step.ok) return github_actions.setCommandError(if (step.message.len > 0) step.message else "The first commit failed.");
     }
 }
 
@@ -222,7 +223,7 @@ pub fn submitRepoDialog() void {
         .clone => {
             const url = std.mem.trim(u8, dialog_url.items, " ");
             if (url.len == 0) return;
-            app.startClone(url, path);
+            github_actions.startClone(url, path);
             if (tab_strip.job == null) return;
         },
         .create => {
@@ -232,15 +233,15 @@ pub fn submitRepoDialog() void {
                 var d = existing;
                 defer d.close(app.app_io);
                 var it = d.iterate();
-                if ((it.next(app.app_io) catch null) != null) return app.setCommandError("That folder already exists and is not empty. Pick another name.");
-            } else |err| if (err == error.NotDir) return app.setCommandError("A file already has that name. Pick another one.");
+                if ((it.next(app.app_io) catch null) != null) return github_actions.setCommandError("That folder already exists and is not empty. Pick another name.");
+            } else |err| if (err == error.NotDir) return github_actions.setCommandError("A file already has that name. Pick another one.");
             const branch = std.mem.trim(u8, dialog_branch.items, " ");
             var outcome = run.git(app.gpa, app.app_io, ".", &.{ "init", "-b", if (branch.len > 0) branch else "main", "--", path }) catch {
-                return app.setCommandError("Could not run git. Is it on your PATH?");
+                return github_actions.setCommandError("Could not run git. Is it on your PATH?");
             };
             defer outcome.deinit(app.gpa);
-            if (!outcome.ok) return app.setCommandError(if (outcome.message.len > 0) outcome.message else "git init failed.");
-            app.clearCommandError();
+            if (!outcome.ok) return github_actions.setCommandError(if (outcome.message.len > 0) outcome.message else "git init failed.");
+            github_actions.clearCommandError();
 
             // Opened whatever happens to the README: the repository is there
             // regardless, and left unopened a second try is refused as a
@@ -547,7 +548,7 @@ pub fn promptDialog() void {
     };
     // Before it is drawn: taken after, the frame would still show it, and no
     // key or click brings the next one.
-    if (escapePressed()) return app.clearPrompt();
+    if (escapePressed()) return github_actions.clearPrompt();
     var open = true;
     const win = dvui.windowRect();
     var fw = modalWindow(@src(), &prompt_rect, &open, style.surface(), 0, dvui.Rect.all(0));
@@ -567,7 +568,7 @@ pub fn promptDialog() void {
         if (dialogButton(@src(), "Cancel", false)) open = false;
         if (dialogButtonTagged(@src(), app.Prompt.verb(p.kind), true, "prompt:go")) entered = true;
     }
-    if (entered) repo_io.requestAction(.prompt) else if (!open) app.clearPrompt();
+    if (entered) repo_io.requestAction(.prompt) else if (!open) github_actions.clearPrompt();
     // Gone, or answered: the frame that no longer shows it.
     if (entered or !open) dvui.refresh(null, @src(), null);
 }

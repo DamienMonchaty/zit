@@ -7,6 +7,7 @@ const graph_view = @import("graph_view.zig");
 const diff_view = @import("diff_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Left: refs ===
@@ -88,7 +89,7 @@ fn refsSidebar() void {
         if (rebase_view.sidebarSection(@src(), section, i)) |ref| chosen = ref;
     }
 
-    if (chosen) |ref| app.checkout(ref);
+    if (chosen) |ref| github_actions.checkout(ref);
 }
 
 /// A merge or rebase under way, over the branches: what it is, how much is

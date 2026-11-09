@@ -11,6 +11,7 @@ const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Command palette ===
@@ -32,8 +33,8 @@ const Command = struct {
 
 const commands = [_]Command{
     .{ .name = "Continue the merge or rebase", .icon = dvui.entypo.controller_play, .keys = "Ctrl+Enter", .when = app.canContinue, .run = app.requestContinue },
-    .{ .name = "Skip the commit it stopped on", .icon = dvui.entypo.controller_next, .when = app.canSkip, .run = app.requestSkipStep },
-    .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = app.midOperation, .run = app.requestAbortOperation },
+    .{ .name = "Skip the commit it stopped on", .icon = dvui.entypo.controller_next, .when = app.canSkip, .run = github_actions.requestSkipStep },
+    .{ .name = "Abort the merge or rebase", .icon = dvui.entypo.circle_with_cross, .when = app.midOperation, .run = github_actions.requestAbortOperation },
     .{ .name = "Fetch all remotes", .icon = dvui.entypo.cw, .run = struct {
         fn f() void {
             repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(false));
@@ -56,34 +57,34 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Force push…", .icon = dvui.entypo.warning, .run = struct {
         fn f() void {
-            app.ask(.force_push, "");
+            github_actions.ask(.force_push, "");
         }
     }.f },
-    .{ .name = "Undo the last action", .icon = dvui.entypo.ccw, .keys = "Ctrl+Z", .run = app.requestUndo },
-    .{ .name = "Redo what was just undone", .icon = dvui.entypo.cw, .keys = "Ctrl+Shift+Z", .run = app.requestRedo },
+    .{ .name = "Undo the last action", .icon = dvui.entypo.ccw, .keys = "Ctrl+Z", .run = github_actions.requestUndo },
+    .{ .name = "Redo what was just undone", .icon = dvui.entypo.cw, .keys = "Ctrl+Shift+Z", .run = github_actions.requestRedo },
     .{ .name = "New branch…", .icon = dvui.entypo.flow_branch, .run = struct {
         fn f() void {
-            app.askName(.new_branch, "");
+            github_actions.askName(.new_branch, "");
         }
     }.f },
     .{ .name = "New tag…", .icon = dvui.entypo.tag, .run = struct {
         fn f() void {
-            app.askName(.new_tag, "");
+            github_actions.askName(.new_tag, "");
         }
     }.f },
     .{ .name = "Stash everything", .icon = dvui.entypo.archive, .run = struct {
         fn f() void {
-            app.requestLocal("Stashing", &.{ "stash", "push", "-u" });
+            github_actions.requestLocal("Stashing", &.{ "stash", "push", "-u" });
         }
     }.f },
     .{ .name = "Stash everything, with a message…", .icon = dvui.entypo.archive, .run = struct {
         fn f() void {
-            app.askName(.stash, "");
+            github_actions.askName(.stash, "");
         }
     }.f },
     .{ .name = "Pop the last stash", .icon = dvui.entypo.install, .run = struct {
         fn f() void {
-            app.requestLocal("Popping the stash", &.{ "stash", "pop" });
+            github_actions.requestLocal("Popping the stash", &.{ "stash", "pop" });
         }
     }.f },
     .{ .name = "Stage everything", .icon = dvui.entypo.squared_plus, .run = struct {
@@ -98,12 +99,12 @@ const commands = [_]Command{
     }.f },
     .{ .name = "Discard every unstaged change…", .icon = dvui.entypo.trash, .run = struct {
         fn f() void {
-            app.ask(.discard, "");
+            github_actions.ask(.discard, "");
         }
     }.f },
     .{ .name = "Add a remote…", .icon = dvui.entypo.cloud, .run = struct {
         fn f() void {
-            app.askName(.add_remote, "");
+            github_actions.askName(.add_remote, "");
         }
     }.f },
     .{ .name = "Refresh", .icon = dvui.entypo.retweet, .keys = "F5", .run = struct {
@@ -132,7 +133,7 @@ const commands = [_]Command{
             app.new_tab_open = true;
         }
     }.f },
-    .{ .name = "Close this tab", .icon = dvui.entypo.cross, .keys = "Ctrl+W", .run = app.closeShownTab },
+    .{ .name = "Close this tab", .icon = dvui.entypo.cross, .keys = "Ctrl+W", .run = github_actions.closeShownTab },
     .{ .name = "Show or hide the branches panel", .icon = dvui.entypo.align_left, .keys = "Ctrl+B", .run = struct {
         fn f() void {
             app.show_sidebar = !app.show_sidebar;
@@ -334,8 +335,8 @@ pub fn palette() void {
     palette_open = false;
     switch (items[pick]) {
         .command => |i| commands[i].run(),
-        .ref => |i| app.checkout(app.history.?.refs[i]),
-        .repo => |r| app.requestOpenKnown(tab_strip.groups.items[r.group].tabs.items[r.tab].path),
+        .ref => |i| github_actions.checkout(app.history.?.refs[i]),
+        .repo => |r| github_actions.requestOpenKnown(tab_strip.groups.items[r.group].tabs.items[r.tab].path),
     }
 }
 

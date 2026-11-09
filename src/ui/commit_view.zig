@@ -14,6 +14,7 @@ const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -1120,7 +1121,7 @@ fn workingDetail() void {
 /// What the changes are waiting on, while they wait: a job that changes the
 /// working tree — staging, a stash, a commit — or the read after a command.
 fn changesWaiting() ?[]const u8 {
-    if (tab_strip.job != null and app.job_after != .remote) return tab_strip.job_label;
+    if (tab_strip.job != null and github_actions.job_after != .remote) return tab_strip.job_label;
     if (repo_io.work_settling) return repo_io.settling_label;
     return null;
 }
@@ -1486,7 +1487,7 @@ fn folderLine(src: std.builtin.SourceLocation, id: usize, row: TreeRow, folded: 
         if (s == .staged) {
             if (dialog_views.iconButton(@src(), "unstage_folder", "Unstage this folder", dvui.entypo.minus, style.textMuted())) repo_io.request(&.{ "reset", "-q", "--", row.path });
         } else {
-            if (dialog_views.iconButton(@src(), "stage_folder", "Stage this folder", dvui.entypo.plus, style.textMuted())) app.requestLocal("Staging", &.{ "add", "-A", "--", row.path });
+            if (dialog_views.iconButton(@src(), "stage_folder", "Stage this folder", dvui.entypo.plus, style.textMuted())) github_actions.requestLocal("Staging", &.{ "add", "-A", "--", row.path });
         }
     }
     return hit;
@@ -1836,7 +1837,7 @@ fn changeRow(src: std.builtin.SourceLocation, change: git.Change, staged: bool, 
         }
     } else {
         if (dialog_views.iconButton(@src(), "discard", "Discard changes to this file", dvui.entypo.trash, style.textFaint())) {
-            app.ask(.discard, change.path);
+            github_actions.ask(.discard, change.path);
         }
         if (dialog_views.iconButton(@src(), "stage", "Stage this file", dvui.entypo.plus, style.textMuted())) {
             requestStage(change.path, change.old_path, true);
@@ -1949,7 +1950,7 @@ pub fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.
     switch (verb) {
         .stage => repo_io.request(&.{ "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul" }),
         .unstage => repo_io.request(&.{ "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul" }),
-        .stash => app.requestLocal("Stashing", &.{ "stash", "push", "--include-untracked", "--pathspec-from-file=-", "--pathspec-file-nul" }),
+        .stash => github_actions.requestLocal("Stashing", &.{ "stash", "push", "--include-untracked", "--pathspec-from-file=-", "--pathspec-file-nul" }),
     }
     // Refused — a job running, say — the paths would wait for whatever
     // command comes next.
@@ -1964,9 +1965,9 @@ pub fn requestPicked(verb: PickedVerb, side: git.DiffSide, changes: []const git.
 pub fn requestStageAll() void {
     const w = app.work orelse return;
     for (w.unstaged) |change| {
-        if (change.status == .conflicted and markersLeft(change.path)) return app.ask(.stage_markers, "");
+        if (change.status == .conflicted and markersLeft(change.path)) return github_actions.ask(.stage_markers, "");
     }
-    app.requestLocal("Staging", &.{ "add", "-A" });
+    github_actions.requestLocal("Staging", &.{ "add", "-A" });
 }
 
 /// Whether `path` is conflicted and its file still holds a conflict region,
@@ -1995,7 +1996,7 @@ pub fn markersLeft(path: []const u8) bool {
 /// for the first time.
 pub fn requestStage(path: []const u8, old: []const u8, stage: bool) void {
     if (stage) {
-        if (markersLeft(path)) return app.ask(.stage_markers, path);
+        if (markersLeft(path)) return github_actions.ask(.stage_markers, path);
         repo_io.request(&.{ "--literal-pathspecs", "add", "--", path, old });
     } else {
         repo_io.request(&.{ "--literal-pathspecs", "reset", "-q", "--", path, old });
@@ -2053,7 +2054,7 @@ fn changeMenu(
     if (!staged) {
         if (graph_view.menuIcon(@src(), dvui.entypo.trash, "Discard changes…", true)) {
             fw.close();
-            app.ask(.discard, change.path);
+            github_actions.ask(.discard, change.path);
         }
         // Only for a file git does not know yet: ignoring a tracked one does
         // nothing until it is removed from the index, which is a surprise.
@@ -2075,7 +2076,7 @@ pub fn ignorePath(path: []const u8) void {
 
     const old = std.Io.Dir.cwd().readFileAlloc(app.app_io, abs, app.gpa, .limited(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => app.gpa.dupe(u8, "") catch return,
-        else => return app.setCommandError("Could not read .gitignore."),
+        else => return github_actions.setCommandError("Could not read .gitignore."),
     };
     defer app.gpa.free(old);
 
@@ -2095,9 +2096,9 @@ pub fn ignorePath(path: []const u8) void {
     next.append(app.gpa, '\n') catch return;
 
     std.Io.Dir.cwd().writeFile(app.app_io, .{ .sub_path = abs, .data = next.items }) catch {
-        return app.setCommandError("Could not write .gitignore.");
+        return github_actions.setCommandError("Could not write .gitignore.");
     };
-    app.clearCommandError();
+    github_actions.clearCommandError();
     repo_io.workChanged("Ignoring");
 }
 
@@ -2108,7 +2109,7 @@ pub fn openPath(path: []const u8) void {
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs = std.fmt.bufPrint(&abs_buf, "{s}{s}", .{ app.repo_path.items, path }) catch return;
 
-    run.open(app.app_io, app.repo_path.items, abs) catch app.setCommandError("Could not open that file.");
+    run.open(app.app_io, app.repo_path.items, abs) catch github_actions.setCommandError("Could not open that file.");
 }
 
 /// The compose box at the bottom of the detail panel: a summary, a body, and
@@ -2169,14 +2170,14 @@ fn commitBox() void {
         // vanishes into the accent fill. Not while a merge or a rebase is
         // under way: amending a rebase's stop folds it into the commit
         // before, and a merge's into the branch's last.
-        if (app.operationCommand() != null) {
+        if (github_actions.operationCommand() != null) {
             app.amend = false;
         } else if (dvui.checkbox(@src(), &app.amend, "Amend", .{
             .tag = "commit:amend",
             .font = style.small(),
             .gravity_y = 0.5,
             .padding = dvui.Rect.all(0),
-        }) and app.amend) app.fillFromHead();
+        }) and app.amend) github_actions.fillFromHead();
     }
 
     // Once git has said whether the repository names a template of its own.

@@ -10,6 +10,7 @@ const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Split diff ===
@@ -670,7 +671,7 @@ fn diffHeader() void {
                 // is something to take back.
                 if (app.resolve_undo.items.len > 0) {
                     if (dialog_views.linkButtonTagged(@src(), "Undo pick", style.textMuted(), "conflict:undo")) repo_io.requestAction(.undo_resolve);
-                    if (dialog_views.linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) app.ask(.restart_file, app.selected_path.items);
+                    if (dialog_views.linkButtonTagged(@src(), "Start over", style.textMuted(), "conflict:restart")) github_actions.ask(.restart_file, app.selected_path.items);
                 }
                 // The whole file as one side has it, staged in the same click.
                 // Not for one deleted on a side: its panel asks that plainly.
@@ -692,11 +693,11 @@ fn diffHeader() void {
             // only thing on offer for a binary file or a mode change.
             if (side == .unstaged) {
                 if (dialog_views.linkButton(@src(), "Stage file", style.accent())) {
-                    commit_view.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), true);
+                    commit_view.requestStage(app.selected_path.items, github_actions.oldPathOf(side, app.selected_path.items), true);
                 }
             } else {
                 if (dialog_views.linkButton(@src(), "Unstage file", style.accent())) {
-                    commit_view.requestStage(app.selected_path.items, app.oldPathOf(side, app.selected_path.items), false);
+                    commit_view.requestStage(app.selected_path.items, github_actions.oldPathOf(side, app.selected_path.items), false);
                 }
             }
         },

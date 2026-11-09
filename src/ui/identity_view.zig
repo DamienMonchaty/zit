@@ -12,6 +12,7 @@ const search_view = @import("search_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_settings = @import("repo_settings.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Git identity ===
@@ -329,7 +330,7 @@ pub fn settingsDialog() void {
                 else
                     dvui.label(@src(), "Not connected", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .gravity_y = 0.5, .expand = .horizontal, .padding = dvui.Rect.all(0) });
                 if (window_chrome.me_gh.items.len > 0) {
-                    if (dialog_views.dialogButton(@src(), "Disconnect", false)) app.ask(.sign_out, window_chrome.me_gh.items);
+                    if (dialog_views.dialogButton(@src(), "Disconnect", false)) github_actions.ask(.sign_out, window_chrome.me_gh.items);
                 } else if (dialog_views.dialogButton(@src(), "Connect GitHub", true)) app.openConnect();
             }
         }

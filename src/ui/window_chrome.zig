@@ -13,6 +13,7 @@ const identity_view = @import("identity_view.zig");
 const command_palette = @import("command_palette.zig");
 const home_page = @import("home_page.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Chrome ===
@@ -50,8 +51,8 @@ pub fn titlebar() void {
         // Undo and Redo at the very start, as GitKraken has them: icons alone,
         // so the branch beside them keeps its name, each saying on hover what
         // it would take back; Redo lit only when there is one.
-        if (dialog_views.toolButton(@src(), "Undo", dvui.entypo.reply, .{ .icon_only = true, .hint = app.undoHint() })) app.requestUndo();
-        if (dialog_views.toolButton(@src(), "Redo", dvui.entypo.forward, .{ .icon_only = true, .usable = app.canRedo(), .hint = app.redoHint() })) app.requestRedo();
+        if (dialog_views.toolButton(@src(), "Undo", dvui.entypo.reply, .{ .icon_only = true, .hint = github_actions.undoHint() })) github_actions.requestUndo();
+        if (dialog_views.toolButton(@src(), "Redo", dvui.entypo.forward, .{ .icon_only = true, .usable = github_actions.canRedo(), .hint = github_actions.redoHint() })) github_actions.requestRedo();
         toolbarDivider(@src(), 0);
         // The branch every button acts on; the repository is the tab's.
         if (app.repo != null) branchSwitcher();
@@ -127,7 +128,7 @@ pub fn titlebar() void {
         const pushable = idle and on_branch and (tracking.upstream == null or tracking.ahead > 0);
         if (dialog_views.toolButton(@src(), if (rebased) "Force push" else "Push", dvui.entypo.upload, .{ .badge = tracking.ahead, .tag = "toolbar:Push", .busy = std.mem.eql(u8, running, "Pushing") or std.mem.eql(u8, running, "Force pushing"), .usable = pushable, .hint = push_hint })) {
             if (rebased) {
-                app.ask(.force_push, "");
+                github_actions.ask(.force_push, "");
             } else {
                 // A branch with no upstream yet gets one, on the default remote —
                 // otherwise the first push of every new branch is an error message.
@@ -135,19 +136,19 @@ pub fn titlebar() void {
             }
         }
         toolbarDivider(@src(), 1);
-        if (dialog_views.toolButton(@src(), "Branch", dvui.entypo.flow_branch, .{ .hint = "A new branch at what is checked out" })) app.askName(.new_branch, "");
+        if (dialog_views.toolButton(@src(), "Branch", dvui.entypo.flow_branch, .{ .hint = "A new branch at what is checked out" })) github_actions.askName(.new_branch, "");
         const changes = search_view.changeCount();
         if (dialog_views.toolButton(@src(), "Stash", dvui.entypo.save, .{
             .busy = std.mem.eql(u8, running, "Stashing"),
             .usable = idle and changes > 0,
             .hint = if (changes == 0) "No changes to stash" else std.fmt.allocPrint(arena, "Set {d} change{s} aside, new files too", .{ changes, plural(changes) }) catch "Stash",
-        })) app.requestLocal("Stashing", &.{ "stash", "push", "-u" });
+        })) github_actions.requestLocal("Stashing", &.{ "stash", "push", "-u" });
         const stashes = if (app.history) |h| h.stashes.len else 0;
         if (dialog_views.toolButton(@src(), "Pop", dvui.entypo.archive, .{
             .busy = std.mem.eql(u8, running, "Popping the stash"),
             .usable = idle and stashes > 0,
             .hint = if (stashes == 0) "No stash to pop" else "Bring the last stash back, and drop it",
-        })) app.requestLocal("Popping the stash", &.{ "stash", "pop" });
+        })) github_actions.requestLocal("Popping the stash", &.{ "stash", "pop" });
 
         // Only where there is LFS to pull. `git lfs pull` fetches the real contents
         // for the pointers a checkout left behind, which is the one LFS operation
@@ -421,7 +422,7 @@ fn branchSwitcher() void {
             }
             shown += 1;
             if (branchChoice(i, ref) and !ref.head) {
-                app.checkout(ref);
+                github_actions.checkout(ref);
                 m.close();
             }
         }
@@ -588,7 +589,7 @@ pub fn tabList() void {
             if (me.action != .release or !me.button.pointer() or !r.contains(me.p)) continue;
             e.handle(@src(), scroll.data());
             dvui.dragEnd(me.button);
-            app.requestTab(.{ .tab_end = app.tab_drag });
+            github_actions.requestTab(.{ .tab_end = app.tab_drag });
         };
     }
     // The active tab's foot only where the strip shows the tab: scrolled
@@ -642,8 +643,8 @@ pub fn tabList() void {
                 .select => if (current) {
                     app.new_tab_open = false;
                     app.active_view = .graph;
-                } else app.requestTab(.{ .select_in = .{ g, t } }),
-                .close => app.requestTab(.{ .close_in = .{ g, t } }),
+                } else github_actions.requestTab(.{ .select_in = .{ g, t } }),
+                .close => github_actions.requestTab(.{ .close_in = .{ g, t } }),
             }
             if (active) revealTab(flat, rect);
             if (named) {
@@ -817,7 +818,7 @@ pub fn userMenu() void {
             identity_view.keys_rect = .{};
         },
         .signing => identity_view.openSettings(6),
-        .docs => app.openUrl(home_page.SITE_URL),
+        .docs => github_actions.openUrl(home_page.SITE_URL),
         .about => {
             home_page.features_open = true;
             home_page.features_rect = .{};
@@ -826,7 +827,7 @@ pub fn userMenu() void {
             identity_view.openIdentity();
             identity_view.signInWithGithub();
         },
-        .sign_out => app.ask(.sign_out, me_gh.items),
+        .sign_out => github_actions.ask(.sign_out, me_gh.items),
     }
 }
 

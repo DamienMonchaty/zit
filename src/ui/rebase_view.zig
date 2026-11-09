@@ -16,6 +16,7 @@ const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -363,7 +364,7 @@ fn sectionRows(section: diff_view.Section, id: usize, h: git.History, si: *const
             items.append(dvui.currentWindow().arena(), .{ .remote = @intCast(i) }) catch return null;
             // Pinned ones first, as in the other sections.
             for (0..2) |pass| for (h.refs, 0..) |ref, r| {
-                if (ref.kind != .remote or !std.mem.eql(u8, app.splitRemoteRef(ref.name).remote, entry.name)) continue;
+                if (ref.kind != .remote or !std.mem.eql(u8, github_actions.splitRemoteRef(ref.name).remote, entry.name)) continue;
                 if (!sidebarMatches(ref.name)) continue;
                 if (graph_view.hasName(graph_view.graph_pinned.items, ref.name) != (pass == 0)) continue;
                 items.append(dvui.currentWindow().arena(), .{ .ref = @intCast(r) }) catch return null;
@@ -477,13 +478,13 @@ pub fn requestStash(verb: []const u8, id: git.Oid) void {
 /// runs as a job: applying a stash rewrites the working tree.
 pub fn stashDo(verb: []const u8, hex: []const u8) void {
     const r = app.repo orelse return;
-    const id = git.oidFromHex(hex) orelse return app.setCommandError("That stash is gone already.");
-    const index = r.stashIndex(id) orelse return app.setCommandError("That stash is gone already.");
+    const id = git.oidFromHex(hex) orelse return github_actions.setCommandError("That stash is gone already.");
+    const index = r.stashIndex(id) orelse return github_actions.setCommandError("That stash is gone already.");
     // `stash@{n}`: the only name `pop` and `drop` take.
     var ref_buf: [32]u8 = undefined;
     const ref = std.fmt.bufPrint(&ref_buf, "stash@{{{d}}}", .{index}) catch unreachable;
     const label = if (std.mem.eql(u8, verb, "pop")) "Popping the stash" else if (std.mem.eql(u8, verb, "drop")) "Dropping the stash" else "Applying the stash";
-    app.startLocal(label, &.{ "stash", verb, ref }, .local);
+    github_actions.startLocal(label, &.{ "stash", verb, ref }, .local);
 }
 
 /// What a section header offers that its rows cannot: the things that create
@@ -511,19 +512,19 @@ fn sectionMenu(
         .local => {
             if (graph_view.menuIcon(@src(), dvui.entypo.flow_branch, "New branch here", false)) {
                 fw.close();
-                app.askName(.new_branch, "");
+                github_actions.askName(.new_branch, "");
             }
         },
         .tags => {
             if (graph_view.menuIcon(@src(), dvui.entypo.tag, "New tag here", false)) {
                 fw.close();
-                app.askName(.new_tag, "");
+                github_actions.askName(.new_tag, "");
             }
         },
         .remotes => {
             if (graph_view.menuIcon(@src(), dvui.entypo.plus, "Add a remote", false)) {
                 fw.close();
-                app.askName(.add_remote, "");
+                github_actions.askName(.add_remote, "");
             }
             if (graph_view.menuIcon(@src(), dvui.entypo.cw, "Fetch them all", false)) {
                 fw.close();
@@ -537,7 +538,7 @@ fn sectionMenu(
             }
             if (graph_view.menuIcon(@src(), dvui.entypo.globe, "Open the repository on the web", false)) {
                 fw.close();
-                app.openOnGithub("", .{});
+                github_actions.openOnGithub("", .{});
             }
             if (graph_view.menuIcon(@src(), dvui.entypo.ccw, "Refresh the list", false)) {
                 fw.close();
@@ -547,11 +548,11 @@ fn sectionMenu(
         .issues => {
             if (graph_view.menuIcon(@src(), dvui.entypo.plus, "File a new issue", false)) {
                 fw.close();
-                app.openOnGithub("/issues/new", .{});
+                github_actions.openOnGithub("/issues/new", .{});
             }
             if (graph_view.menuIcon(@src(), dvui.entypo.globe, "Open the issues on the web", false)) {
                 fw.close();
-                app.openOnGithub("/issues", .{});
+                github_actions.openOnGithub("/issues", .{});
             }
             if (graph_view.menuIcon(@src(), dvui.entypo.ccw, "Refresh the list", false)) {
                 fw.close();
@@ -561,14 +562,14 @@ fn sectionMenu(
         .worktrees => {
             if (graph_view.menuIcon(@src(), dvui.entypo.folder, "Add a worktree", false)) {
                 fw.close();
-                app.askName(.add_worktree, "");
+                github_actions.askName(.add_worktree, "");
             }
         },
         // The toolbar's Stash takes no name; this is the one that does.
         .stashes => {
             if (graph_view.menuIcon(@src(), dvui.entypo.save, "Stash everything, with a message", false)) {
                 fw.close();
-                app.askName(.stash, "");
+                github_actions.askName(.stash, "");
             }
         },
     }
@@ -630,10 +631,10 @@ fn remoteRow(src: std.builtin.SourceLocation, entry: git.Remote, id: usize) void
             repo_io.requestNetwork("Fetching", if (tab_strip.prune_on_fetch) &.{ "fetch", "--prune", entry.name } else &.{ "fetch", entry.name });
         }
         if (dialog_views.iconButton(@src(), "remote_rename", "Rename this remote", dvui.entypo.pencil, style.textFaint())) {
-            app.askNameWith(.rename_remote, entry.name, entry.name);
+            github_actions.askNameWith(.rename_remote, entry.name, entry.name);
         }
         if (dialog_views.iconButton(@src(), "remote_url", "Change its URL", dvui.entypo.link, style.textFaint())) {
-            app.askNameWith(.remote_url, entry.name, entry.url);
+            github_actions.askNameWith(.remote_url, entry.name, entry.url);
         }
         // Removing a remote drops config, never commits, so it does not ask.
         if (dialog_views.iconButton(@src(), "remote_remove", "Remove this remote", dvui.entypo.cross, style.textFaint())) {
@@ -660,7 +661,7 @@ pub fn requestsError() void {
     // its organisation restricts apps until an owner approves this one.
     if (std.mem.indexOf(u8, pr.last_error.items, "Could not resolve to a Repository") != null) {
         dvui.label(@src(), "Private, and its organisation has not approved Zit yet.", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .expand = .horizontal, .max_size_content = .width(0), .padding = dvui.Rect.all(0) });
-        if (dialog_views.linkButton(@src(), "Ask for access", style.accent())) app.openUrl("https://github.com/settings/connections/applications/" ++ github.CLIENT_ID);
+        if (dialog_views.linkButton(@src(), "Ask for access", style.accent())) github_actions.openUrl("https://github.com/settings/connections/applications/" ++ github.CLIENT_ID);
         return;
     }
     dvui.label(@src(), "{s}", .{if (pr.last_error.items.len > 0) pr.last_error.items else "Could not list them."}, .{
@@ -716,7 +717,7 @@ pub fn loadingSpinner(src: std.builtin.SourceLocation) void {
 
 /// The form for a new request, filled from the commits.
 pub fn requestCreateRequest() void {
-    if (pr.host == .none) return app.setCommandError("No pull requests here: the repository is on no host Zit knows, or the integrations are off in the settings.");
+    if (pr.host == .none) return github_actions.setCommandError("No pull requests here: the repository is on no host Zit knows, or the integrations are off in the settings.");
     app.openPrCreate();
 }
 
@@ -1161,9 +1162,9 @@ fn conflictBlock(src: std.builtin.SourceLocation, region: git.Conflict, index: u
         const names = sideNames();
         var ours_buf: [96]u8 = undefined;
         var theirs_buf: [96]u8 = undefined;
-        if (keyedLink(@src(), if (focused) "1" else "", keepCaption(&ours_buf, names.ours), style.success())) app.requestResolve(index, .ours);
-        if (keyedLink(@src(), if (focused) "2" else "", keepCaption(&theirs_buf, names.theirs), style.get().blue)) app.requestResolve(index, .theirs);
-        if (keyedLink(@src(), if (focused) "3" else "", "Keep both", style.textMuted())) app.requestResolve(index, .both);
+        if (keyedLink(@src(), if (focused) "1" else "", keepCaption(&ours_buf, names.ours), style.success())) github_actions.requestResolve(index, .ours);
+        if (keyedLink(@src(), if (focused) "2" else "", keepCaption(&theirs_buf, names.theirs), style.get().blue)) github_actions.requestResolve(index, .theirs);
+        if (keyedLink(@src(), if (focused) "3" else "", "Keep both", style.textMuted())) github_actions.requestResolve(index, .both);
     }
 
     if (region.has_base) {
@@ -1403,7 +1404,7 @@ pub fn diffFileRow(
                     var buf: [std.fs.max_path_bytes + 16]u8 = undefined;
                     var sha_buf: [41]u8 = undefined;
                     const arg = std.fmt.bufPrint(&buf, "{s} {s}", .{ git.oidHex(commit_id, &sha_buf), file.path }) catch return;
-                    app.ask(.restore_file, arg);
+                    github_actions.ask(.restore_file, arg);
                 }
             }
         },
@@ -1697,7 +1698,7 @@ pub fn requestHunk(file: git.FileDiff, hunk: u32, side: git.DiffSide) void {
     if (repo_io.action != .none) return;
 
     const patch = git.patchForHunk(app.gpa, file, hunk) catch {
-        app.setCommandError("Out of memory building the patch.");
+        github_actions.setCommandError("Out of memory building the patch.");
         return;
     };
 
@@ -1737,12 +1738,12 @@ pub fn requestLines(file: git.FileDiff, hunk: u32, side: git.DiffSide, discard: 
 
     const reverse = discard or side == .staged;
     const patch = (git.patchForLines(app.gpa, file, hunk, app.picked_lines.items, reverse) catch {
-        return app.setCommandError("Out of memory building the patch.");
-    }) orelse return app.setCommandError(if (side == .staged) "Lines of a new or deleted file come out with the whole file." else "Lines of a deleted file go in with the whole file.");
+        return github_actions.setCommandError("Out of memory building the patch.");
+    }) orelse return github_actions.setCommandError(if (side == .staged) "Lines of a new or deleted file come out with the whole file." else "Lines of a deleted file go in with the whole file.");
 
     if (discard) {
         defer app.gpa.free(patch);
-        return app.ask(.discard_hunk, patch);
+        return github_actions.ask(.discard_hunk, patch);
     }
     switch (side) {
         .unstaged => repo_io.request(&.{ "apply", "--cached", "-" }),
@@ -1756,9 +1757,9 @@ pub fn requestLines(file: git.FileDiff, hunk: u32, side: git.DiffSide, discard: 
 /// asks first, with the patch itself as what it asks about.
 pub fn askDiscardHunk(file: git.FileDiff, hunk: u32) void {
     const patch = git.patchForHunk(app.gpa, file, hunk) catch {
-        app.setCommandError("Out of memory building the patch.");
+        github_actions.setCommandError("Out of memory building the patch.");
         return;
     };
     defer app.gpa.free(patch);
-    app.ask(.discard_hunk, patch);
+    github_actions.ask(.discard_hunk, patch);
 }

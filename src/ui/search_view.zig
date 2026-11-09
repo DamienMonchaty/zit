@@ -12,6 +12,7 @@ const graph_view = @import("graph_view.zig");
 const rebase_view = @import("rebase_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Search through git ===
@@ -566,7 +567,7 @@ fn commitMenu(
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Check out {s}", .{ref.name}) catch continue;
         if (graph_view.menuIconAt(@src(), i, dvui.entypo.login, caption)) {
             fw.close();
-            app.checkout(ref);
+            github_actions.checkout(ref);
         }
     };
     if (graph_view.menuIcon(@src(), dvui.entypo.login, "Check out this commit (detaches HEAD)", false)) {
@@ -577,11 +578,11 @@ fn commitMenu(
     graph_view.menuSeparator(1);
     if (graph_view.menuIcon(@src(), dvui.entypo.flow_branch, "New branch here", false)) {
         fw.close();
-        app.askName(.new_branch, sha);
+        github_actions.askName(.new_branch, sha);
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.tag, "Tag this commit", false)) {
         fw.close();
-        app.askName(.new_tag, sha);
+        github_actions.askName(.new_tag, sha);
     }
 
     graph_view.menuSeparator(2);
@@ -609,7 +610,7 @@ fn commitMenu(
     if (!app.midOperation() and graph_view.menuIcon(@src(), dvui.entypo.shuffle, "Rebase from here, interactively", false)) {
         fw.close();
         // The clicked commit is replayed too, so the list starts at its parent.
-        app.beginRebase(if (commit.parents.len > 0) commit.parents[0] else null);
+        github_actions.beginRebase(if (commit.parents.len > 0) commit.parents[0] else null);
     }
     // The three resets, one row: they differ only in what happens to the
     // changes, which is the choice the submenu asks for.
@@ -634,7 +635,7 @@ fn commitMenu(
         }
         if (graph_view.menuIcon(@src(), dvui.entypo.trash, "Hard — discard changes", true)) {
             fw.close();
-            app.ask(.reset_hard, sha);
+            github_actions.ask(.reset_hard, sha);
         }
     }
 
@@ -874,7 +875,7 @@ fn moreRefs(src: std.builtin.SourceLocation, commit: git.Commit, hidden: usize, 
     }
     dd.deinit();
 
-    if (chosen) |ref| app.checkout(ref);
+    if (chosen) |ref| github_actions.checkout(ref);
 }
 
 /// Whether `ref` is a local branch and a remote branch of the same name, both
@@ -884,7 +885,7 @@ pub fn sameOnRemote(h: git.History, ref: git.Ref) bool {
     for (h.refs) |other| {
         if (other.kind == .tag or other.kind == ref.kind or !git.oidEql(other.target, ref.target)) continue;
         const local, const remote = if (ref.kind == .local) .{ ref, other } else .{ other, ref };
-        if (std.mem.eql(u8, app.splitRemoteRef(remote.name).branch, local.name)) return true;
+        if (std.mem.eql(u8, github_actions.splitRemoteRef(remote.name).branch, local.name)) return true;
     }
     return false;
 }
@@ -899,7 +900,7 @@ fn tagShown(h: git.History, ref: git.Ref) bool {
     if (ref.kind != .remote) return true;
     for (h.refs) |other| {
         if (other.kind != .local or !git.oidEql(other.target, ref.target)) continue;
-        if (std.mem.eql(u8, app.splitRemoteRef(ref.name).branch, other.name)) return graph_view.isHidden(other.name) and !other.head;
+        if (std.mem.eql(u8, github_actions.splitRemoteRef(ref.name).branch, other.name)) return graph_view.isHidden(other.name) and !other.head;
     }
     return true;
 }
@@ -1069,7 +1070,7 @@ fn refTooltip(ref: git.Ref, synced: bool, rect: dvui.Rect.Physical) void {
     const arena = dvui.currentWindow().arena();
     const text = switch (ref.kind) {
         .tag => std.fmt.allocPrint(arena, "Tag {s}", .{ref.name}),
-        .remote => std.fmt.allocPrint(arena, "Remote branch {s}, on {s}", .{ ref.name, app.splitRemoteRef(ref.name).remote }),
+        .remote => std.fmt.allocPrint(arena, "Remote branch {s}, on {s}", .{ ref.name, github_actions.splitRemoteRef(ref.name).remote }),
         .local => if (synced)
             std.fmt.allocPrint(arena, "Local branch {s}, and {s} at the same commit", .{ ref.name, syncedRemote(ref) orelse "its remote" })
         else
@@ -1083,7 +1084,7 @@ fn syncedRemote(ref: git.Ref) ?[]const u8 {
     const h = app.history orelse return null;
     for (h.refs) |other| {
         if (other.kind != .remote or !git.oidEql(other.target, ref.target)) continue;
-        if (std.mem.eql(u8, app.splitRemoteRef(other.name).branch, ref.name)) return other.name;
+        if (std.mem.eql(u8, github_actions.splitRemoteRef(other.name).branch, ref.name)) return other.name;
     }
     return null;
 }
@@ -1126,7 +1127,7 @@ fn tagDrag(wd: *dvui.WidgetData, ref: git.Ref) void {
 /// The open pull or merge request whose branch `ref` is, if there is one.
 fn requestFor(ref: git.Ref) ?pr.Request {
     if (ref.kind == .tag) return null;
-    const branch = if (ref.kind == .remote) app.splitRemoteRef(ref.name).branch else ref.name;
+    const branch = if (ref.kind == .remote) github_actions.splitRemoteRef(ref.name).branch else ref.name;
     for (pr.list) |req| {
         if (std.mem.eql(u8, req.branch, branch)) return req;
     }

@@ -30,6 +30,7 @@ const repo_settings = @import("ui/repo_settings.zig");
 const command_palette = @import("ui/command_palette.zig");
 const home_page = @import("ui/home_page.zig");
 const repo_io = @import("core/repo_io.zig");
+const github_actions = @import("github/github_actions.zig");
 
 pub const dvui_app: dvui.App = .{
     .config = .{ .startFn = &startOptions },
@@ -300,13 +301,13 @@ pub var theme_index: usize = 0;
 /// single click. It renders under the toolbar rather than beside the thing it
 /// applies to, because three different panels raise it and one place to look is
 /// worth more than proximity.
-const Confirm = struct {
+pub const Confirm = struct {
     kind: Kind,
     /// Path, stash commit or sha the action applies to. Empty where the kind needs
     /// no argument, which is what "discard everything" is.
     arg: []u8,
 
-    const Kind = enum {
+    pub const Kind = enum {
         discard,
         reset_hard,
         stash_drop,
@@ -340,7 +341,7 @@ const Confirm = struct {
     };
 };
 
-var confirm: ?Confirm = null;
+pub var confirm: ?Confirm = null;
 
 /// A name Zit needs before it can run something, in the same slot and for the
 /// same reason: a modal over the graph hides the thing you are naming.
@@ -349,7 +350,7 @@ pub const Prompt = struct {
     /// The commit a branch or tag is created at. Empty means HEAD.
     arg: []u8,
 
-    const Kind = enum {
+    pub const Kind = enum {
         new_branch,
         new_tag,
         add_remote,
@@ -536,7 +537,7 @@ pub var conflict_reveal = false;
 pub var resolve_undo: std.ArrayList(git.Splice) = .empty;
 /// Picks that can be taken back; past it the oldest goes. A bound, not a
 /// size anyone reaches by hand.
-const MAX_RESOLVE_UNDO = 1000;
+pub const MAX_RESOLVE_UNDO = 1000;
 
 pub fn clearResolveUndo() void {
     for (resolve_undo.items) |step| step.deinit(gpa);
@@ -556,7 +557,7 @@ pub var blame_scroll: dvui.ScrollInfo = .{ .vertical = .given };
 pub var rebase_steps: std.ArrayList(git.RebaseStep) = .empty;
 /// Summaries copied out of the history snapshot, because that snapshot is
 /// rebuilt under the composer while it is open.
-var rebase_arena: ?std.heap.ArenaAllocator = null;
+pub var rebase_arena: ?std.heap.ArenaAllocator = null;
 /// Full sha of the commit the list replays onto — the one below the oldest
 /// step, left exactly where it is; seven characters can name two commits. Empty when `rebase_root` says there is none.
 pub var rebase_base: [41]u8 = undefined;
@@ -567,7 +568,7 @@ pub var rebase_root: bool = false;
 ///
 /// ponytail: a cap, not paging. A rebase longer than this is not one anybody
 /// composes by clicking, and the list is built by walking first parents.
-const MAX_REBASE_STEPS: usize = 200;
+pub const MAX_REBASE_STEPS: usize = 200;
 
 /// Lines shown per side of one region.
 ///
@@ -655,7 +656,7 @@ pub fn clearSelection() void {
     blame_view = null;
 }
 
-fn clearRebase() void {
+pub fn clearRebase() void {
     rebase_steps.clearRetainingCapacity();
     if (rebase_arena) |*a| a.deinit();
     rebase_arena = null;
@@ -688,7 +689,7 @@ pub fn selectedStatus(side: git.DiffSide) ?git.Status {
 }
 
 /// Absolute path of the selected file, into `buf`.
-fn selectedAbsPath(buf: []u8) ?[]const u8 {
+pub fn selectedAbsPath(buf: []u8) ?[]const u8 {
     if (repo == null) return null;
     return std.fmt.bufPrint(buf, "{s}{s}", .{ repo_path.items, selected_path.items }) catch null;
 }
@@ -707,13 +708,13 @@ fn loadBlame() void {
     const abs = selectedAbsPath(&path_buf) orelse return clearSelection();
 
     const text = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch {
-        setCommandError("Could not read that file.");
+        github_actions.setCommandError("Could not read that file.");
         return clearSelection();
     };
     defer gpa.free(text);
 
     blame_view = r.readBlame(gpa, selected_path.items, text) catch {
-        setCommandError("git has no history for that file yet.");
+        github_actions.setCommandError("git has no history for that file yet.");
         return clearSelection();
     };
 }
@@ -744,7 +745,7 @@ fn loadConflicts() void {
         conflict_text = &.{};
         // Deleted on one side: there may be nothing on disk, and that is
         // the conflict, answered below.
-        if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) setCommandError("Could not read that conflicted file.");
+        if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) github_actions.setCommandError("Could not read that conflicted file.");
         return;
     };
     // Read as text, a binary file is noise: its two versions are picked
@@ -835,7 +836,7 @@ pub fn ensureDiff() void {
         // thousands of files froze the window for seconds reading them all.
         .commit => |id| r.readCommitDiffLines(gpa, id, openLines()) catch return clearSelection(),
         .compare => r.readRangeDiffLines(gpa, compare_from, compare_to, openLines()) catch return clearSelection(),
-        .change => |side| r.readWorkDiffFrom(gpa, side, selected_path.items, oldPathOf(side, selected_path.items)) catch return clearSelection(),
+        .change => |side| r.readWorkDiffFrom(gpa, side, selected_path.items, github_actions.oldPathOf(side, selected_path.items)) catch return clearSelection(),
     };
 
     // One file was the whole selection, and it has no changes on this side any
@@ -1026,16 +1027,16 @@ fn appDeinit(win: *dvui.Window) void {
     avatars.deinit();
     pr.deinit();
     // Before its paths go: a call still out finishes first.
-    if (api_job) |w| w.deinit(app_io);
-    api_job = null;
-    clearApiQueue();
-    api_queue.deinit(gpa);
-    api_reviewers.deinit(gpa);
-    api_assignees.deinit(gpa);
-    api_labels.deinit(gpa);
-    repo_slug.deinit(gpa);
-    clearJobSteps();
-    job_steps.deinit(gpa);
+    if (github_actions.api_job) |w| w.deinit(app_io);
+    github_actions.api_job = null;
+    github_actions.clearApiQueue();
+    github_actions.api_queue.deinit(gpa);
+    github_actions.api_reviewers.deinit(gpa);
+    github_actions.api_assignees.deinit(gpa);
+    github_actions.api_labels.deinit(gpa);
+    github_actions.repo_slug.deinit(gpa);
+    github_actions.clearJobSteps();
+    github_actions.job_steps.deinit(gpa);
     closeConnect();
     for ([_]*std.ArrayList(u8){ &connect_code, &connect_device, &connect_uri, &connect_note }) |l| l.deinit(gpa);
     github.deinit();
@@ -1063,14 +1064,14 @@ fn appDeinit(win: *dvui.Window) void {
     graph_view.graph_pinned.deinit(gpa);
     search_view.clearSearchHits();
     search_view.reapSearchFetches(true);
-    clearCommandError();
-    clearConfirm();
-    clearPrompt();
+    github_actions.clearCommandError();
+    github_actions.clearConfirm();
+    github_actions.clearPrompt();
     prompt_text.deinit(gpa);
     clearSelection();
     rebase_steps.deinit(gpa);
     selected_path.deinit(gpa);
-    clone_dest.deinit(gpa);
+    github_actions.clone_dest.deinit(gpa);
     graph_view.clearFileHistory();
     graph_view.file_history.deinit(gpa);
     command_palette.palette_text.deinit(gpa);
@@ -1093,7 +1094,7 @@ fn appDeinit(win: *dvui.Window) void {
     if (repo_settings.editors_job) |j| j.deinit(app_io);
     if (commit_view.repo_config_job) |j| j.deinit(app_io);
     commit_view.git_template_path.deinit(gpa);
-    commit_sent.deinit(gpa);
+    github_actions.commit_sent.deinit(gpa);
     tab_strip.clearRecent();
     tab_strip.recent.deinit(gpa);
     dialog_views.clearForget();
@@ -1218,1365 +1219,6 @@ pub fn historyArrived() void {
     repo_io.refreshRequests();
 }
 
-// === GitHub, acted on ===
-//
-// What changes something on GitHub — a merge, a review, a comment — is a call
-// to its API (`github.zig`), out on a thread of its own like a git job, and a
-// run of them for what takes several: merged then its branch deleted, edited
-// then reviewers asked then labels set. A call that fails stops the run, and
-// GitHub's own words are what the bar shows.
-
-const ApiCall = struct {
-    label: []const u8,
-    method: []const u8,
-    /// Under the API, owned.
-    path: []u8,
-    /// Owned; null for none.
-    body: ?[]u8,
-    then: ApiThen = .none,
-};
-
-/// What a call's success sets off besides the next in the run.
-const ApiThen = enum {
-    none,
-    /// A request merged or closed: off the open list, and shown as such,
-    /// before GitHub's own lists have caught up. Its number in
-    /// `api_gone_number`.
-    gone,
-    /// The branch after a merge: GitHub may have deleted it itself, where
-    /// the repository says to — gone either way, and no failure.
-    branch_after_merge,
-    /// Empty the review box: what it held went out.
-    clear_comment,
-    clear_reply,
-    /// A request was created: ask its reviewers, from `api_reviewers`.
-    ask_reviewers,
-};
-
-var api_job: ?*run.Capture = null;
-var api_label: []const u8 = "";
-var api_then: ApiThen = .none;
-/// The calls waiting behind the one out.
-var api_queue: std.ArrayList(ApiCall) = .empty;
-/// For `.ask_reviewers`: the JSON lists, owned — whom to ask, whom to
-/// assign, which labels.
-var api_reviewers: std.ArrayList(u8) = .empty;
-var api_assignees: std.ArrayList(u8) = .empty;
-var api_labels: std.ArrayList(u8) = .empty;
-/// Fetch once the run succeeds: it moved branches on the remote.
-var api_fetch_after = false;
-/// For `.gone`: the request merged or closed, and what it now is.
-var api_gone_number: u32 = 0;
-var api_gone_state: []const u8 = "";
-
-/// `owner/name` on GitHub of the open repository; empty when it is not there.
-pub var repo_slug: std.ArrayList(u8) = .empty;
-
-/// `/repos/<owner>/<name>` followed by `fmt`, into `buf`; null when the
-/// repository is not on GitHub.
-fn apiPath(buf: []u8, comptime fmt: []const u8, args: anytype) ?[]const u8 {
-    if (repo_slug.items.len == 0) return null;
-    const head = std.fmt.bufPrint(buf, "/repos/{s}", .{repo_slug.items}) catch return null;
-    const tail = std.fmt.bufPrint(buf[head.len..], fmt, args) catch return null;
-    return buf[0 .. head.len + tail.len];
-}
-
-/// Queue a call; it starts at once when none is out.
-fn requestApi(label: []const u8, method: []const u8, path: ?[]const u8, body: ?[]const u8, then: ApiThen) void {
-    const p = path orelse return setCommandError("This repository is not on GitHub.");
-    if (!github.signedIn()) return setCommandError("Connect GitHub first: Settings › GitHub.");
-    const call: ApiCall = .{
-        .label = label,
-        .method = method,
-        .path = gpa.dupe(u8, p) catch return,
-        .body = if (body) |b| gpa.dupe(u8, b) catch null else null,
-        .then = then,
-    };
-    api_queue.append(gpa, call) catch return freeCall(call);
-    if (api_job == null) startNextApi();
-}
-
-/// A GraphQL mutation, `variables` a JSON object.
-fn requestGraphql(label: []const u8, query: []const u8, variables: []const u8, then: ApiThen) void {
-    const body = github.graphqlBody(gpa, query, variables) catch return;
-    defer gpa.free(body);
-    requestApi(label, "POST", "/graphql", body, then);
-}
-
-fn freeCall(call: ApiCall) void {
-    gpa.free(call.path);
-    if (call.body) |b| gpa.free(b);
-}
-
-fn startNextApi() void {
-    if (api_queue.items.len == 0) return;
-    const call = api_queue.orderedRemove(0);
-    defer freeCall(call);
-    api_job = github.start(if (repo_path.items.len > 0) repo_path.items else ".", call.method, call.path, call.body) catch {
-        clearApiQueue();
-        return setCommandError("Could not run curl. Is it installed?");
-    };
-    api_label = call.label;
-    api_then = call.then;
-    clearCommandError();
-}
-
-fn clearApiQueue() void {
-    for (api_queue.items) |c| freeCall(c);
-    api_queue.clearRetainingCapacity();
-    api_fetch_after = false;
-}
-
-/// Land a finished call: GitHub's words if it failed — and the rest of the
-/// run dropped — else what it sets off, the next call, and once the run is
-/// done the requests read again.
-fn collectApi() void {
-    const w = api_job orelse return;
-    if (!w.finished()) return;
-    defer {
-        w.deinit(app_io);
-        api_job = null;
-        api_label = "";
-    }
-    var a: std.heap.ArenaAllocator = .init(gpa);
-    defer a.deinit();
-    const failed: ?[]const u8 = if (!w.ok)
-        (if (w.err.items.len > 0) a.allocator().dupe(u8, w.err.items) catch "curl failed." else "curl failed.")
-    else
-        github.failure(a.allocator(), github.split(w.out));
-    // A branch already deleted is what was asked for; and a failure there
-    // does not keep the list from being read again.
-    if (failed != null and api_then == .branch_after_merge) {
-        if (api_queue.items.len > 0) return startNextApi();
-        repo_io.refreshRequests();
-        if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
-        return;
-    }
-    if (failed) |why| {
-        clearApiQueue();
-        setCommandError(why);
-        // The dialog stays, with what went wrong, to try again.
-        pr_creating = false;
-        pr_created = 0;
-        return;
-    }
-    switch (api_then) {
-        .none => {},
-        .clear_comment => pr_comment.clearRetainingCapacity(),
-        .clear_reply => {
-            pr_reply.clearRetainingCapacity();
-            pr_reply_id.clearRetainingCapacity();
-        },
-        .ask_reviewers => askReviewers(github.split(w.out).body),
-        .gone => {
-            pr.markGone(api_gone_number);
-            if (pr.detail) |*d| if (d.number == api_gone_number) {
-                d.state = api_gone_state;
-            };
-        },
-        .branch_after_merge => {},
-    }
-    if (api_queue.items.len > 0) return startNextApi();
-    // A request just made, its reviewers and labels set: open it, in the
-    // list read again with it.
-    if (pr_created != 0) {
-        const n = pr_created;
-        pr_created = 0;
-        pr_creating = false;
-        pr_new_open = false;
-        new_tab_open = false;
-        pr_filter = .open;
-        active_view = .pulls;
-        repo_io.refreshRequests();
-        return selectRequest(n);
-    }
-    repo_io.refreshRequests();
-    if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
-    if (api_fetch_after) {
-        api_fetch_after = false;
-        repo_io.requestNetwork("Fetching", tab_strip.fetchAllArgs(true));
-        tab_strip.job_quiet = repo_io.action == .network;
-    }
-}
-
-/// After a request was created: its reviewers, assignees and labels, by the
-/// number GitHub gave it.
-fn askReviewers(body: []const u8) void {
-    defer {
-        api_reviewers.clearRetainingCapacity();
-        api_assignees.clearRetainingCapacity();
-        api_labels.clearRetainingCapacity();
-    }
-    var a: std.heap.ArenaAllocator = .init(gpa);
-    defer a.deinit();
-    const made = std.json.parseFromSliceLeaky(struct { number: u32 = 0 }, a.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
-    if (made.number == 0) return;
-    // Opened once the calls below are done, with what they set on it.
-    pr_created = made.number;
-    if (api_reviewers.items.len + api_assignees.items.len + api_labels.items.len == 0) return;
-    var path: [512]u8 = undefined;
-    if (api_reviewers.items.len > 0) {
-        const reviewers = std.fmt.allocPrint(a.allocator(), "{{\"reviewers\":{s}}}", .{api_reviewers.items}) catch return;
-        requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{made.number}), reviewers, .none);
-    }
-    if (api_assignees.items.len > 0) {
-        const assignees = std.fmt.allocPrint(a.allocator(), "{{\"assignees\":{s}}}", .{api_assignees.items}) catch return;
-        requestApi("Assigning", "POST", apiPath(&path, "/issues/{d}/assignees", .{made.number}), assignees, .none);
-    }
-    if (api_labels.items.len > 0) {
-        const labels = std.fmt.allocPrint(a.allocator(), "{{\"labels\":{s}}}", .{api_labels.items}) catch return;
-        requestApi("Labelling", "POST", apiPath(&path, "/issues/{d}/labels", .{made.number}), labels, .none);
-    }
-}
-
-/// `{"k":"v",…}` from pairs of strings; into `a`.
-fn jsonFields(a: std.mem.Allocator, pairs: []const [2][]const u8) []const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    out.append(a, '{') catch return "{}";
-    for (pairs, 0..) |kv, i| {
-        if (i > 0) out.append(a, ',') catch return "{}";
-        github.jsonString(a, &out, kv[0]) catch return "{}";
-        out.append(a, ':') catch return "{}";
-        github.jsonString(a, &out, kv[1]) catch return "{}";
-    }
-    out.append(a, '}') catch return "{}";
-    return out.items;
-}
-
-/// "a, b ,c" as a JSON list of strings; into `a`.
-fn jsonList(a: std.mem.Allocator, text: []const u8) []const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch return "[]";
-    var it = std.mem.tokenizeAny(u8, text, ", \t\n");
-    var first = true;
-    while (it.next()) |word| {
-        if (!first) out.append(a, ',') catch return "[]";
-        first = false;
-        github.jsonString(a, &out, word) catch return "[]";
-    }
-    out.append(a, ']') catch return "[]";
-    return out.items;
-}
-
-/// A request checked out, as `gh pr checkout` does it.
-///
-/// From this repository: its branch fetched, then a local one tracking it —
-/// made, or switched to and fast-forwarded, so an old checkout is brought up
-/// to date rather than left behind. From a fork: fetched by the request's
-/// own ref into `pr/N`, never into a branch of yours of the same name — a
-/// fork's `main` is not your `main`.
-fn checkoutRequest(number: u32, branch: []const u8, fork: bool) void {
-    if (branch.len == 0) return setCommandError("GitHub did not say which branch that request is.");
-    const remote = defaultRemote() orelse return setCommandError("There is no remote to fetch it from.");
-    if (midOperation()) return setCommandError("Finish or abort what is under way first.");
-    if (fork) {
-        var spec_buf: [32]u8 = undefined;
-        repo_io.requestNetwork("Fetching", &.{ "fetch", remote, std.fmt.bufPrint(&spec_buf, "pull/{d}/head", .{number}) catch return });
-        queueRequestBranch(number, branch, remote, true);
-    } else {
-        repo_io.requestNetwork("Fetching", &.{ "fetch", remote, branch });
-        queueRequestBranch(number, branch, remote, false);
-    }
-}
-
-/// After the fetch: onto the request's branch, made or fast-forwarded.
-fn queueRequestBranch(number: u32, branch: []const u8, remote: []const u8, fork: bool) void {
-    var local_buf: [32]u8 = undefined;
-    const local = if (fork) std.fmt.bufPrint(&local_buf, "pr/{d}", .{number}) catch return else branch;
-    var tip_buf: [512]u8 = undefined;
-    const tip = if (fork) "FETCH_HEAD" else std.fmt.bufPrint(&tip_buf, "{s}/{s}", .{ remote, branch }) catch return;
-    if (isLocalBranch(local)) {
-        queueStep("Checking out", &.{ "switch", local });
-        queueStep("Bringing it up to date", &.{ "merge", "--ff-only", tip });
-    } else if (fork) {
-        queueStep("Checking out", &.{ "switch", "-c", local, tip });
-    } else {
-        queueStep("Checking out", &.{ "switch", "-c", local, "--track", tip });
-    }
-}
-
-/// A request with conflicts, or behind its base, brought up to date here:
-/// its branch checked out as above, its base fetched, then rebased onto it
-/// or merged into it. A conflict stops it in the conflict view, with the
-/// bar to go on from; after a rebase, Push is a force push.
-fn resolveRequestLocally(d: pr.Detail, rebase: bool) void {
-    if (d.fork) return setCommandError("Its branch is in a fork: check it out and bring the base in by hand.");
-    const remote = defaultRemote() orelse return setCommandError("There is no remote to fetch it from.");
-    if (midOperation()) return setCommandError("Finish or abort what is under way first.");
-    if (work) |w| if (w.staged.len > 0 or hasTrackedChanges(w)) {
-        return setCommandError("Commit or stash your changes first: the branch is about to change under them.");
-    };
-    repo_io.requestNetwork("Fetching", &.{ "fetch", remote, d.base, d.head });
-    queueRequestBranch(d.number, d.head, remote, false);
-    var base_buf: [512]u8 = undefined;
-    const base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ remote, d.base }) catch return;
-    if (rebase) {
-        queueStep("Rebasing", &.{ "rebase", base });
-    } else {
-        queueStep("Merging", &.{ "merge", "--no-edit", base });
-    }
-}
-
-/// Changes to tracked files — what a switch or a rebase refuses to run over.
-/// Untracked ones are not: git leaves those where they are.
-fn hasTrackedChanges(w: git.Work) bool {
-    // Unstaged and added is untracked: a new file git does not know yet.
-    for (w.unstaged) |change| if (change.status != .added) return true;
-    return false;
-}
-
-/// What to run once the job out has succeeded, in order: a request fetched,
-/// then switched to, then brought up to date. Dropped at the first step
-/// that fails — or stops, as a rebase does at a conflict.
-const JobStep = struct { label: []const u8, argv: [][]u8 };
-var job_steps: std.ArrayList(JobStep) = .empty;
-
-fn queueStep(label: []const u8, args: []const []const u8) void {
-    // Only behind a job that was queued.
-    if (repo_io.action != .network) return clearJobSteps();
-    const argv = gpa.alloc([]u8, args.len) catch return clearJobSteps();
-    for (args, 0..) |arg, i| {
-        argv[i] = gpa.dupe(u8, arg) catch {
-            for (argv[0..i]) |done| gpa.free(done);
-            gpa.free(argv);
-            return clearJobSteps();
-        };
-    }
-    job_steps.append(gpa, .{ .label = label, .argv = argv }) catch {
-        freeStep(.{ .label = label, .argv = argv });
-        clearJobSteps();
-    };
-}
-
-fn freeStep(step: JobStep) void {
-    for (step.argv) |arg| gpa.free(arg);
-    gpa.free(step.argv);
-}
-
-fn clearJobSteps() void {
-    for (job_steps.items) |step| freeStep(step);
-    job_steps.clearRetainingCapacity();
-}
-
-/// Open `url` in the browser.
-pub fn openUrl(url: []const u8) void {
-    run.open(app_io, ".", url) catch setCommandError("Could not open the browser.");
-}
-
-/// The repository's page on GitHub, `tail` after it, in the browser.
-pub fn openOnGithub(comptime tail: []const u8, args: anytype) void {
-    if (repo_slug.items.len == 0) return setCommandError("This repository is not on GitHub.");
-    var buf: [512]u8 = undefined;
-    const head = std.fmt.bufPrint(&buf, "https://github.com/{s}", .{repo_slug.items}) catch return;
-    const rest = std.fmt.bufPrint(buf[head.len..], tail, args) catch return;
-    openUrl(buf[0 .. head.len + rest.len]);
-}
-
-pub fn startJob() void {
-    // Copied by the job, and owned here either way.
-    defer if (repo_io.action_input) |bytes| {
-        gpa.free(bytes);
-        repo_io.action_input = null;
-    };
-    const after = action_after;
-    action_after = .remote;
-    if (repo == null or tab_strip.job != null) return;
-    tab_strip.job = run.Job.start(gpa, app_io, repo_path.items, repo_io.action_argv[0..repo_io.action_argc], .{ .input = repo_io.action_input }) catch {
-        setCommandError("Could not start git.");
-        tab_strip.job_label = "";
-        // Left set, the next job's failure would be swallowed as a quiet one.
-        tab_strip.job_quiet = false;
-        return;
-    };
-    job_after = after;
-    clearCommandError();
-}
-
-/// What a job does once its outcome is folded in.
-const JobAfter = enum {
-    /// It went to a remote or came from one: the pull requests are read again.
-    remote,
-    /// The repository's own — a stash: GitHub has nothing new to say.
-    local,
-    /// A commit: `commitLanded`.
-    commit,
-};
-/// For the job out, and for the one asked for and not yet started.
-pub var job_after: JobAfter = .remote;
-var action_after: JobAfter = .remote;
-
-/// As `requestNetwork`, for a command of the repository's own.
-pub fn requestLocal(label: []const u8, args: []const []const u8) void {
-    repo_io.requestNetwork(label, args);
-    if (repo_io.action == .network) action_after = .local;
-}
-
-/// Start a networked command now, from inside `runAction` — for the ones that
-/// first went through a confirmation or a prompt, which already were the
-/// deferred action.
-fn startNetwork(label: []const u8, args: []const []const u8) void {
-    // A confirmed force push dropped here has to say so.
-    if (tab_strip.job != null) return setCommandError(repo_io.BUSY);
-    if (!repo_io.setArgv(args)) return;
-    tab_strip.job_label = label;
-    startJob();
-}
-
-/// As `startNetwork`, for a command of the repository's own, with what to
-/// do once it lands.
-pub fn startLocal(label: []const u8, args: []const []const u8, after: JobAfter) void {
-    if (tab_strip.job != null) return setCommandError(repo_io.BUSY);
-    action_after = after;
-    startNetwork(label, args);
-}
-
-/// Where a running clone is going, owned. Set while that job is out; it is the
-/// one job with no repository behind it, and it opens one when it lands.
-var clone_dest: std.ArrayList(u8) = .empty;
-
-pub fn startClone(url: []const u8, dest: []const u8) void {
-    if (tab_strip.job != null) return;
-
-    clone_dest.clearRetainingCapacity();
-    clone_dest.appendSlice(gpa, dest) catch return;
-
-    // From the process's own directory: there may be no repository to run in,
-    // and a relative destination then means what it does in a terminal.
-    tab_strip.job = run.Job.start(gpa, app_io, ".", &.{ "clone", "--", url, dest }, .{}) catch {
-        clone_dest.clearRetainingCapacity();
-        setCommandError("Could not start git.");
-        return;
-    };
-    tab_strip.job_label = "Cloning";
-    clearCommandError();
-}
-
-/// Pick up a finished network command.
-///
-/// On the UI thread, and only between frames: it rebuilds the snapshots every
-/// panel is iterating, which is the same rule `runAction` follows.
-fn collectJob() void {
-    const running = tab_strip.job orelse return;
-    if (!running.finished()) return;
-
-    if (clone_dest.items.len > 0) {
-        tab_strip.job = null;
-        tab_strip.job_label = "";
-        defer clone_dest.clearRetainingCapacity();
-
-        var result = running.finish(gpa, app_io) orelse return setCommandError("Could not run git. Is it on your PATH?");
-        defer result.deinit(gpa);
-        if (!result.ok) return setCommandError(if (result.message.len > 0) result.message else "git clone failed.");
-
-        clearCommandError();
-        tab_strip.openAndRemember(clone_dest.items);
-        return;
-    }
-
-    // Read before `finish`, which frees the copy: the repository can be closed
-    // or swapped while a fetch is in flight, and that fetch has nothing to say
-    // about whatever is on screen now.
-    const still_current = repo != null and std.mem.eql(u8, running.cwd, repo_path.items);
-
-    tab_strip.job = null;
-    // Its words go on over the changes while they are read again after it.
-    // A literal, as every job's label is: it outlives the job.
-    repo_io.command_label = if (tab_strip.job_label.len > 0) tab_strip.job_label else "Reading the changes";
-    tab_strip.job_label = "";
-    const quiet = tab_strip.job_quiet;
-    tab_strip.job_quiet = false;
-    const after = job_after;
-    job_after = .remote;
-
-    var outcome = running.finish(gpa, app_io);
-    if (!still_current) {
-        if (outcome) |*o| o.deinit(gpa);
-        return;
-    }
-    if (quiet) {
-        if (outcome) |*o| {
-            if (!o.ok) {
-                o.deinit(gpa);
-                return;
-            }
-        } else return;
-    }
-
-    const succeeded = if (outcome) |o| o.ok else false;
-    applyOutcome(outcome);
-    switch (after) {
-        .local => return,
-        .commit => return commitLanded(),
-        .remote => {},
-    }
-    // The rest of what was asked — a request fetched, then switched to,
-    // then brought up to date — a step at a time, each once the one before
-    // went well.
-    if (job_steps.items.len > 0) {
-        if (succeeded) {
-            const step = job_steps.orderedRemove(0);
-            defer freeStep(step);
-            startNetwork(step.label, @ptrCast(step.argv));
-        } else clearJobSteps();
-    }
-    // Whatever went to the remote may have opened, merged or closed one.
-    repo_io.refreshRequests();
-    if (pr_selected) |n| pr.loadDetail(repo_path.items, n);
-}
-
-/// Fold the result of a command back into the UI. Shared by the synchronous
-/// path and by a job coming back off another thread.
-fn applyOutcome(outcome: ?run.Outcome) void {
-    var result = outcome orelse {
-        setCommandError("Could not run git. Is it on your PATH?");
-        return;
-    };
-    defer result.deinit(gpa);
-
-    if (result.ok) {
-        clearCommandError();
-    } else if (stoppedAtConflict(result.message)) {
-        // The operation doing what it should: the toolbar says what is under
-        // way, and the first conflicted file opens once the changes are read.
-        clearCommandError();
-        open_first_conflict = true;
-    } else {
-        setCommandError(if (result.message.len > 0) result.message else "git failed.");
-    }
-
-    // Both, unconditionally, and on failure too: `poll` only refreshes the
-    // history when HEAD moved, and plenty of commands change refs without
-    // moving it — a fetch being the obvious one, and a merge that stopped on a
-    // conflict being the one that hides its controls if this is skipped.
-    graph_view.refreshHistory();
-    repo_io.workChanged(repo_io.command_label);
-    repo_io.command_label = "Reading the changes";
-}
-
-/// Whether a failed command stopped a merge, rebase, cherry-pick or revert
-/// at a conflict — git's way of handing it over — rather than failing.
-fn stoppedAtConflict(message: []const u8) bool {
-    const r = repo orelse return false;
-    if (r.state() == .none) return false;
-    for ([_][]const u8{ "CONFLICT", "could not apply", "fix conflicts" }) |sign| {
-        if (std.mem.indexOf(u8, message, sign) != null) return true;
-    }
-    return false;
-}
-
-/// Set when an operation stopped at a conflict: the first conflicted file
-/// is opened as soon as the changes are read again.
-pub var open_first_conflict = false;
-
-/// Run a git command in the repository and fold the result back into the UI.
-pub fn gitDo(args: []const []const u8) void {
-    gitDoInput(args, null);
-}
-
-/// As `gitDo`, with `input` on the command's standard input — which is how a
-/// single hunk is staged: `git apply --cached -` reading a patch Zit rebuilt.
-pub fn gitDoInput(args: []const []const u8, input: ?[]const u8) void {
-    if (repo == null) return;
-
-    const outcome = run.gitInput(gpa, app_io, repo_path.items, args, input) catch null;
-    repo_io.command_label = repo_io.commandLabel(args);
-    applyOutcome(outcome);
-}
-
-/// Compose a rebase of every commit from HEAD down to `onto`, which stays where
-/// it is — exactly the set `git rebase -i <onto>` replays. Null means down to
-/// the root, which git spells `--root`.
-pub fn beginRebase(onto: ?git.Oid) void {
-    const h = history orelse return;
-    clearSelection();
-
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    const a = arena.allocator();
-
-    var id = h.head_oid orelse {
-        arena.deinit();
-        setCommandError("Nothing is checked out to rebase.");
-        return;
-    };
-
-    var reached = false;
-    var guard: usize = 0;
-    while (guard <= MAX_REBASE_STEPS) : (guard += 1) {
-        if (onto) |stop| {
-            if (git.oidEql(id, stop)) {
-                reached = true;
-                break;
-            }
-        }
-
-        const at = h.indexOf(id) orelse break;
-        const commit = h.commits[at];
-
-        // `rebase -i` without --rebase-merges drops merges and replays the
-        // side's commits in their place; a `pick` of one stops it with "is a
-        // merge but no -m option". Neither is what this list would show.
-        if (commit.parents.len > 1) {
-            arena.deinit();
-            clearRebase();
-            setCommandError("There is a merge in that range; an interactive rebase here would flatten it.");
-            return;
-        }
-
-        rebase_steps.append(gpa, .{
-            .id = commit.id,
-            .summary = a.dupe(u8, commit.summary) catch break,
-            .action = .pick,
-        }) catch break;
-
-        // The root commit has no parent to replay onto, which is the one case
-        // git needs telling about — but only when the root is what was asked
-        // for. Reaching it while still looking for `onto` means the walk ran
-        // off the end without ever meeting it, so it is not on this line.
-        if (commit.parents.len == 0) {
-            if (onto == null) {
-                reached = true;
-                rebase_root = true;
-            }
-            break;
-        }
-        id = commit.parents[0];
-    }
-
-    // First parents from HEAD is the line git replays. A commit off that line
-    // is on another branch, and "rebase onto it" means something else — which
-    // the branch menu already offers.
-    if (!reached or rebase_steps.items.len == 0) {
-        arena.deinit();
-        clearRebase();
-        setCommandError("That commit is not on the current branch's first-parent line.");
-        return;
-    }
-
-    rebase_arena = arena;
-    if (!rebase_root) rebase_base_len = git.oidHex(onto.?, &rebase_base).len;
-    selection = .rebase;
-}
-
-/// Hand the composed list to `git rebase -i` and let it run.
-pub fn runRebase() void {
-    const r = repo orelse return;
-    if (rebase_steps.items.len == 0) return;
-
-    // Oldest first: git replays a todo list top to bottom, the reverse of the
-    // order the graph shows them in.
-    var ordered: std.ArrayList(git.RebaseStep) = .empty;
-    defer ordered.deinit(gpa);
-    var i = rebase_steps.items.len;
-    while (i > 0) {
-        i -= 1;
-        ordered.append(gpa, rebase_steps.items[i]) catch return;
-    }
-
-    const todo = git.rebaseTodo(gpa, ordered.items) catch return;
-    defer gpa.free(todo);
-
-    var todo_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const todo_path = std.fmt.bufPrint(&todo_path_buf, "{s}zit-rebase-todo", .{r.gitdir()}) catch {
-        setCommandError("That repository's path is too long to write a todo list into.");
-        return;
-    };
-
-    std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = todo_path, .data = todo }) catch {
-        setCommandError("Could not write the rebase todo list.");
-        return;
-    };
-
-    // How a GUI drives `rebase -i` without an editor: git runs `sequence.editor`
-    // with the todo file as its argument, so `cp <ours>` overwrites it with the
-    // list composed above. git always launches an editor through a shell, hence
-    // the quoting.
-    var quoted_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
-    const quoted = run.shellQuote(&quoted_buf, todo_path) orelse {
-        setCommandError("That repository's path is too long to quote.");
-        return;
-    };
-
-    var cfg_buf: [std.fs.max_path_bytes + 96]u8 = undefined;
-    const cfg = std.fmt.bufPrint(&cfg_buf, "sequence.editor=cp {s}", .{quoted}) catch return;
-
-    // `core.editor=true` covers the message editor a squash opens: `true` exits
-    // 0, and git keeps the combined message it had already prepared.
-    if (rebase_root) {
-        gitDo(&.{ "-c", "core.editor=true", "-c", cfg, "rebase", "-i", "--root" });
-    } else {
-        gitDo(&.{ "-c", "core.editor=true", "-c", cfg, "rebase", "-i", rebase_base[0..rebase_base_len] });
-    }
-
-    // git has its own copy of the list by now, if it started at all.
-    std.Io.Dir.cwd().deleteFile(app_io, todo_path) catch {};
-
-    // Refused before it began — a dirty tree, say: the plan stays on screen,
-    // to run again once that is sorted. Otherwise it finished or stopped on
-    // a conflict, the toolbar takes it from there, and the list is done.
-    if (tab_strip.command_error != null and r.state() == .none) return;
-    clearSelection();
-}
-
-/// Ctrl+W, from the keyboard or the palette: the new-tab page when it is up —
-/// it is what is on screen — and only otherwise the repository under it.
-pub fn closeShownTab() void {
-    if (new_tab_open) {
-        new_tab_open = false;
-    } else if (active_view != .graph) {
-        active_view = .graph;
-    } else requestTab(.{ .close = tab_strip.active_tab });
-}
-
-pub fn requestTab(what: repo_io.TabAction) void {
-    if (repo_io.action != .none) return;
-    repo_io.tab_action = what;
-    repo_io.action = .tabs;
-}
-
-pub fn requestOpenKnown(path: []const u8) void {
-    if (repo_io.action != .none) return;
-    const owned = gpa.dupe(u8, path) catch return;
-    repo_io.tab_action = .{ .open = owned };
-    repo_io.action = .tabs;
-}
-
-pub fn runTabAction() void {
-    const what = repo_io.tab_action;
-    repo_io.tab_action = .none;
-
-    switch (what) {
-        .none => {},
-        .select => |i| tab_strip.selectTab(i),
-        .close => |i| tab_strip.closeTab(i),
-        .select_group => |i| tab_strip.selectGroup(i),
-        .close_group => |i| tab_strip.closeGroup(i),
-        .select_in => |gt| tab_strip.selectTabIn(gt[0], gt[1]),
-        .close_in => |gt| tab_strip.closeTabIn(gt[0], gt[1]),
-        .group_toggle => |g| if (g < tab_strip.groups.items.len) {
-            tab_strip.groups.items[g].collapsed = !tab_strip.groups.items[g].collapsed;
-            tab_strip.saveWorkspace();
-        },
-        .group_color => |gc| if (gc[0] < tab_strip.groups.items.len) {
-            tab_strip.groups.items[gc[0]].color = @intCast(gc[1]);
-            tab_strip.saveWorkspace();
-        },
-        .ungroup => |g| tab_strip.ungroup(g),
-        .tab_to => |m| tab_strip.moveTab(m[0], m[1], m[2]),
-        .tab_at => |m| tab_strip.moveTabTo(m[0], m[1], m[2], m[3]),
-        .tab_end => |m| tab_strip.tabToEnd(m[0], m[1]),
-        .select_ws => |w| selectWorkspace(w),
-        .close_ws => |w| deleteWorkspace(w),
-        .workspace_named => applyWorkspaceDialog(),
-        .tab_out => |gt| tab_strip.ungroupTab(gt[0], gt[1]),
-        .open => |path| {
-            defer gpa.free(path);
-            tab_strip.openAndRemember(path);
-        },
-    }
-}
-
-pub fn requestResolve(index: usize, side: git.ConflictSide) void {
-    if (repo_io.action != .none) return;
-    repo_io.action_conflict = index;
-    repo_io.action_side = side;
-    repo_io.action = .resolve;
-}
-
-/// Rewrite the conflicted file with one region replaced by the chosen side.
-///
-/// Nothing is staged here. The file still has to look right, and marking it
-/// resolved is a separate, deliberate click — same as resolving in an editor.
-pub fn runResolve() void {
-    if (repo_io.action_conflict >= conflicts.len) return;
-    const next = git.resolveConflict(gpa, conflict_text, conflicts[repo_io.action_conflict], repo_io.action_side) catch {
-        setCommandError("Out of memory resolving that conflict.");
-        return;
-    };
-    defer gpa.free(next);
-    _ = writeConflictFile(next, true);
-}
-
-/// Every region that resolves on its own, at once: each keeps the side that
-/// changed it, line by line at the finest. The file written in one pass —
-/// one region at a time was a copy of all of it for each, 345 ms for 250
-/// regions of a 1.3 MB lockfile.
-pub fn runResolveSafe() void {
-    const with = gpa.alloc(?[]const u8, conflicts.len) catch return;
-    defer gpa.free(with);
-    @memset(with, null);
-    defer for (with) |w| if (w) |t| gpa.free(t);
-    for (conflicts, with) |region, *w| {
-        if (git.autoResolve(gpa, region) catch null) |auto| w.* = auto.text;
-    }
-    const text = git.replaceRegions(gpa, conflict_text, conflicts, with) catch return;
-    defer gpa.free(text);
-    _ = writeConflictFile(text, true);
-}
-
-/// U and Ctrl+Z in a conflicted file: the file as it was before the last pick.
-pub fn runUndoResolve() void {
-    const step = resolve_undo.pop() orelse return;
-    defer step.deinit(gpa);
-    const previous = (git.spliceUndo(gpa, conflict_text, step) catch return) orelse {
-        // Edited since, another way than a pick: the picks before it no
-        // longer fit it.
-        clearResolveUndo();
-        setCommandError("The file changed since that pick: there is nothing to take back.");
-        return;
-    };
-    defer gpa.free(previous);
-    _ = writeConflictFile(previous, false);
-}
-
-/// Write `next` over the open conflicted file, keeping what it was for U to
-/// put back. Refused when the file changed on disk since it was shown:
-/// "Open this file" invites an edit in another editor, and writing the
-/// older copy over it would lose that edit without a word.
-fn writeConflictFile(next: []const u8, keep_undo: bool) bool {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs = selectedAbsPath(&path_buf) orelse return false;
-
-    const on_disk = std.Io.Dir.cwd().readFileAlloc(app_io, abs, gpa, .limited(MAX_CONFLICT_BYTES)) catch null;
-    defer if (on_disk) |d| gpa.free(d);
-    if (on_disk == null or !std.mem.eql(u8, on_disk.?, conflict_text)) {
-        diff_stale = true;
-        setCommandError("The file changed on disk since it was shown: here it is as it is now. Pick again.");
-        return false;
-    }
-
-    if (keep_undo) {
-        const step = git.spliceBetween(gpa, conflict_text, next) catch return false;
-        if (resolve_undo.items.len == MAX_RESOLVE_UNDO) resolve_undo.orderedRemove(0).deinit(gpa);
-        resolve_undo.append(gpa, step) catch {
-            step.deinit(gpa);
-            return false;
-        };
-    }
-    std.Io.Dir.cwd().writeFile(app_io, .{ .sub_path = abs, .data = next }) catch {
-        setCommandError("Could not write that file back.");
-        return false;
-    };
-
-    clearCommandError();
-    // The offsets of every region after the one just resolved have moved, so
-    // the list is rebuilt rather than patched.
-    diff_stale = true;
-    repo_io.workChanged("Resolving");
-    return true;
-}
-
-/// The whole file as one side has it, staged: `checkout --ours` or
-/// `--theirs`, then `add` — or, where that side deleted it, `rm`. The
-/// next conflicted file opens after it.
-pub fn runTakeFile() void {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (selected_path.items.len > path_buf.len) return;
-    @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
-    const file = path_buf[0..selected_path.items.len];
-    const side = repo_io.action_side;
-
-    const deleted = (conflict_kind == .deleted_by_us and side == .ours) or (conflict_kind == .deleted_by_them and side == .theirs);
-    if (deleted) {
-        gitDo(&.{ "--literal-pathspecs", "rm", "-q", "--", file });
-    } else {
-        // Deleted on the other side: what is on disk is already this one's.
-        if (conflict_kind != .deleted_by_us and conflict_kind != .deleted_by_them) {
-            gitDo(&.{ "--literal-pathspecs", "checkout", if (side == .theirs) "--theirs" else "--ours", "--", file });
-            if (tab_strip.command_error != null) return;
-        }
-        gitDo(&.{ "--literal-pathspecs", "add", "--", file });
-    }
-    if (tab_strip.command_error != null) return;
-    clearResolveUndo();
-    open_first_conflict = true;
-    repo_io.workChanged("Resolving");
-}
-
-/// A file with nothing left to resolve, staged, and the next one opened.
-pub fn runStageNext() void {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (selected_path.items.len > path_buf.len) return;
-    @memcpy(path_buf[0..selected_path.items.len], selected_path.items);
-    const file = path_buf[0..selected_path.items.len];
-    if (commit_view.markersLeft(file)) return ask(.stage_markers, file);
-    gitDo(&.{ "--literal-pathspecs", "add", "--", file });
-    if (tab_strip.command_error != null) return;
-    clearResolveUndo();
-    open_first_conflict = true;
-    repo_io.workChanged("Resolving");
-}
-
-/// Take back whatever last moved HEAD, as the reflog tells it.
-pub fn requestUndo() void {
-    const h = history orelse return;
-    // Mid-rebase the reflog's last move is a step of it, and resetting there
-    // leaves the rebase replaying onto the wrong commit: Abort is the undo.
-    if (h.state != .none) return setCommandError("Finish or abort what is under way first: an undo in the middle of it would break it.");
-    const move = h.last_move orelse return setCommandError("Nothing to undo yet.");
-    var sha: [41]u8 = undefined;
-    var argv: [4][]const u8 = undefined;
-    const args = git.undoArgs(move.message, git.oidHex(move.old, &sha), isLocalBranch, &argv) orelse
-        return setCommandError("Zit cannot undo that.");
-    // Where HEAD stood before this undo: while the reflog's last move is
-    // still the one leaving it, that move is the undo, and taking it back
-    // is the redo.
-    redo_from = h.head_oid;
-    const what = std.mem.trim(u8, move.message, " \r\n");
-    redo_what_len = @min(what.len, redo_what.len);
-    @memcpy(redo_what[0..redo_what_len], what[0..redo_what_len]);
-    repo_io.request(args);
-}
-
-/// HEAD before the last undo Zit made, while that undo can be redone.
-var redo_from: ?git.Oid = null;
-/// What that undo took back, in the reflog's words: Redo's hover.
-var redo_what: [160]u8 = undefined;
-var redo_what_len: usize = 0;
-
-/// Whether Redo has something to take back: an undo made here, and nothing
-/// moved HEAD since.
-pub fn canRedo() bool {
-    const h = history orelse return false;
-    const from = redo_from orelse return false;
-    const move = h.last_move orelse return false;
-    return git.oidEql(move.old, from);
-}
-
-/// Undo's hover: what it would take back, as the reflog says it.
-pub fn undoHint() []const u8 {
-    const h = history orelse return "Undo";
-    const move = h.last_move orelse return "Nothing to undo yet";
-    return std.fmt.allocPrint(dvui.currentWindow().arena(), "Undo \u{201C}{s}\u{201D} — Ctrl+Z", .{std.mem.trim(u8, move.message, " \r\n")}) catch "Undo";
-}
-
-/// Redo's hover: what the last undo took back, or why there is nothing.
-pub fn redoHint() []const u8 {
-    if (!canRedo()) return "Nothing to redo: undo something first";
-    return std.fmt.allocPrint(dvui.currentWindow().arena(), "Redo \u{201C}{s}\u{201D} — Ctrl+Shift+Z", .{redo_what[0..redo_what_len]}) catch "Redo";
-}
-
-/// Ctrl+Shift+Z: take back the last undo — an undo undone, which is what
-/// `requestUndo` already does to it — and only that: after anything else
-/// has moved HEAD there is nothing to redo.
-pub fn requestRedo() void {
-    const h = history orelse return;
-    const from = redo_from orelse return setCommandError("Nothing to redo.");
-    const move = h.last_move orelse return setCommandError("Nothing to redo.");
-    if (!git.oidEql(move.old, from)) {
-        redo_from = null;
-        return setCommandError("Nothing to redo.");
-    }
-    requestUndo();
-    // A redo is not itself undone by the next Ctrl+Shift+Z.
-    redo_from = null;
-}
-
-pub fn isLocalBranch(name: []const u8) bool {
-    const h = history orelse return false;
-    for (h.refs) |ref| {
-        if (ref.kind == .local and std.mem.eql(u8, ref.name, name)) return true;
-    }
-    return false;
-}
-
-pub fn checkout(ref: git.Ref) void {
-    // `switch`, not `checkout`: `checkout` also takes paths, so a branch whose
-    // name matches a file is ambiguous, and `checkout -- <name>` means the
-    // opposite of what it looks like — restore that *path* from the index.
-    //
-    // For a remote-tracking name only the remote is stripped ("origin/feat/x"
-    // -> "feat/x"), and `switch` then does the right thing in both cases: it
-    // moves to the local branch if there is one, and creates a tracking branch
-    // if there is not.
-    const name = if (ref.kind == .remote) splitRemoteRef(ref.name).branch else ref.name;
-
-    // A job, with its pill in the status bar: rewriting the working tree takes
-    // long enough on Windows to freeze the window if it is waited for here.
-    repo_io.requestNetwork("Switching branch", &.{ "switch", name });
-}
-
-pub fn setCommandError(message: []const u8) void {
-    clearCommandError();
-    tab_strip.command_error = gpa.dupe(u8, message) catch null;
-}
-
-pub fn clearCommandError() void {
-    if (tab_strip.command_error) |m| gpa.free(m);
-    tab_strip.command_error = null;
-}
-
-pub fn ask(kind: Confirm.Kind, arg: []const u8) void {
-    clearConfirm();
-    confirm = .{ .kind = kind, .arg = gpa.dupe(u8, arg) catch return };
-}
-
-pub fn clearConfirm() void {
-    if (confirm) |c| gpa.free(c.arg);
-    confirm = null;
-}
-
-/// Run whatever was confirmed. Every branch here destroys work on purpose.
-pub fn runConfirmed() void {
-    const c = confirm orelse return;
-    switch (c.kind) {
-        .discard => doDiscard(c.arg),
-        .reset_hard => gitDo(&.{ "reset", "--hard", c.arg }),
-        .stash_drop => rebase_view.stashDo("drop", c.arg),
-        .discard_hunk => gitDoInput(&.{ "apply", "--reverse", "-" }, c.arg),
-        // `--force-with-lease`, never `--force`: it refuses when the remote has
-        // moved since the last fetch, which is the push that loses someone
-        // else's work. The quiet fetch keeps moving that "last fetch" up to
-        // the remote, so on its own the lease always holds; `--force-if-includes`
-        // also wants what is being overwritten to be in this branch's own
-        // history. An upstream is set up the way the toolbar's push does it.
-        .force_push => startNetwork("Force pushing", &.{ "-c", "push.autoSetupRemote=true", "push", "--force-with-lease", "--force-if-includes" }),
-        .delete_branch_force => gitDo(&.{ "branch", "-D", c.arg }),
-        .delete_remote_branch => {
-            const split = splitRemoteRef(c.arg);
-            // The full name: a tag called the same would make the bare one
-            // ambiguous.
-            var buf: [512]u8 = undefined;
-            const full = std.fmt.bufPrint(&buf, "refs/heads/{s}", .{split.branch}) catch split.branch;
-            startNetwork("Deleting", &.{ "push", split.remote, "--delete", full });
-        },
-        .delete_remote_tag => if (defaultRemote()) |remote| {
-            var buf: [512]u8 = undefined;
-            const full = std.fmt.bufPrint(&buf, "refs/tags/{s}", .{c.arg}) catch c.arg;
-            startNetwork("Deleting", &.{ "push", remote, "--delete", full });
-        } else setCommandError("There is no remote to delete it from."),
-        .restore_file => {
-            const sep = std.mem.indexOfScalar(u8, c.arg, ' ') orelse return clearConfirm();
-            gitDo(&.{ "--literal-pathspecs", "checkout", c.arg[0..sep], "--", c.arg[sep + 1 ..] });
-        },
-        .remove_worktree => gitDo(&.{ "worktree", "remove", c.arg }),
-        .merge_request => {
-            var path: [512]u8 = undefined;
-            const number = std.fmt.parseInt(u32, c.arg, 10) catch return clearConfirm();
-            // In the dropdown's order: a merge commit, squash, rebase.
-            const method = ([_][]const u8{ "merge", "squash", "rebase" })[@min(pr_merge_method, 2)];
-            // With the commit it was shown at: GitHub refuses if the branch
-            // moved since, rather than merge what nobody looked at.
-            const sha = if (pr.detail) |d| (if (d.number == number) d.head_sha else "") else "";
-            const body = (if (sha.len > 0)
-                std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\",\"sha\":\"{s}\"}}", .{ method, sha })
-            else
-                std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"merge_method\":\"{s}\"}}", .{method})) catch return clearConfirm();
-            api_gone_number = number;
-            api_gone_state = "MERGED";
-            requestApi("Merging", "PUT", apiPath(&path, "/pulls/{d}/merge", .{number}), body, .gone);
-            // Its branch after it, as the toggle asked: GitHub's ref, by name —
-            // unless it lives in a fork, which is not this repository's to delete.
-            if (pr_delete_branch) if (pr.detail) |d| if (d.number == number and d.head.len > 0 and !d.fork) {
-                var ref_path: [512]u8 = undefined;
-                requestApi("Deleting the branch", "DELETE", apiPath(&ref_path, "/git/refs/heads/{s}", .{d.head}), null, .branch_after_merge);
-            };
-            api_fetch_after = true;
-        },
-        .close_request => {
-            var path: [512]u8 = undefined;
-            const number = std.fmt.parseInt(u32, c.arg, 10) catch return clearConfirm();
-            api_gone_number = number;
-            api_gone_state = "CLOSED";
-            requestApi("Closing", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), "{\"state\":\"closed\"}", .gone);
-        },
-        .sign_out => window_chrome.signOutGithub(c.arg),
-        .stage_markers => if (c.arg.len == 0)
-            requestLocal("Staging", &.{ "add", "-A" })
-        else
-            repo_io.request(&.{ "--literal-pathspecs", "add", "--", c.arg }),
-        .abort_operation => if (operationCommand()) |cmd| repo_io.request(&.{ cmd, "--abort" }),
-        .skip_step => if (operationCommand()) |cmd| requestLocal("Skipping", &.{ cmd, "--skip" }),
-        // `checkout -m` writes the conflict again from the index's three
-        // stages: every pick made in the file goes.
-        .restart_file => {
-            gitDo(&.{ "--literal-pathspecs", "checkout", "-m", "--", c.arg });
-            if (tab_strip.command_error == null) clearResolveUndo();
-            diff_stale = true;
-        },
-    }
-    clearConfirm();
-}
-
-/// The subcommand of the operation under way — `rebase`, `merge`… — whose
-/// `--continue`, `--skip` and `--abort` apply; null with none.
-pub fn operationCommand() ?[]const u8 {
-    const h = history orelse return null;
-    return h.state.command();
-}
-
-/// Abort and Skip, each asked first: an abort throws away every conflict
-/// resolved so far, and a skipped commit is gone from the branch.
-pub fn requestAbortOperation() void {
-    if (operationCommand() == null) return;
-    ask(.abort_operation, "");
-}
-
-pub fn requestSkipStep() void {
-    if (operationCommand() == null) return;
-    ask(.skip_step, "");
-}
-
-pub fn askName(kind: Prompt.Kind, arg: []const u8) void {
-    clearPrompt();
-    prompt = .{ .kind = kind, .arg = gpa.dupe(u8, arg) catch return };
-}
-
-/// As `askName`, with the field already holding `text` — the current name, for
-/// a rename, so a typo is fixed rather than retyped.
-pub fn askNameWith(kind: Prompt.Kind, arg: []const u8, text: []const u8) void {
-    askName(kind, arg);
-    prompt_text.appendSlice(gpa, text) catch {};
-}
-
-/// A leading `~/` as a shell would read it. No shell runs these commands, so
-/// without this `~/dev/x` makes a directory literally named `~`.
-pub fn expandHome(buf: []u8, path: []const u8) []const u8 {
-    if (!std.mem.startsWith(u8, path, "~/") and !std.mem.eql(u8, path, "~")) return path;
-    const home = homeDir() orelse return path;
-    return std.fmt.bufPrint(buf, "{s}{s}", .{ home, path[1..] }) catch path;
-}
-
-/// The user's home folder: HOME, or on Windows, where there is none,
-/// USERPROFILE.
-pub fn homeDir() ?[]const u8 {
-    if (std.c.getenv("HOME")) |h| return std.mem.span(h);
-    if (std.c.getenv("USERPROFILE")) |h| return std.mem.span(h);
-    return null;
-}
-
-/// "first rest", the shape of every two-word prompt. Null unless both are there.
-pub fn splitPair(text: []const u8) ?[2][]const u8 {
-    const sep = std.mem.indexOfAny(u8, text, " \t") orelse return null;
-    const rest = std.mem.trimStart(u8, text[sep..], " \t");
-    if (rest.len == 0) return null;
-    return .{ text[0..sep], rest };
-}
-
-/// Where a branch or tag goes when nothing says otherwise: `origin` if there is
-/// one, else the first remote. Null when there are none.
-pub fn defaultRemote() ?[]const u8 {
-    return repo_io.firstRemote([]const u8, struct {
-        fn pick(r: git.Remote) ?[]const u8 {
-            return r.name;
-        }
-    }.pick);
-}
-
-/// "origin/feat/x" -> "origin", "feat/x". Both sides can hold slashes
-/// ("team/origin"), so the remote is the longest known one the name starts
-/// with; the first slash only when no known remote fits.
-pub fn splitRemoteRef(name: []const u8) struct { remote: []const u8, branch: []const u8 } {
-    var remote: []const u8 = "";
-    if (history) |h| for (h.remotes) |r| {
-        if (r.name.len > remote.len and rebase_view.remoteOf(name, r.name)) remote = r.name;
-    };
-    if (remote.len == 0) {
-        const slash = std.mem.indexOfScalar(u8, name, '/') orelse return .{ .remote = name, .branch = name };
-        remote = name[0..slash];
-    }
-    return .{ .remote = remote, .branch = name[remote.len + 1 ..] };
-}
-
-pub fn clearPrompt() void {
-    if (prompt) |p| gpa.free(p.arg);
-    prompt = null;
-    prompt_text.clearRetainingCapacity();
-}
-
-/// Run the command the name was for. A failure keeps the bar open with the text
-/// still in it, because the usual failure is a name that is already taken.
-pub fn runPrompt() void {
-    const p = prompt orelse return;
-
-    const name = std.mem.trim(u8, prompt_text.items, " \t");
-    if (name.len == 0) return;
-
-    // A word starting with a dash reaches git as an option, not a name: `-f`
-    // as a branch name forces, `--upload-pack=…` as a URL runs a program. No
-    // ref, remote, URL or folder asked for here starts with one; git refuses
-    // such ref names anyway.
-    switch (p.kind) {
-        .new_branch, .new_tag, .add_remote, .rename_branch, .rename_remote, .remote_url, .add_worktree => {
-            const words = splitPair(name) orelse [2][]const u8{ name, "" };
-            if (words[0][0] == '-' or std.mem.startsWith(u8, words[1], "-"))
-                return setCommandError("A name cannot start with a dash: git would read it as an option.");
-        },
-        else => {},
-    }
-
-    switch (p.kind) {
-        .new_branch => if (p.arg.len > 0)
-            gitDo(&.{ "branch", name, p.arg })
-        else
-            gitDo(&.{ "branch", name }),
-        // Signed when set, which makes it annotated: `-s` needs a message,
-        // and the tag's name is the obvious one.
-        .new_tag => if (commit_prefs.sign_tags)
-            (if (p.arg.len > 0) gitDo(&.{ "tag", "-s", "-m", name, name, p.arg }) else gitDo(&.{ "tag", "-s", "-m", name, name }))
-        else if (p.arg.len > 0)
-            gitDo(&.{ "tag", name, p.arg })
-        else
-            gitDo(&.{ "tag", name }),
-        // "origin git@host:repo.git", in one field: two boxes for two words is
-        // a dialog, and this is a bar.
-        .add_remote => {
-            const sep = std.mem.indexOfAny(u8, name, " \t") orelse {
-                setCommandError("A remote needs a name and a URL, separated by a space.");
-                return;
-            };
-            const url = std.mem.trimStart(u8, name[sep..], " \t");
-            if (url.len == 0) {
-                setCommandError("A remote needs a name and a URL, separated by a space.");
-                return;
-            }
-            gitDo(&.{ "remote", "add", name[0..sep], url });
-        },
-        .rename_branch => gitDo(&.{ "branch", "-m", p.arg, name }),
-        .stash => startLocal("Stashing", &.{ "stash", "push", "-u", "-m", name }, .local),
-        .rename_remote => gitDo(&.{ "remote", "rename", p.arg, name }),
-        .remote_url => gitDo(&.{ "remote", "set-url", p.arg, name }),
-        .add_worktree => {
-            const pair = splitPair(name) orelse {
-                setCommandError("A worktree needs a folder and a branch, separated by a space.");
-                return;
-            };
-            var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const dest = expandHome(&dest_buf, pair[0]);
-            if (isLocalBranch(pair[1])) {
-                gitDo(&.{ "worktree", "add", dest, pair[1] });
-            } else {
-                gitDo(&.{ "worktree", "add", "-b", pair[1], dest });
-            }
-        },
-        // Nothing to run and nothing to fail: these only rearrange the strip.
-        .new_group => {
-            tab_strip.groupTab(name, repo_io.group_target[0], repo_io.group_target[1]);
-            return clearPrompt();
-        },
-        .rename_group => {
-            tab_strip.renameGroup(repo_io.group_target[0], name);
-            return clearPrompt();
-        },
-    }
-
-    if (tab_strip.command_error == null) clearPrompt();
-}
-
-/// Throw away working-tree changes. Untracked files need `clean`; tracked ones
-/// need `restore` — running only one of them silently leaves half the mess.
-/// A rename on disk is both: the old name comes back, the new one goes.
-///
-/// `--literal-pathspecs` on every command given a file's name, here and
-/// wherever else one is: a pathspec is a glob, and `pages/[id].tsx` would
-/// otherwise take `pages/i.tsx` with it.
-///
-/// `restore` refuses a pathspec that names nothing git tracks — an untracked
-/// file, or a tree holding only those — so it runs only where a tracked change
-/// is; and when it fails that is where this stops, rather than `clean`
-/// wiping its error and the untracked files going all the same.
-fn doDiscard(path: []const u8) void {
-    if (hasTrackedChange(path)) {
-        if (path.len == 0) {
-            gitDo(&.{ "restore", "--worktree", "--", "." });
-        } else {
-            gitDo(&.{ "--literal-pathspecs", "restore", "--worktree", "--", oldPathOf(.unstaged, path) });
-        }
-        if (tab_strip.command_error != null) return;
-    }
-    if (path.len == 0) {
-        gitDo(&.{ "clean", "-fd", "--", "." });
-    } else {
-        gitDo(&.{ "--literal-pathspecs", "clean", "-fd", "--", path });
-    }
-}
-
-/// Whether the working tree holds a change to a tracked file at `path`, or
-/// anywhere when it is empty. Untracked files are the `.added` ones.
-fn hasTrackedChange(path: []const u8) bool {
-    const w = work orelse return true;
-    for (w.unstaged) |change| {
-        if (change.status != .added and (path.len == 0 or std.mem.eql(u8, change.path, path))) return true;
-    }
-    return false;
-}
-
-/// Where the change at `path` was renamed from; `path` itself for anything
-/// that was not renamed, or is no longer listed.
-pub fn oldPathOf(side: git.DiffSide, path: []const u8) []const u8 {
-    const w = work orelse return path;
-    for (if (side == .staged) w.staged else w.unstaged) |change| {
-        if (std.mem.eql(u8, change.path, path)) return change.old_path;
-    }
-    return path;
-}
-
-/// Amend ticked over an empty message: the last commit's, to edit rather than
-/// type again — amending is most often fixing a word of it.
-pub fn fillFromHead() void {
-    if (commit_summary.items.len > 0 or commit_description.items.len > 0) return;
-    const r = repo orelse return;
-    const head = (history orelse return).head_oid orelse return;
-    const whole = r.commitMessage(dvui.currentWindow().arena(), head);
-    const nl = std.mem.indexOfScalar(u8, whole, '\n') orelse whole.len;
-    commit_summary.appendSlice(gpa, std.mem.trimEnd(u8, whole[0..nl], " \r")) catch return;
-    commit_description.appendSlice(gpa, std.mem.trim(u8, whole[nl..], " \t\r\n")) catch {};
-}
-
-pub fn doCommit() void {
-    if (commit_summary.items.len == 0) return;
-
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const text = commit_view.commitMessage(arena.allocator()) catch return;
-
-    var args: std.ArrayList([]const u8) = .empty;
-    defer args.deinit(gpa);
-
-    args.append(gpa, "commit") catch return;
-    if (amend) args.append(gpa, "--amend") catch return;
-    if (commit_prefs.signoff) args.append(gpa, "--signoff") catch return;
-    if (commit_prefs.sign) args.append(gpa, "-S") catch return;
-    // One `-m` holding the whole message: two would put a blank line between
-    // the description and the trailers git reads the co-authors from.
-    args.append(gpa, "-m") catch return;
-    args.append(gpa, text) catch return;
-
-    // On another thread, with the status bar's pill: a commit runs the hooks
-    // and the signing, which can wait on a passphrase, and on Windows even a
-    // plain one held the window up.
-    commit_sent.clearRetainingCapacity();
-    commit_sent.appendSlice(gpa, text) catch {};
-    startLocal("Committing", args.items, .commit);
-}
-
-/// The message of the commit out on its job. The box stays editable while it
-/// runs; when it lands, the box is emptied only if it still says this.
-var commit_sent: std.ArrayList(u8) = .empty;
-
-/// A commit's outcome, folded in: the box emptied for the next one, or the
-/// identity asked for when git said it has none.
-fn commitLanded() void {
-    // git's own words for an identity it does not have.
-    if (tab_strip.command_error) |message| {
-        if (std.mem.indexOf(u8, message, "tell me who you are") != null or std.mem.indexOf(u8, message, "user.email") != null) identity_view.openIdentity();
-        return;
-    }
-    // Typed into while the commit ran: that is the next message, not this one.
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const now = commit_view.commitMessage(arena.allocator()) catch "";
-    const unchanged = std.mem.eql(u8, now, commit_sent.items);
-    commit_sent.clearRetainingCapacity();
-    if (!unchanged) return;
-    commit_summary.clearRetainingCapacity();
-    commit_description.clearRetainingCapacity();
-    amend = false;
-    commit_type = null;
-    commit_scope.clearRetainingCapacity();
-    commit_view.clearCoAuthors();
-    template_due = true;
-}
-
 // === Frame ===
 
 fn appFrame() !dvui.App.Result {
@@ -2588,8 +1230,8 @@ fn appFrame() !dvui.App.Result {
     wake_pending.store(false, .release);
 
     // Before any widget: this rebuilds the snapshots the panels below iterate.
-    collectJob();
-    collectApi();
+    github_actions.collectJob();
+    github_actions.collectApi();
     commit_view.collectRepoConfig();
     dialog_views.takeFolder();
     if (repo_io.collectWorkLoad()) dvui.refresh(null, @src(), null);
@@ -2795,17 +1437,17 @@ fn contentPane() void {
 
 var pr_split: f32 = 0.36;
 pub var pr_selected: ?u32 = null;
-var pr_comment: std.ArrayList(u8) = .empty;
+pub var pr_comment: std.ArrayList(u8) = .empty;
 /// The merge settings' dropdown: merge commit, squash, rebase. A `usize`
 /// because that is what a dvui dropdown writes.
-var pr_merge_method: usize = 1;
-var pr_delete_branch: bool = true;
+pub var pr_merge_method: usize = 1;
+pub var pr_delete_branch: bool = true;
 
 /// Resolved threads shown too, not only the open ones.
 var pr_threads_all: bool = false;
 /// The thread whose reply box is open — its node id — and what is in it.
-var pr_reply_id: std.ArrayList(u8) = .empty;
-var pr_reply: std.ArrayList(u8) = .empty;
+pub var pr_reply_id: std.ArrayList(u8) = .empty;
+pub var pr_reply: std.ArrayList(u8) = .empty;
 
 pub fn selectRequest(number: u32) void {
     // A review written for one request is never sent to another.
@@ -3555,19 +2197,19 @@ fn sideHeading(kind: SideKind, d: pr.Detail) void {
     var path: [512]u8 = undefined;
     switch (kind) {
         .reviewers => if (peopleRows(&side_list, true)) |login| {
-            const body = std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, login)}) catch return;
+            const body = std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, login)}) catch return;
             if (listHas(side_list.items, login))
-                requestApi("Asking for a review", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none)
+                github_actions.requestApi("Asking for a review", "POST", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none)
             else
-                requestApi("Withdrawing a review", "DELETE", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none);
+                github_actions.requestApi("Withdrawing a review", "DELETE", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none);
         },
         .assignees => if (peopleRows(&side_list, false)) |_| {
-            const body = std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{jsonList(a, side_list.items)}) catch return;
-            requestApi("Assigning", "PATCH", apiPath(&path, "/issues/{d}", .{d.number}), body, .none);
+            const body = std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{github_actions.jsonList(a, side_list.items)}) catch return;
+            github_actions.requestApi("Assigning", "PATCH", github_actions.apiPath(&path, "/issues/{d}", .{d.number}), body, .none);
         },
         .labels => if (labelRows(&side_list)) |_| {
             const body = std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{jsonCommaList(a, side_list.items)}) catch return;
-            requestApi("Labelling", "PUT", apiPath(&path, "/issues/{d}/labels", .{d.number}), body, .none);
+            github_actions.requestApi("Labelling", "PUT", github_actions.apiPath(&path, "/issues/{d}/labels", .{d.number}), body, .none);
         },
     }
 }
@@ -3608,7 +2250,7 @@ fn sideReviewer(id: usize, r: pr.Reviewer, number: u32) void {
         const hint = std.fmt.allocPrint(a, "Ask {s} for a review again", .{r.login}) catch "Ask for a review again";
         if (dialog_views.iconButtonTagged(@src(), "rerequest", hint, dvui.entypo.cycle, style.textFaint(), dialog_views.frameTag("pr:rerequest", r.login))) {
             var path: [512]u8 = undefined;
-            requestApi("Asking for a review", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, r.login)}) catch return, .none);
+            github_actions.requestApi("Asking for a review", "POST", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, r.login)}) catch return, .none);
         }
     }
     dvui.icon(@src(), "review_state", icon, .{ .fill_color = .{ .color = hue } }, .{ .min_size_content = .{ .w = 12, .h = 12 }, .gravity_y = 0.5 });
@@ -4014,12 +2656,12 @@ fn requestMergeCard(d: pr.Detail) void {
         .padding = dvui.Rect.all(0),
     });
     var num: [12]u8 = undefined;
-    if (dialog_views.dialogButton(@src(), "Close…", false)) ask(.close_request, requestNumber(&num));
+    if (dialog_views.dialogButton(@src(), "Close…", false)) github_actions.ask(.close_request, requestNumber(&num));
     // Merged by the host itself once its checks and reviews allow.
     if (d.auto_merge) {
         if (dialog_views.dialogButton(@src(), "Cancel auto-merge", false)) requestOnRequest("Cancelling auto-merge", "disablePullRequestAutoMerge", d.id);
     } else if (dialog_views.dialogButton(@src(), "Auto-merge", false)) autoMerge(d);
-    if (dialog_views.dialogButton(@src(), "Merge…", true)) ask(.merge_request, requestNumber(&num));
+    if (dialog_views.dialogButton(@src(), "Merge…", true)) github_actions.ask(.merge_request, requestNumber(&num));
 }
 
 /// Which part of a request the pane shows under its head.
@@ -4058,17 +2700,17 @@ fn requestHeader(d: pr.Detail, reload: *bool, people_inline: bool, inset: f32) v
 
         // What to do with it, short of answering it: icons at the end of
         // its title's line, each saying itself on hover.
-        if (dialog_views.iconButtonTagged(@src(), "pr_checkout", "Check it out: switch to its branch, up to date", dvui.entypo.download, style.textMuted(), "pr:checkout")) checkoutRequest(d.number, d.head, d.fork);
-        if (dialog_views.iconButtonTagged(@src(), "pr_web", "Open it on GitHub", dvui.entypo.popup, style.textMuted(), "pr:web")) openUrl(d.url);
+        if (dialog_views.iconButtonTagged(@src(), "pr_checkout", "Check it out: switch to its branch, up to date", dvui.entypo.download, style.textMuted(), "pr:checkout")) github_actions.checkoutRequest(d.number, d.head, d.fork);
+        if (dialog_views.iconButtonTagged(@src(), "pr_web", "Open it on GitHub", dvui.entypo.popup, style.textMuted(), "pr:web")) github_actions.openUrl(d.url);
         if (dialog_views.iconButtonTagged(@src(), "pr_edit", "Edit its title, description, reviewers and labels", dvui.entypo.pencil, style.textMuted(), "pr:edit")) openPrEdit(d);
         if (requestOpen(d) and !d.draft) {
             if (dialog_views.iconButtonTagged(@src(), "pr_draft", "Convert it back to a draft", dvui.entypo.back, style.textMuted(), "pr:draft")) requestOnRequest("Making a draft", "convertPullRequestToDraft", d.id);
         }
         // While it is read again, or an action on it is out, the dots and
         // what is being done instead of the refresh icon.
-        if (pr.detailLoading() or api_job != null) {
+        if (pr.detailLoading() or github_actions.api_job != null) {
             rebase_view.loadingSpinner(@src());
-            dvui.label(@src(), "{s}", .{if (api_job != null and api_label.len > 0) api_label else "Reading"}, .{ .tag = "pr:busy", .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
+            dvui.label(@src(), "{s}", .{if (github_actions.api_job != null and github_actions.api_label.len > 0) github_actions.api_label else "Reading"}, .{ .tag = "pr:busy", .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0), .margin = .{ .w = style.space.xs } });
         } else if (dialog_views.iconButtonTagged(@src(), "pr_refresh", "Read it again", dvui.entypo.cw, style.textMuted(), "pr:refresh")) reload.* = true;
     }
     // Who, from where into where, when; its size on the right.
@@ -4151,14 +2793,14 @@ fn autoMerge(d: pr.Detail) void {
     if (!safeNodeId(d.id)) return;
     const method = ([_][]const u8{ "MERGE", "SQUASH", "REBASE" })[@min(pr_merge_method, 2)];
     const v = std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"id\":\"{s}\",\"method\":\"{s}\"}}", .{ d.id, method }) catch return;
-    requestGraphql("Setting auto-merge", "mutation($id:ID!,$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:$method}){clientMutationId}}", v, .none);
+    github_actions.requestGraphql("Setting auto-merge", "mutation($id:ID!,$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:$method}){clientMutationId}}", v, .none);
 }
 
 /// One of GitHub's mutations that take a request's node id and nothing else.
 fn requestOnRequest(label: []const u8, comptime mutation: []const u8, id: []const u8) void {
     if (!safeNodeId(id)) return;
     const v = std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"id\":\"{s}\"}}", .{id}) catch return;
-    requestGraphql(label, "mutation($id:ID!){" ++ mutation ++ "(input:{pullRequestId:$id}){clientMutationId}}", v, .none);
+    github_actions.requestGraphql(label, "mutation($id:ID!){" ++ mutation ++ "(input:{pullRequestId:$id}){clientMutationId}}", v, .none);
 }
 
 fn requestOpen(d: pr.Detail) bool {
@@ -4259,7 +2901,7 @@ fn prEditDialog() void {
 
 fn savePrEdit() void {
     const title = std.mem.trim(u8, pr_edit_title.items, " \n\t");
-    if (title.len == 0) return setCommandError("A request needs a title.");
+    if (title.len == 0) return github_actions.setCommandError("A request needs a title.");
     const d = pr.detail orelse return;
     const a = dvui.currentWindow().arena();
     const number = d.number;
@@ -4267,7 +2909,7 @@ fn savePrEdit() void {
 
     // Its words, and where it goes.
     const base = std.mem.trim(u8, pr_edit_base.items, " ");
-    requestApi("Saving", "PATCH", apiPath(&path, "/pulls/{d}", .{number}), jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_edit_body.items }, .{ "base", if (base.len > 0) base else d.base } }), .none);
+    github_actions.requestApi("Saving", "PATCH", github_actions.apiPath(&path, "/pulls/{d}", .{number}), github_actions.jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_edit_body.items }, .{ "base", if (base.len > 0) base else d.base } }), .none);
 
     // Reviewers newly asked, and those asked no longer — only one who has
     // not answered can be: a review given stays given.
@@ -4285,17 +2927,17 @@ fn savePrEdit() void {
     for (d.reviewers) |r| {
         if (std.mem.eql(u8, r.state, "REQUESTED") and !listHas(pr_edit_reviewers.items, r.login)) listAppend(a, &removed, r.login);
     }
-    if (added.items.len > 0) requestApi("Asking for reviews", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, added.items)}) catch return, .none);
-    if (removed.items.len > 0) requestApi("Withdrawing reviews", "DELETE", apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, removed.items)}) catch return, .none);
+    if (added.items.len > 0) github_actions.requestApi("Asking for reviews", "POST", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, added.items)}) catch return, .none);
+    if (removed.items.len > 0) github_actions.requestApi("Withdrawing reviews", "DELETE", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, removed.items)}) catch return, .none);
 
     // Assignees and labels as picked, the whole of each, where they changed.
     if (!sameNames(pr_edit_assignees.items, d.assignees)) {
-        requestApi("Assigning", "PATCH", apiPath(&path, "/issues/{d}", .{number}), std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{jsonList(a, pr_edit_assignees.items)}) catch return, .none);
+        github_actions.requestApi("Assigning", "PATCH", github_actions.apiPath(&path, "/issues/{d}", .{number}), std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{github_actions.jsonList(a, pr_edit_assignees.items)}) catch return, .none);
     }
     var label_names: std.ArrayList([]const u8) = .empty;
     for (d.labels) |l| label_names.append(a, l.name) catch {};
     if (!sameNames(pr_edit_labels.items, label_names.items)) {
-        requestApi("Labelling", "PUT", apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{jsonCommaList(a, pr_edit_labels.items)}) catch return, .none);
+        github_actions.requestApi("Labelling", "PUT", github_actions.apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{jsonCommaList(a, pr_edit_labels.items)}) catch return, .none);
     }
 
     // Ready for review, or back to a draft.
@@ -4486,7 +3128,7 @@ fn rerequestReview(d: pr.Detail) void {
     for (d.reviewers) |r| if (std.mem.eql(u8, r.state, "CHANGES_REQUESTED")) listAppend(a, &who, r.login);
     if (who.items.len == 0) return;
     var path: [512]u8 = undefined;
-    requestApi("Asking for a review", "POST", apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{jsonList(a, who.items)}) catch return, .none);
+    github_actions.requestApi("Asking for a review", "POST", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, who.items)}) catch return, .none);
 }
 
 /// The one thing to do next about a request, at the end of its readiness
@@ -4496,8 +3138,8 @@ fn readinessAction(d: pr.Detail, t: anytype, hue: dvui.Color) void {
     if (!requestOpen(d)) return;
     if (std.mem.eql(u8, d.mergeable, "CONFLICTING")) {
         // Rebased onto its base, here: the conflicts come up one by one.
-        if (!d.fork and dialog_views.alertButton(@src(), "Rebase onto it here", hue, "pr:resolve")) resolveRequestLocally(d, true);
-        if (!d.fork and dialog_views.linkButtonTagged(@src(), "or merge it in", hue, "pr:resolve_merge")) resolveRequestLocally(d, false);
+        if (!d.fork and dialog_views.alertButton(@src(), "Rebase onto it here", hue, "pr:resolve")) github_actions.resolveRequestLocally(d, true);
+        if (!d.fork and dialog_views.linkButtonTagged(@src(), "or merge it in", hue, "pr:resolve_merge")) github_actions.resolveRequestLocally(d, false);
         return;
     }
     // In the order the line above says what is in the way.
@@ -4513,7 +3155,7 @@ fn readinessAction(d: pr.Detail, t: anytype, hue: dvui.Color) void {
             pr_scroll_thread = true;
         }
         if (!onRequestBranch(d)) {
-            if (dialog_views.alertButton(@src(), "Check out to fix", hue, "pr:fix")) checkoutRequest(d.number, d.head, d.fork);
+            if (dialog_views.alertButton(@src(), "Check out to fix", hue, "pr:fix")) github_actions.checkoutRequest(d.number, d.head, d.fork);
         } else if (dialog_views.alertButton(@src(), "Re-request review", hue, "pr:rerequest")) rerequestReview(d);
         return;
     }
@@ -4527,7 +3169,7 @@ fn readinessAction(d: pr.Detail, t: anytype, hue: dvui.Color) void {
     }
     if (mergeUnknown(d) or t.running > 0) return;
     var num: [12]u8 = undefined;
-    if (dialog_views.alertButton(@src(), "Merge…", hue, "pr:merge")) ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
+    if (dialog_views.alertButton(@src(), "Merge…", hue, "pr:merge")) github_actions.ask(.merge_request, std.fmt.bufPrint(&num, "{d}", .{d.number}) catch return);
 }
 
 /// The base merged into the request's branch, on GitHub — refused there if
@@ -4539,8 +3181,8 @@ fn updateRequestBranch(d: pr.Detail) void {
         std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"expected_head_sha\":\"{s}\"}}", .{d.head_sha}) catch "{}"
     else
         "{}";
-    requestApi("Updating the branch", "PUT", apiPath(&path, "/pulls/{d}/update-branch", .{d.number}), body, .none);
-    api_fetch_after = true;
+    github_actions.requestApi("Updating the branch", "PUT", github_actions.apiPath(&path, "/pulls/{d}/update-branch", .{d.number}), body, .none);
+    github_actions.api_fetch_after = true;
     pr_reread_at = frame_now_s + PR_REREAD_S;
 }
 
@@ -4668,7 +3310,7 @@ fn showInGraph(hex: []const u8) void {
         revealInGraph(commit.id);
         return;
     }
-    setCommandError("That commit is not in the history here yet: fetch, then try again.");
+    github_actions.setCommandError("That commit is not in the history here yet: fetch, then try again.");
 }
 
 /// The graph, with commit `id` picked and scrolled into view — what a click
@@ -4676,7 +3318,7 @@ fn showInGraph(hex: []const u8) void {
 fn revealInGraph(id: git.Oid) void {
     const h = history orelse return;
     const index = h.indexOf(id) orelse
-        return setCommandError("That commit is not in the graph: its branch is hidden, or not walked.");
+        return github_actions.setCommandError("That commit is not in the graph: its branch is hidden, or not walked.");
     new_tab_open = false;
     active_view = .graph;
     selectCommit(id);
@@ -4685,7 +3327,7 @@ fn revealInGraph(id: git.Oid) void {
     defer rows.deinit(gpa);
     graph_view.shownRows(gpa, h.commits, &rows);
     const row = graph_view.listRow(@intCast(index), rows.items) orelse
-        return setCommandError("That commit is not in this file's history: close it to see the commit.");
+        return github_actions.setCommandError("That commit is not in this file's history: close it to see the commit.");
     revealCommit(row);
 }
 
@@ -4735,13 +3377,13 @@ fn requestFiles(d: pr.Detail) void {
 fn openRequestChanges(d: pr.Detail) void {
     const r = repo orelse return;
     const h = history orelse return;
-    const remote = defaultRemote() orelse "origin";
+    const remote = github_actions.defaultRemote() orelse "origin";
     const head = remoteTip(h, remote, d.head) orelse {
-        setCommandError("Its branch is not here: fetch, then try again.");
+        github_actions.setCommandError("Its branch is not here: fetch, then try again.");
         return;
     };
     const base = remoteTip(h, remote, d.base) orelse {
-        setCommandError("Its base is not here: fetch, then try again.");
+        github_actions.setCommandError("Its base is not here: fetch, then try again.");
         return;
     };
     const from = r.mergeBase(base, head) orelse base;
@@ -4753,7 +3395,7 @@ fn openRequestChanges(d: pr.Detail) void {
 fn remoteTip(h: git.History, remote: []const u8, branch: []const u8) ?git.Oid {
     for (h.refs) |ref| {
         if (ref.kind != .remote) continue;
-        const parts = splitRemoteRef(ref.name);
+        const parts = github_actions.splitRemoteRef(ref.name);
         if (std.mem.eql(u8, parts.remote, remote) and std.mem.eql(u8, parts.branch, branch)) return ref.target;
     }
     return null;
@@ -4815,9 +3457,9 @@ fn rerunFailed(d: pr.Detail) void {
             n += 1;
         }
     }
-    if (n == 0) return setCommandError("No workflow run to start again: the failing checks are not GitHub Actions.");
+    if (n == 0) return github_actions.setCommandError("No workflow run to start again: the failing checks are not GitHub Actions.");
     var path: [512]u8 = undefined;
-    for (ids[0..n]) |id| requestApi("Re-running", "POST", apiPath(&path, "/actions/runs/{s}/rerun-failed-jobs", .{id}), null, .none);
+    for (ids[0..n]) |id| github_actions.requestApi("Re-running", "POST", github_actions.apiPath(&path, "/actions/runs/{s}/rerun-failed-jobs", .{id}), null, .none);
 }
 
 /// ".../actions/runs/123/job/456" -> "123".
@@ -5177,7 +3819,7 @@ fn suggestionBox(id: usize, t: pr.Thread, d: pr.Detail, code: []const u8) void {
             dvui.label(@src(), "its lines have moved since", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .gravity_y = 0.5, .padding = dvui.Rect.all(0) });
         } else if (requestOpen(d)) {
             if (!onRequestBranch(d)) {
-                if (dialog_views.chipButtonTagged(@src(), dvui.entypo.download, "Check out to apply", false, dialog_views.frameTag("pr:apply_checkout", t.id))) checkoutRequest(d.number, d.head, d.fork);
+                if (dialog_views.chipButtonTagged(@src(), dvui.entypo.download, "Check out to apply", false, dialog_views.frameTag("pr:apply_checkout", t.id))) github_actions.checkoutRequest(d.number, d.head, d.fork);
             } else if (dialog_views.chipButtonTagged(@src(), dvui.entypo.check, "Apply suggestion", true, dialog_views.frameTag("pr:apply", t.id))) applySuggestion(d.number, t, code);
         }
     }
@@ -5230,7 +3872,7 @@ fn onRequestBranch(d: pr.Detail) bool {
 /// on since, and it would land on the wrong lines. The change is then the
 /// working copy's, to look over, commit and push.
 fn applySuggestion(number: u32, t: pr.Thread, code: []const u8) void {
-    if (applySuggestionTo(dvui.currentWindow().arena(), repo_path.items, t, code)) |message| return setCommandError(message);
+    if (applySuggestionTo(dvui.currentWindow().arena(), repo_path.items, t, code)) |message| return github_actions.setCommandError(message);
     markApplied(number, t.id);
     repo_io.workChanged("Applying");
 }
@@ -5334,9 +3976,9 @@ fn setThreadResolved(id: []const u8, resolved: bool) void {
     if (!safeNodeId(id)) return;
     const v = std.fmt.allocPrint(dvui.currentWindow().arena(), "{{\"id\":\"{s}\"}}", .{id}) catch return;
     if (resolved)
-        requestGraphql("Resolving", "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}}}", v, .none)
+        github_actions.requestGraphql("Resolving", "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}}}", v, .none)
     else
-        requestGraphql("Reopening", "mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{id}}}", v, .none);
+        github_actions.requestGraphql("Reopening", "mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{id}}}", v, .none);
 }
 
 /// The reply goes in as a variable, never spliced into the query; the box
@@ -5345,7 +3987,7 @@ fn replyToThread() void {
     const text = std.mem.trim(u8, pr_reply.items, " \n\t");
     if (text.len == 0 or !safeNodeId(pr_reply_id.items)) return;
     const a = dvui.currentWindow().arena();
-    requestGraphql("Replying", "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}", jsonFields(a, &.{ .{ "id", pr_reply_id.items }, .{ "body", text } }), .clear_reply);
+    github_actions.requestGraphql("Replying", "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}", github_actions.jsonFields(a, &.{ .{ "id", pr_reply_id.items }, .{ "body", text } }), .clear_reply);
 }
 
 const PrAnswer = enum { comment, approve, request_changes };
@@ -5358,9 +4000,9 @@ fn prAnswer(kind: PrAnswer) void {
     const a = dvui.currentWindow().arena();
     var path: [512]u8 = undefined;
     switch (kind) {
-        .comment => requestApi("Commenting", "POST", apiPath(&path, "/issues/{d}/comments", .{number}), jsonFields(a, &.{.{ "body", text }}), .clear_comment),
-        .approve => requestApi("Approving", "POST", apiPath(&path, "/pulls/{d}/reviews", .{number}), jsonFields(a, &.{ .{ "event", "APPROVE" }, .{ "body", text } }), .clear_comment),
-        .request_changes => requestApi("Requesting changes", "POST", apiPath(&path, "/pulls/{d}/reviews", .{number}), jsonFields(a, &.{ .{ "event", "REQUEST_CHANGES" }, .{ "body", text } }), .clear_comment),
+        .comment => github_actions.requestApi("Commenting", "POST", github_actions.apiPath(&path, "/issues/{d}/comments", .{number}), github_actions.jsonFields(a, &.{.{ "body", text }}), .clear_comment),
+        .approve => github_actions.requestApi("Approving", "POST", github_actions.apiPath(&path, "/pulls/{d}/reviews", .{number}), github_actions.jsonFields(a, &.{ .{ "event", "APPROVE" }, .{ "body", text } }), .clear_comment),
+        .request_changes => github_actions.requestApi("Requesting changes", "POST", github_actions.apiPath(&path, "/pulls/{d}/reviews", .{number}), github_actions.jsonFields(a, &.{ .{ "event", "REQUEST_CHANGES" }, .{ "body", text } }), .clear_comment),
     }
 }
 
@@ -5486,9 +4128,9 @@ fn shortcuts() void {
         if (pressed(ke, .escape, false)) {
             e.handled = true;
             if (prompt != null) {
-                clearPrompt();
+                github_actions.clearPrompt();
             } else if (confirm != null) {
-                clearConfirm();
+                github_actions.clearConfirm();
             } else if (commit_view.picked_changes.items.len > 0) {
                 commit_view.clearPickedChanges();
             } else if (searchFocused()) {
@@ -5603,9 +4245,9 @@ fn shortcuts() void {
             // close, undo and redo, and taking back a commit from inside the
             // message box is not what anybody pressed them for.
             if (typing()) break :blk null;
-            if (pressed(ke, .w, true)) break :blk closeShownTab;
-            if (pressed(ke, .z, true)) break :blk requestUndo;
-            if (pressedShift(ke, .z) or pressed(ke, .y, true)) break :blk requestRedo;
+            if (pressed(ke, .w, true)) break :blk github_actions.closeShownTab;
+            if (pressed(ke, .z, true)) break :blk github_actions.requestUndo;
+            if (pressedShift(ke, .z) or pressed(ke, .y, true)) break :blk github_actions.requestRedo;
             break :blk null;
         };
         if (chord) |run_it| {
@@ -5686,7 +4328,7 @@ fn moveConflictFocus(step: i2) void {
 
 fn pickFocused(side: git.ConflictSide) bool {
     if (conflict_focus >= conflicts.len) return false;
-    requestResolve(conflict_focus, side);
+    github_actions.requestResolve(conflict_focus, side);
     return true;
 }
 
@@ -5705,7 +4347,7 @@ fn cycleTab(delta: i2) void {
     var base: usize = 0;
     for (tab_strip.groups.items, 0..) |group, g| {
         if (group.ws != tab_strip.active_ws) continue;
-        if (next < base + group.tabs.items.len) return requestTab(.{ .select_in = .{ g, next - base } });
+        if (next < base + group.tabs.items.len) return github_actions.requestTab(.{ .select_in = .{ g, next - base } });
         base += group.tabs.items.len;
     }
 }
@@ -5715,7 +4357,7 @@ fn shiftTab(delta: i2) void {
     if (repo == null or new_tab_open) return;
     if (delta < 0 and tab_strip.active_tab == 0) return;
     const to = if (delta < 0) tab_strip.active_tab - 1 else tab_strip.active_tab + 1;
-    requestTab(.{ .tab_at = .{ tab_strip.active_group, tab_strip.active_tab, tab_strip.active_group, to } });
+    github_actions.requestTab(.{ .tab_at = .{ tab_strip.active_group, tab_strip.active_tab, tab_strip.active_group, to } });
 }
 
 /// Whether a text field has the keyboard — the one a focused text entry asks
@@ -5896,7 +4538,7 @@ fn pumpConnect(timer_id: dvui.Id) void {
                 connect_state = .waiting;
                 // Where the browser page can take it.
                 dvui.clipboardTextSet(connect_code.items);
-                openUrl(connect_uri.items);
+                github_actions.openUrl(connect_uri.items);
                 dvui.timer(timer_id, @intCast(connect_interval_s * std.time.us_per_s));
             },
             .waiting => switch (github.parsePoll(a.allocator(), w.out)) {
@@ -5988,7 +4630,7 @@ fn connectDialog() void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .background = false });
         defer row.deinit();
         if (dialog_views.dialogButton(@src(), "Copy the code", false)) dvui.clipboardTextSet(connect_code.items);
-        if (dialog_views.dialogButton(@src(), "Open the page again", false)) openUrl(connect_uri.items);
+        if (dialog_views.dialogButton(@src(), "Open the page again", false)) github_actions.openUrl(connect_uri.items);
     }
     body.deinit();
     {
@@ -6042,7 +4684,7 @@ pub fn groupChip(g: usize, group: tab_strip.TabGroup, hue: dvui.Color) dvui.Rect
             dvui.label(@src(), "{d}", .{group.tabs.items.len}, .{ .font = style.tinyBold(), .color_text = .{ .color = hue }, .gravity_y = 0.5, .margin = .{ .x = style.space.sm }, .padding = dvui.Rect.all(0) });
         }
     }
-    if (bw.clicked()) requestTab(.{ .group_toggle = g });
+    if (bw.clicked()) github_actions.requestTab(.{ .group_toggle = g });
     const rect = bw.data().borderRectScale().r;
     bw.deinit();
     groupMenu(g, rect);
@@ -6077,7 +4719,7 @@ fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
             bw.drawBackground();
             if (bw.clicked()) {
                 fw.close();
-                requestTab(.{ .group_color = .{ g, c } });
+                github_actions.requestTab(.{ .group_color = .{ g, c } });
             }
             bw.deinit();
         }
@@ -6089,17 +4731,17 @@ fn groupMenu(g: usize, rect: dvui.Rect.Physical) void {
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.squared_minus, "Ungroup", false)) {
         fw.close();
-        requestTab(.{ .ungroup = g });
+        github_actions.requestTab(.{ .ungroup = g });
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.cross, "Close the group", false)) {
         fw.close();
-        requestTab(.{ .close_group = g });
+        github_actions.requestTab(.{ .close_group = g });
     }
 }
 
 /// Switch to workspace `w`, in this window and this view: the group and tab
 /// it was on, its first tab, or its start page when it has none.
-fn selectWorkspace(w: usize) void {
+pub fn selectWorkspace(w: usize) void {
     if (w >= tab_strip.workspaces.items.len) return;
     tab_strip.active_ws = w;
     const at = tab_strip.workspaces.items[w];
@@ -6126,7 +4768,7 @@ fn newWorkspace(name: []const u8, color: u8) ?usize {
 
 /// Workspace `w` and its tabs gone — the tabs to the recent list — unless
 /// it is the last one.
-fn deleteWorkspace(w: usize) void {
+pub fn deleteWorkspace(w: usize) void {
     if (w >= tab_strip.workspaces.items.len or tab_strip.workspaces.items.len <= 1) return;
     var g: usize = tab_strip.groups.items.len;
     while (g > 0) {
@@ -6218,7 +4860,7 @@ pub fn workspaceSwitcher() void {
         mi.deinit();
         if (picked) {
             m.close();
-            if (i != tab_strip.active_ws) requestTab(.{ .select_ws = i });
+            if (i != tab_strip.active_ws) github_actions.requestTab(.{ .select_ws = i });
         }
     }
 
@@ -6238,7 +4880,7 @@ pub fn workspaceSwitcher() void {
     }
     if (tab_strip.workspaces.items.len > 1 and graph_view.menuIcon(@src(), dvui.entypo.trash, "Delete this workspace", true)) {
         m.close();
-        requestTab(.{ .close_ws = tab_strip.active_ws });
+        github_actions.requestTab(.{ .close_ws = tab_strip.active_ws });
     }
 }
 
@@ -6339,13 +4981,13 @@ fn workspaceDialog() void {
         defer line.deinit();
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialog_views.dialogButton(@src(), "Cancel", false)) open = false;
-        if ((dialog_views.dialogButton(@src(), if (kind == .rename or kind == .group_rename) "Rename" else "Create", named) or entered) and named) requestTab(.workspace_named);
+        if ((dialog_views.dialogButton(@src(), if (kind == .rename or kind == .group_rename) "Rename" else "Create", named) or entered) and named) github_actions.requestTab(.workspace_named);
     }
     if (dialog_views.escapePressed() or !open) ws_dialog = null;
 }
 
 /// What the dialog was answered with, applied between frames.
-fn applyWorkspaceDialog() void {
+pub fn applyWorkspaceDialog() void {
     const kind = ws_dialog orelse return;
     ws_dialog = null;
     const typed = std.mem.trim(u8, ws_name.items, " \t");
@@ -6423,19 +5065,19 @@ pub fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
             std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to the {s} group", .{tab_strip.groupColorName(other.color)})) catch continue;
         if (graph_view.menuIconAt(@src(), gi, dvui.entypo.layers, caption)) {
             fw.close();
-            requestTab(.{ .tab_to = .{ g, t, gi } });
+            github_actions.requestTab(.{ .tab_to = .{ g, t, gi } });
         }
     }
     if (tab_strip.groups.items[g].name.len > 0 and graph_view.menuIcon(@src(), dvui.entypo.squared_minus, "Remove from the group", false)) {
         fw.close();
-        requestTab(.{ .tab_out = .{ g, t } });
+        github_actions.requestTab(.{ .tab_out = .{ g, t } });
     }
     for (tab_strip.workspaces.items, 0..) |w, wi| {
         if (wi == tab_strip.groups.items[g].ws) continue;
         const caption = std.fmt.allocPrint(dvui.currentWindow().arena(), "Move to workspace {s}", .{tab_strip.workspaceName(w)}) catch continue;
         if (graph_view.menuIconAt(@src(), wi + 1000, dvui.entypo.layers, caption)) {
             fw.close();
-            requestTab(.{ .tab_to = .{ g, t, firstGroupOf(wi) } });
+            github_actions.requestTab(.{ .tab_to = .{ g, t, firstGroupOf(wi) } });
         }
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.plus, "Move to a new workspace…", false)) {
@@ -6445,7 +5087,7 @@ pub fn tabMenu(g: usize, t: usize, id: usize, rect: dvui.Rect.Physical) void {
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.cross, "Close", false)) {
         fw.close();
-        requestTab(.{ .close_in = .{ g, t } });
+        github_actions.requestTab(.{ .close_in = .{ g, t } });
     }
 }
 
@@ -6512,7 +5154,7 @@ fn groupDrop(wd: *dvui.WidgetData, g: usize) void {
         if (me.action == .release and me.button.pointer()) {
             e.handle(@src(), wd);
             dvui.dragEnd(me.button);
-            requestTab(.{ .tab_to = .{ tab_drag[0], tab_drag[1], g } });
+            github_actions.requestTab(.{ .tab_to = .{ tab_drag[0], tab_drag[1], g } });
         }
     }
 }
@@ -6530,7 +5172,7 @@ fn tabDrop(wd: *dvui.WidgetData, slot: [2]usize) void {
         if (me.action == .release and me.button.pointer()) {
             e.handle(@src(), wd);
             dvui.dragEnd(me.button);
-            requestTab(.{ .tab_at = .{ tab_drag[0], tab_drag[1], slot[0], slot[1] } });
+            github_actions.requestTab(.{ .tab_at = .{ tab_drag[0], tab_drag[1], slot[0], slot[1] } });
         }
     }
 }
@@ -6756,9 +5398,9 @@ pub fn operationControls() void {
     const cmd = h.state.command() orelse return;
 
     const next = opNext();
-    if (dialog_views.linkButtonTagged(@src(), "Abort", style.danger(), "op:abort")) requestAbortOperation();
+    if (dialog_views.linkButtonTagged(@src(), "Abort", style.danger(), "op:abort")) github_actions.requestAbortOperation();
     if (canSkip() and next != .skip) {
-        if (dialog_views.linkButtonTagged(@src(), "Skip", style.textMuted(), "op:skip")) requestSkipStep();
+        if (dialog_views.linkButtonTagged(@src(), "Skip", style.textMuted(), "op:skip")) github_actions.requestSkipStep();
     }
     switch (next) {
         .resolve => {
@@ -6771,7 +5413,7 @@ pub fn operationControls() void {
         },
         // Nothing left of the commit once its conflicts were answered: git
         // refuses to continue with it, and skipping it loses nothing.
-        .skip => if (opButton(@src(), "Skip empty", "op:skip")) requestLocal("Skipping", &.{ cmd, "--skip" }),
+        .skip => if (opButton(@src(), "Skip empty", "op:skip")) github_actions.requestLocal("Skipping", &.{ cmd, "--skip" }),
         .proceed => if (opButton(@src(), "Continue", "op:continue")) requestContinue(),
     }
 }
@@ -6890,8 +5532,8 @@ pub fn canContinue() bool {
 /// to open — `true` exits 0, and git keeps the message it already has. A
 /// job, as a commit is: it may run hooks and sign.
 pub fn requestContinue() void {
-    const cmd = operationCommand() orelse return;
-    requestLocal("Continuing", &.{ "-c", "core.editor=true", cmd, "--continue" });
+    const cmd = github_actions.operationCommand() orelse return;
+    github_actions.requestLocal("Continuing", &.{ "-c", "core.editor=true", cmd, "--continue" });
 }
 
 /// Whether the file open is one of the conflicted ones.
@@ -6980,7 +5622,7 @@ fn confirmToast() void {
         return;
     };
     // Esc is Cancel: the toast is what waits on an answer.
-    if (dialog_views.escapePressed()) return clearConfirm();
+    if (dialog_views.escapePressed()) return github_actions.clearConfirm();
 
     var fw = toastWindow(@src(), &confirm_rect, style.danger());
     defer fw.deinit();
@@ -7022,7 +5664,7 @@ fn confirmToast() void {
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = false });
     defer line.deinit();
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-    if (dialog_views.linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) clearConfirm();
+    if (dialog_views.linkButtonTagged(@src(), "Cancel", style.textMuted(), "confirm:cancel")) github_actions.clearConfirm();
     if (dialog_views.alertButton(@src(), confirmVerb(c.kind), style.danger(), "confirm:yes")) repo_io.requestAction(.confirmed);
 }
 
@@ -7051,7 +5693,7 @@ fn confirmVerb(kind: Confirm.Kind) []const u8 {
 // remote's HEAD points, the title the branch's one commit or its name, the
 // description the repository's template and the commits it brings.
 
-var pr_new_open = false;
+pub var pr_new_open = false;
 var pr_new_rect: dvui.Rect = .{};
 var pr_new_title: std.ArrayList(u8) = .empty;
 var pr_new_body: std.ArrayList(u8) = .empty;
@@ -7068,14 +5710,14 @@ var pr_new_labels: std.ArrayList(u8) = .empty;
 var pick_filter: std.ArrayList(u8) = .empty;
 var pick_open: ?usize = null;
 /// The request is being made: the dialog waits on it, then gives way to it.
-var pr_creating = false;
+pub var pr_creating = false;
 /// The number GitHub gave the one just made, until the calls after it —
 /// its reviewers, assignees, labels — are done and it can be opened.
-var pr_created: u32 = 0;
+pub var pr_created: u32 = 0;
 
 pub fn openPrCreate() void {
     const h = history orelse return;
-    const branch = h.head orelse return setCommandError("Check out a branch first: a request is made from one.");
+    const branch = h.head orelse return github_actions.setCommandError("Check out a branch first: a request is made from one.");
     pr_new_open = true;
     pr_new_rect = .{};
     pr_new_draft = false;
@@ -7085,7 +5727,7 @@ pub fn openPrCreate() void {
     pr.loadMeta(repo_path.items);
 
     // The base: what the remote calls its HEAD, "origin/main" -> "main".
-    const remote = defaultRemote() orelse "origin";
+    const remote = github_actions.defaultRemote() orelse "origin";
     var ref_buf: [96]u8 = undefined;
     const head_ref = std.fmt.bufPrint(&ref_buf, "refs/remotes/{s}/HEAD", .{remote}) catch "";
     if (run.capture(gpa, app_io, repo_path.items, &.{ "git", "symbolic-ref", "-q", "--short", head_ref })) |answer| {
@@ -7205,7 +5847,7 @@ fn prCreateDialog() void {
         if (dialog_views.alertButton(@src(), "Push", orange, "pr_new:push")) {
             if (on_head) {
                 repo_io.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
-            } else if (defaultRemote()) |remote| repo_io.requestNetwork("Pushing", &.{ "push", "-u", remote, head });
+            } else if (github_actions.defaultRemote()) |remote| repo_io.requestNetwork("Pushing", &.{ "push", "-u", remote, head });
         }
     }
 
@@ -7261,10 +5903,10 @@ const PR_CREATE_W: f32 = 620;
 /// Whether the default remote has a branch of that name, as last fetched.
 fn remoteHas(branch: []const u8) bool {
     const h = history orelse return false;
-    const remote = defaultRemote() orelse return false;
+    const remote = github_actions.defaultRemote() orelse return false;
     for (h.refs) |ref| {
         if (ref.kind != .remote) continue;
-        const split = splitRemoteRef(ref.name);
+        const split = github_actions.splitRemoteRef(ref.name);
         if (std.mem.eql(u8, split.remote, remote) and std.mem.eql(u8, split.branch, branch)) return true;
     }
     return false;
@@ -7417,13 +6059,13 @@ fn branchPicker(id: usize, caption: []const u8, value: *std.ArrayList(u8), side:
     pickSearch("Find a branch…");
     var list = pickList();
     defer list.deinit();
-    const remote = defaultRemote() orelse "origin";
+    const remote = github_actions.defaultRemote() orelse "origin";
     var shown: usize = 0;
     for (h.refs, 0..) |ref, i| {
         const name = switch (side) {
             .remote => blk: {
                 if (ref.kind != .remote) continue;
-                const split = splitRemoteRef(ref.name);
+                const split = github_actions.splitRemoteRef(ref.name);
                 if (!std.mem.eql(u8, split.remote, remote) or std.mem.eql(u8, split.branch, "HEAD")) continue;
                 break :blk split.branch;
             },
@@ -7615,31 +6257,31 @@ fn jsonCommaList(a: std.mem.Allocator, text: []const u8) []const u8 {
 fn createRequest() void {
     const title = std.mem.trim(u8, pr_new_title.items, " \n\t");
     const base = std.mem.trim(u8, pr_new_base.items, " ");
-    if (title.len == 0 or base.len == 0) return setCommandError("A title and a branch to merge into are needed.");
+    if (title.len == 0 or base.len == 0) return github_actions.setCommandError("A title and a branch to merge into are needed.");
     const head = std.mem.trim(u8, pr_new_head.items, " ");
-    if (head.len == 0) return setCommandError("Pick the branch it comes from.");
+    if (head.len == 0) return github_actions.setCommandError("Pick the branch it comes from.");
     const a = dvui.currentWindow().arena();
     var body: std.ArrayList(u8) = .empty;
-    body.appendSlice(a, jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_new_body.items }, .{ "head", head }, .{ "base", base } })) catch return;
+    body.appendSlice(a, github_actions.jsonFields(a, &.{ .{ "title", title }, .{ "body", pr_new_body.items }, .{ "head", head }, .{ "base", base } })) catch return;
     // The draft flag is a JSON boolean, after the strings.
     if (pr_new_draft) {
         _ = body.pop();
         body.appendSlice(a, ",\"draft\":true}") catch return;
     }
     // Asked for, assigned and labelled once GitHub has given it a number.
-    api_reviewers.clearRetainingCapacity();
-    const reviewers = jsonList(a, pr_new_reviewers.items);
-    if (reviewers.len > 2) api_reviewers.appendSlice(gpa, reviewers) catch {};
-    api_assignees.clearRetainingCapacity();
-    const assignees = jsonList(a, pr_new_assignees.items);
-    if (assignees.len > 2) api_assignees.appendSlice(gpa, assignees) catch {};
-    api_labels.clearRetainingCapacity();
+    github_actions.api_reviewers.clearRetainingCapacity();
+    const reviewers = github_actions.jsonList(a, pr_new_reviewers.items);
+    if (reviewers.len > 2) github_actions.api_reviewers.appendSlice(gpa, reviewers) catch {};
+    github_actions.api_assignees.clearRetainingCapacity();
+    const assignees = github_actions.jsonList(a, pr_new_assignees.items);
+    if (assignees.len > 2) github_actions.api_assignees.appendSlice(gpa, assignees) catch {};
+    github_actions.api_labels.clearRetainingCapacity();
     const labels = jsonCommaList(a, pr_new_labels.items);
-    if (labels.len > 2) api_labels.appendSlice(gpa, labels) catch {};
+    if (labels.len > 2) github_actions.api_labels.appendSlice(gpa, labels) catch {};
     var path: [512]u8 = undefined;
-    requestApi("Creating", "POST", apiPath(&path, "/pulls", .{}), body.items, .ask_reviewers);
+    github_actions.requestApi("Creating", "POST", github_actions.apiPath(&path, "/pulls", .{}), body.items, .ask_reviewers);
     // Open until it is made: then it closes, and the request opens.
-    pr_creating = api_job != null or api_queue.items.len > 0;
+    pr_creating = github_actions.api_job != null or github_actions.api_queue.items.len > 0;
     if (!pr_creating) pr_new_open = false;
 }
 
@@ -7677,8 +6319,8 @@ pub fn requestRow(src: std.builtin.SourceLocation, entry: pr.Request, id: usize)
         selectRequest(entry.number);
     }
 
-    if (dialog_views.iconButton(@src(), "request_checkout", "Check it out", dvui.entypo.download, style.textMuted())) checkoutRequest(entry.number, entry.branch, false);
-    if (dialog_views.iconButton(@src(), "request_web", "Open it on the web", dvui.entypo.popup, style.textFaint())) openOnGithub("/pull/{d}", .{entry.number});
+    if (dialog_views.iconButton(@src(), "request_checkout", "Check it out", dvui.entypo.download, style.textMuted())) github_actions.checkoutRequest(entry.number, entry.branch, false);
+    if (dialog_views.iconButton(@src(), "request_web", "Open it on the web", dvui.entypo.popup, style.textFaint())) github_actions.openOnGithub("/pull/{d}", .{entry.number});
 }
 
 /// One open issue: its number and title, a label or two, and the page it
@@ -7724,7 +6366,7 @@ pub fn issueRow(src: std.builtin.SourceLocation, entry: pr.Issue, id: usize) voi
     }
 
     const clicked = dvui.clicked(row.data(), .{});
-    if (dialog_views.iconButton(@src(), "issue_web", "Open it on the web", dvui.entypo.popup, style.textFaint()) or clicked) openOnGithub("/issues/{d}", .{entry.number});
+    if (dialog_views.iconButton(@src(), "issue_web", "Open it on the web", dvui.entypo.popup, style.textFaint()) or clicked) github_actions.openOnGithub("/issues/{d}", .{entry.number});
 }
 
 /// One worktree: where it is, and the two things to do with one — open it in
@@ -7760,10 +6402,10 @@ pub fn worktreeRow(src: std.builtin.SourceLocation, entry: git.Worktree, id: usi
 
     if (hover) {
         if (dialog_views.iconButton(@src(), "worktree_open", "Open in a tab", dvui.entypo.popup, style.textMuted())) {
-            requestOpenKnown(entry.path);
+            github_actions.requestOpenKnown(entry.path);
         }
         if (dialog_views.iconButton(@src(), "worktree_remove", "Remove this worktree", dvui.entypo.cross, style.textFaint())) {
-            ask(.remove_worktree, entry.path);
+            github_actions.ask(.remove_worktree, entry.path);
         }
     }
     const more = if (hover) moreButton(dialog_views.frameTag("more", entry.name)) else null;
@@ -7782,7 +6424,7 @@ fn worktreeMenu(entry: git.Worktree, id: usize, rect: dvui.Rect.Physical, open_a
     graph_view.menuTitle(entry.name, "worktree");
     if (graph_view.menuIcon(@src(), dvui.entypo.popup, "Open in a tab", false)) {
         fw.close();
-        requestOpenKnown(entry.path);
+        github_actions.requestOpenKnown(entry.path);
     }
     if (graph_view.menuIcon(@src(), dvui.entypo.flow_branch, "Show in the graph", false)) {
         fw.close();
@@ -7795,7 +6437,7 @@ fn worktreeMenu(entry: git.Worktree, id: usize, rect: dvui.Rect.Physical, open_a
     graph_view.menuSeparator(1);
     if (graph_view.menuIcon(@src(), dvui.entypo.cross, "Remove this worktree…", true)) {
         fw.close();
-        ask(.remove_worktree, entry.path);
+        github_actions.ask(.remove_worktree, entry.path);
     }
 }
 
@@ -7840,7 +6482,7 @@ pub fn stashRow(src: std.builtin.SourceLocation, entry: git.Stash, id: usize) vo
         }
         if (dialog_views.iconButton(@src(), "stash_drop", "Delete this stash", dvui.entypo.trash, style.textFaint())) {
             var hex: [41]u8 = undefined;
-            ask(.stash_drop, git.oidHex(entry.id, &hex));
+            github_actions.ask(.stash_drop, git.oidHex(entry.id, &hex));
         }
     }
     const more = if (hover) moreButton(dialog_views.frameTag("more", git.oidShort(entry.id, &short))) else null;
@@ -7877,7 +6519,7 @@ pub fn stashMenu(entry: git.Stash, id: usize, rect: dvui.Rect.Physical, open_at:
     if (graph_view.menuIcon(@src(), dvui.entypo.trash, "Delete this stash…", true)) {
         fw.close();
         var hex: [41]u8 = undefined;
-        ask(.stash_drop, git.oidHex(entry.id, &hex));
+        github_actions.ask(.stash_drop, git.oidHex(entry.id, &hex));
     }
 }
 
@@ -7957,7 +6599,7 @@ pub fn refRow(src: std.builtin.SourceLocation, ref: git.Ref, id: usize) bool {
         const stale = ref.kind != .tag and !ref.head and ref.time > 0 and frame_now_s - ref.time > STALE_AFTER_S;
 
         // Listed under its remote, so the remote's name would only repeat it.
-        const shown = if (ref.kind == .remote) splitRemoteRef(ref.name).branch else ref.name;
+        const shown = if (ref.kind == .remote) github_actions.splitRemoteRef(ref.name).branch else ref.name;
         dvui.label(@src(), "{s}", .{shown}, .{
             .font = if (ref.head) style.smallBold() else style.small(),
             .color_text = .{ .color = if (out_of_graph or stale) style.textFaint() else if (ref.head) style.text() else style.textMuted() },
@@ -8057,13 +6699,13 @@ fn statusBar() void {
     // it is running, say — and would otherwise sit unseen behind it.
     if (tab_strip.job != null) {
         home_page.statusPill(@src(), style.accent(), dvui.entypo.cycle, tab_strip.job_label, "…");
-    } else if (api_job != null) {
-        home_page.statusPill(@src(), style.accent(), dvui.entypo.cycle, api_label, "…");
+    } else if (github_actions.api_job != null) {
+        home_page.statusPill(@src(), style.accent(), dvui.entypo.cycle, github_actions.api_label, "…");
     }
     if (tab_strip.command_error) |message| {
         home_page.statusPill(@src(), style.danger(), dvui.entypo.warning, dialog_views.firstLine(message), "");
         if (dialog_views.iconButton(@src(), "dismiss_error", "Dismiss", dvui.entypo.cross, style.textMuted())) {
-            clearCommandError();
+            github_actions.clearCommandError();
         }
     }
 
@@ -8204,26 +6846,26 @@ test "stage, commit and switch branches through the real git commands" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     try std.testing.expect(repo != null);
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
     try std.testing.expectEqual(git.Status.added, work.?.unstaged[0].status);
 
     // Stage.
-    gitDo(&.{ "add", "-A" });
+    github_actions.gitDo(&.{ "add", "-A" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), work.?.staged.len);
     try std.testing.expectEqual(@as(usize, 0), work.?.unstaged.len);
 
     // Unstage, and back again.
-    gitDo(&.{ "reset", "-q", "--", "." });
+    github_actions.gitDo(&.{ "reset", "-q", "--", "." });
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
-    gitDo(&.{ "add", "-A" });
+    github_actions.gitDo(&.{ "add", "-A" });
     try std.testing.expectEqual(@as(usize, 1), work.?.staged.len);
 
     // Commit.
     try commit_summary.appendSlice(gpa, "first commit");
-    doCommit();
+    github_actions.doCommit();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
@@ -8234,9 +6876,9 @@ test "stage, commit and switch branches through the real git commands" {
 
     // Typed into while the commit ran: the box keeps the new text.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "hello.txt", .data = "two\n" });
-    gitDo(&.{ "add", "-A" });
+    github_actions.gitDo(&.{ "add", "-A" });
     try commit_summary.appendSlice(gpa, "second commit");
-    doCommit();
+    github_actions.doCommit();
     try commit_summary.appendSlice(gpa, ", and more");
     try pumpJob();
     try std.testing.expectEqualStrings("second commit", history.?.commits[0].summary);
@@ -8251,9 +6893,9 @@ test "stage, commit and switch branches through the real git commands" {
     try std.testing.expect(repo_io.runAction());
 
     // Switch to a branch whose name would be read as a path by `checkout --`.
-    gitDo(&.{ "branch", "hello.txt" });
+    github_actions.gitDo(&.{ "branch", "hello.txt" });
     const branch = findRef("hello.txt") orelse return error.BranchNotListed;
-    checkout(branch);
+    github_actions.checkout(branch);
     try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -8263,7 +6905,7 @@ test "stage, commit and switch branches through the real git commands" {
 
     // And back.
     const main_branch = findRef("main") orelse return error.BranchNotListed;
-    checkout(main_branch);
+    github_actions.checkout(main_branch);
     try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try std.testing.expectEqualStrings("main", history.?.head.?);
@@ -8304,7 +6946,7 @@ fn resetUiGlobals() void {
     commit_view.picked_changes = .empty;
     commit_view.picked_set.deinit(gpa);
     commit_view.picked_set = .empty;
-    redo_from = null;
+    github_actions.redo_from = null;
     commit_view.clearFoldedDirs();
     commit_view.commit_all_files = false;
     commit_view.changes_scroll = @splat(.{ .vertical = .given });
@@ -8397,19 +7039,19 @@ fn resetUiGlobals() void {
     commit_view.repo_config_job = null;
     commit_view.git_template_path.deinit(gpa);
     commit_view.git_template_path = .empty;
-    commit_sent.deinit(gpa);
-    commit_sent = .empty;
-    job_after = .remote;
-    action_after = .remote;
+    github_actions.commit_sent.deinit(gpa);
+    github_actions.commit_sent = .empty;
+    github_actions.job_after = .remote;
+    github_actions.action_after = .remote;
     rebase_view.sidebar_filter = .empty;
 
     tab_strip.clearRecent();
     tab_strip.recent.deinit(gpa);
     tab_strip.recent = .empty;
     pick_open = null;
-    clearJobSteps();
-    job_steps.deinit(gpa);
-    job_steps = .empty;
+    github_actions.clearJobSteps();
+    github_actions.job_steps.deinit(gpa);
+    github_actions.job_steps = .empty;
     pr_cards_all = null;
     conflict_focus = 0;
     dialog_views.clearForget();
@@ -8450,10 +7092,10 @@ fn resetUiGlobals() void {
     command_palette.palette_open = false;
     graph_view.clearFileHistory();
     graph_view.file_history.deinit(gpa);
-    clone_dest.deinit(gpa);
+    github_actions.clone_dest.deinit(gpa);
 
     graph_view.file_history = .empty;
-    clone_dest = .empty;
+    github_actions.clone_dest = .empty;
     commit_filter = .empty;
     commit_summary = .empty;
     commit_description = .empty;
@@ -8622,7 +7264,7 @@ test "staging one hunk moves that hunk and leaves the other alone" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     const r = repo orelse return error.RepoNotOpen;
 
@@ -8687,7 +7329,7 @@ test "the diff pane renders both a file diff and a commit diff" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     selectChange("lines.txt", .unstaged);
     try dvui.testing.settle(appFrame);
@@ -8709,7 +7351,7 @@ test "the pull requests open in their tab, and Ctrl+W leaves it, not the reposit
     defer active_view = .graph;
     openPulls();
     try std.testing.expect(active_view == .pulls);
-    closeShownTab();
+    github_actions.closeShownTab();
     try std.testing.expect(active_view == .graph);
 }
 
@@ -8776,7 +7418,7 @@ test "down and up walk the history, and the commit pane follows" {
     try expectGit(dir, &.{ "commit", "-q", "--allow-empty", "-m", "three" });
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     selectCommit(history.?.commits[0].id);
     try dvui.testing.settle(frameArrowCursor);
@@ -8845,7 +7487,7 @@ test "a narrow list gives up the sha, then the author, before the message" {
     try makeTestRepo(&tmp, dir, "a.txt", "a\n");
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     try dvui.testing.settle(frameArrowCursor);
 
     // The pull requests' tab beside the repository's draws too.
@@ -8882,7 +7524,7 @@ test "the branches panel comes back once the changes panel that pushed it out is
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // As the changes panel leaves it when dragged wide, then Ctrl+J.
     left_squeezed = true;
@@ -8919,7 +7561,7 @@ test "searching the history narrows the list to what matches" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     const commits = history.?.commits;
     try std.testing.expectEqual(@as(usize, 2), commits.len);
@@ -8994,13 +7636,13 @@ test "a conflicted merge is resolved and continued" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // Expected to stop. A conflicted merge does not move HEAD, so this also
     // covers `gitDo` re-reading the history on its failure path — without that
     // the toolbar never says it is under way. A stop is not an error: no red line,
     // and the conflicted file is open.
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(selection == .change);
     try std.testing.expectEqualStrings("lines.txt", selected_path.items);
@@ -9009,11 +7651,11 @@ test "a conflicted merge is resolved and continued" {
 
     // Resolve it the way a person would, then stage the result.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "lines.txt", .data = TWELVE_LINES });
-    gitDo(&.{ "add", "--", "lines.txt" });
+    github_actions.gitDo(&.{ "add", "--", "lines.txt" });
     try std.testing.expectEqual(@as(usize, 0), dialog_views.conflictCount());
 
     const cmd = history.?.state.command() orelse return error.NoCommandForState;
-    gitDo(&.{ "-c", "core.editor=true", cmd, "--continue" });
+    github_actions.gitDo(&.{ "-c", "core.editor=true", cmd, "--continue" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
 
@@ -9041,13 +7683,13 @@ test "a conflicted merge aborts back to a clean tree" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(git.State.merge, history.?.state);
 
     const cmd = history.?.state.command() orelse return error.NoCommandForState;
-    gitDo(&.{ cmd, "--abort" });
+    github_actions.gitDo(&.{ cmd, "--abort" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expectEqual(@as(usize, 0), dialog_views.conflictCount());
@@ -9073,8 +7715,8 @@ test "a merge under way is driven from the toolbar, its abort asked in a toast" 
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
-    defer clearConfirm();
+    defer github_actions.clearCommandError();
+    defer github_actions.clearConfirm();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -9082,7 +7724,7 @@ test "a merge under way is driven from the toolbar, its abort asked in a toast" 
     try dvui.testing.settle(frameArrowCursor);
     try expectNoTag("op:abort");
 
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(git.State.merge, history.?.state);
     try dvui.testing.settle(frameArrowCursor);
     clearSelection();
@@ -9127,10 +7769,10 @@ test "mid-merge, staging markers and aborting are asked first, and undo is refus
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
-    defer clearConfirm();
+    defer github_actions.clearCommandError();
+    defer github_actions.clearConfirm();
 
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(git.State.merge, history.?.state);
 
     // The file still has its markers: staging it, alone or with everything,
@@ -9138,24 +7780,24 @@ test "mid-merge, staging markers and aborting are asked first, and undo is refus
     commit_view.requestStage("lines.txt", "lines.txt", true);
     try std.testing.expect(confirm != null and confirm.?.kind == .stage_markers);
     try std.testing.expect(dialog_views.conflictCount() > 0);
-    clearConfirm();
+    github_actions.clearConfirm();
     commit_view.requestStageAll();
     try std.testing.expect(confirm != null and confirm.?.kind == .stage_markers);
     try std.testing.expectEqualStrings("", confirm.?.arg);
-    clearConfirm();
+    github_actions.clearConfirm();
 
     // Undo would reset under the merge.
-    requestUndo();
+    github_actions.requestUndo();
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(@as(repo_io.Action, .none), repo_io.action);
     try std.testing.expectEqual(git.State.merge, history.?.state);
-    clearCommandError();
+    github_actions.clearCommandError();
 
     // Abort: asked, then done.
-    requestAbortOperation();
+    github_actions.requestAbortOperation();
     try std.testing.expect(confirm != null and confirm.?.kind == .abort_operation);
     try std.testing.expectEqual(git.State.merge, history.?.state);
-    runConfirmed();
+    github_actions.runConfirmed();
     _ = repo_io.runAction();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
@@ -9180,16 +7822,16 @@ test "a pick refuses to write over a file changed since it was shown" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     selectChange("lines.txt", .unstaged);
     loadConflicts();
     try std.testing.expect(conflicts.len > 0);
 
     const edited = "edited elsewhere\n";
     try tmp.dir.writeFile(app_io, .{ .sub_path = "lines.txt", .data = edited });
-    requestResolve(0, .ours);
+    github_actions.requestResolve(0, .ours);
     _ = repo_io.runAction();
     try std.testing.expect(tab_strip.command_error != null);
 
@@ -9221,15 +7863,15 @@ test "a refused interactive rebase keeps its plan" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     const second = findCommit("second") orelse return error.CommitNotFound;
-    beginRebase(second.parents[0]);
+    github_actions.beginRebase(second.parents[0]);
     try std.testing.expectEqual(@as(usize, 1), rebase_steps.items.len);
 
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed\n" });
     rebase_steps.items[0].action = .drop;
-    runRebase();
+    github_actions.runRebase();
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(git.State.none, history.?.state);
     try std.testing.expect(selection == .rebase);
@@ -9271,9 +7913,9 @@ test "a rebase stopped on a conflict says where it is, and continues" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "rebase", "main" });
+    github_actions.gitDo(&.{ "rebase", "main" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.rebase, history.?.state);
     try std.testing.expectEqualStrings("feat", rebase_view.op_info.branch);
@@ -9291,7 +7933,7 @@ test "a rebase stopped on a conflict says where it is, and continues" {
 
     // Answered and staged: Continue, which replays the second commit too.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "both\n" });
-    gitDo(&.{ "add", "--", "f.txt" });
+    github_actions.gitDo(&.{ "add", "--", "f.txt" });
     try std.testing.expect(opNext() == .proceed);
     try std.testing.expect(canContinue());
     requestContinue();
@@ -9331,12 +7973,12 @@ test "a rebase step left empty by its resolution is skipped, not continued" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "rebase", "main" });
+    github_actions.gitDo(&.{ "rebase", "main" });
     try std.testing.expectEqual(git.State.rebase, history.?.state);
     try tmp.dir.writeFile(app_io, .{ .sub_path = "f.txt", .data = "main\n" });
-    gitDo(&.{ "add", "--", "f.txt" });
+    github_actions.gitDo(&.{ "add", "--", "f.txt" });
     try std.testing.expect(opNext() == .skip);
     try std.testing.expect(!canContinue());
 }
@@ -9388,10 +8030,10 @@ test "a pull request is checked out tracking its branch, brought up to date, and
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // Not here yet: made, tracking the remote's.
-    checkoutRequest(3, "feat", false);
+    github_actions.checkoutRequest(3, "feat", false);
     _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -9402,7 +8044,7 @@ test "a pull request is checked out tracking its branch, brought up to date, and
     try expectGit(down, &.{ "reset", "-q", "--hard", "HEAD~1" });
     try expectGit(down, &.{ "switch", "-q", "main" });
     repo_io.reloadHistory();
-    checkoutRequest(3, "feat", false);
+    github_actions.checkoutRequest(3, "feat", false);
     _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -9412,13 +8054,13 @@ test "a pull request is checked out tracking its branch, brought up to date, and
     // From a fork, its branch named "main": on pr/7, and main left alone.
     try expectGit(down, &.{ "switch", "-q", "main" });
     repo_io.reloadHistory();
-    checkoutRequest(7, "main", true);
+    github_actions.checkoutRequest(7, "main", true);
     _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("pr/7", history.?.head.?);
     try std.testing.expectEqualStrings("feat two", history.?.commits[0].summary);
-    try std.testing.expect(isLocalBranch("main"));
+    try std.testing.expect(github_actions.isLocalBranch("main"));
 }
 
 // A request in conflict with its base, rebased onto it here: fetched,
@@ -9452,9 +8094,9 @@ test "a pull request in conflict is rebased onto its base here, stopping at the 
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    resolveRequestLocally(.{ .number = 3, .head = "feat", .base = "main", .mergeable = "CONFLICTING" }, true);
+    github_actions.resolveRequestLocally(.{ .number = 3, .head = "feat", .base = "main", .mergeable = "CONFLICTING" }, true);
     _ = repo_io.runAction();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -9501,10 +8143,10 @@ test "after a rebase, Push is a force push that says what it replaces" {
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     try std.testing.expect(!window_chrome.rebasedSinceUpstream());
 
-    gitDo(&.{ "rebase", "main" });
+    github_actions.gitDo(&.{ "rebase", "main" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(window_chrome.rebasedSinceUpstream());
     var buf: [512]u8 = undefined;
@@ -9534,9 +8176,9 @@ test "a conflicted file is answered from the keys: a pick, its undo, Enter to st
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try dvui.testing.settle(frameArrowCursor);
     try std.testing.expect(rebase_view.isConflictView());
     try std.testing.expectEqual(@as(usize, 1), conflicts.len);
@@ -9589,9 +8231,9 @@ test "a conflict of changes on neighbouring lines is resolved safely, with its b
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "-c", "merge.conflictStyle=merge", "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "-c", "merge.conflictStyle=merge", "merge", "--no-edit", "other" });
     try std.testing.expectEqualStrings("n.txt", selected_path.items);
     loadConflicts();
     try std.testing.expectEqual(@as(usize, 1), conflicts.len);
@@ -9631,9 +8273,9 @@ test "a file deleted on one side is kept or deleted in one click" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqualStrings("notes.txt", selected_path.items);
     loadConflicts();
     try std.testing.expectEqual(git.ConflictKind.deleted_by_them, conflict_kind);
@@ -9679,9 +8321,9 @@ test "a conflict is resolved region by region, then staged" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(git.State.merge, history.?.state);
 
     selectChange("lines.txt", .unstaged);
@@ -9691,7 +8333,7 @@ test "a conflict is resolved region by region, then staged" {
     try std.testing.expectEqualStrings("main\n", conflicts[0].ours);
     try std.testing.expectEqualStrings("other\n", conflicts[0].theirs);
 
-    requestResolve(0, .ours);
+    github_actions.requestResolve(0, .ours);
     try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
@@ -9706,10 +8348,10 @@ test "a conflict is resolved region by region, then staged" {
 
     // Staging is what tells git the conflict is over; until then it is still
     // mid-merge no matter how clean the file looks.
-    gitDo(&.{ "add", "--", "lines.txt" });
+    github_actions.gitDo(&.{ "add", "--", "lines.txt" });
     try std.testing.expectEqual(@as(usize, 0), dialog_views.conflictCount());
 
-    gitDo(&.{ "-c", "core.editor=true", "merge", "--continue" });
+    github_actions.gitDo(&.{ "-c", "core.editor=true", "merge", "--continue" });
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
 }
@@ -9742,13 +8384,13 @@ test "an interactive rebase folds one commit into the one before it" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     try std.testing.expectEqual(@as(usize, 3), history.?.commits.len);
 
     // Starting at "second" means "second" and "third" are both replayed, so the
     // list is composed from its parent.
     const second = findCommit("second") orelse return error.CommitNotFound;
-    beginRebase(if (second.parents.len > 0) second.parents[0] else null);
+    github_actions.beginRebase(if (second.parents.len > 0) second.parents[0] else null);
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 2), rebase_steps.items.len);
 
@@ -9757,7 +8399,7 @@ test "an interactive rebase folds one commit into the one before it" {
     try std.testing.expectEqualStrings("second", rebase_steps.items[1].summary);
 
     rebase_steps.items[0].action = .fixup;
-    runRebase();
+    github_actions.runRebase();
 
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(git.State.none, history.?.state);
@@ -9791,12 +8433,12 @@ test "a rebase onto a commit off the current branch is refused, not attempted" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // "other side" is on the other branch: walking first parents from HEAD
     // never reaches it, and replaying onto it is a different operation.
     const other = findCommit("other side") orelse return error.CommitNotFound;
-    beginRebase(other.id);
+    github_actions.beginRebase(other.id);
 
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(@as(usize, 0), rebase_steps.items.len);
@@ -9806,9 +8448,9 @@ test "a rebase onto a commit off the current branch is refused, not attempted" {
     // never composed.
     try expectGit(dir, &.{ "merge", "-q", "-s", "ours", "-m", "merged", "other" });
     graph_view.refreshHistory();
-    clearCommandError();
+    github_actions.clearCommandError();
     const main_side = findCommit("main side") orelse return error.CommitNotFound;
-    beginRebase(main_side.parents[0]);
+    github_actions.beginRebase(main_side.parents[0]);
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expectEqual(@as(usize, 0), rebase_steps.items.len);
     try std.testing.expectEqual(Selection.none, std.meta.activeTag(selection));
@@ -9835,7 +8477,7 @@ test "a branch named like a tag merges the branch, not the tag" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // Bare where nothing else shares the name, so merge messages read as usual.
     var ref_buf: [512]u8 = undefined;
@@ -9864,7 +8506,7 @@ test "blame names the author of each line" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     selectBlame("lines.txt");
     ensureDiff();
@@ -9918,18 +8560,18 @@ test "a hard reset waits for the confirmation" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
-    defer clearConfirm();
+    defer github_actions.clearCommandError();
+    defer github_actions.clearConfirm();
     try std.testing.expectEqual(@as(usize, 2), history.?.commits.len);
 
     const base = findCommit("base") orelse return error.CommitNotFound;
     var sha_buf: [8]u8 = undefined;
-    ask(.reset_hard, git.oidShort(base.id, &sha_buf));
+    github_actions.ask(.reset_hard, git.oidShort(base.id, &sha_buf));
 
     // Asking must not do it.
     try std.testing.expectEqual(@as(usize, 2), history.?.commits.len);
 
-    runConfirmed();
+    github_actions.runConfirmed();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.commits.len);
     // Answered once, and gone.
@@ -9953,12 +8595,12 @@ test "the new branch dialog creates a branch, and stays open when the name is ta
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
-    defer clearPrompt();
+    defer github_actions.clearCommandError();
+    defer github_actions.clearPrompt();
 
-    askName(.new_branch, "");
+    github_actions.askName(.new_branch, "");
     try prompt_text.appendSlice(gpa, "feature");
-    runPrompt();
+    github_actions.runPrompt();
 
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("feature") != null);
@@ -9967,29 +8609,29 @@ test "the new branch dialog creates a branch, and stays open when the name is ta
 
     // The same name again fails, and the dialog stays up with the text in it so
     // the name can be fixed rather than retyped.
-    askName(.new_branch, "");
+    github_actions.askName(.new_branch, "");
     try prompt_text.appendSlice(gpa, "feature");
-    runPrompt();
+    github_actions.runPrompt();
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expect(prompt != null);
 
     // A dash would make it an option: `--force`, `-D`. Refused before git
     // sees it, with the dialog still open.
-    clearCommandError();
-    askName(.new_branch, "");
+    github_actions.clearCommandError();
+    github_actions.askName(.new_branch, "");
     try prompt_text.appendSlice(gpa, "-D");
-    runPrompt();
+    github_actions.runPrompt();
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expect(prompt != null);
     try std.testing.expect(findRef("-D") == null);
 
     // On screen: a dialog over the window, typed into at once — Enter makes
     // the branch — and Esc lets it be.
-    clearCommandError();
+    github_actions.clearCommandError();
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
     try style.applyEmbedded(gpa, true);
-    askName(.new_branch, "");
+    github_actions.askName(.new_branch, "");
     try dvui.testing.settle(frameArrowCursor);
     _ = try tagRect("prompt:go");
     try typeText("typed");
@@ -9997,7 +8639,7 @@ test "the new branch dialog creates a branch, and stays open when the name is ta
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("typed") != null);
     try std.testing.expect(prompt == null);
-    askName(.new_tag, "");
+    github_actions.askName(.new_tag, "");
     try dvui.testing.settle(frameArrowCursor);
     try pressFrame(.escape, .none);
     try std.testing.expect(prompt == null);
@@ -10027,22 +8669,22 @@ test "the conflict, rebase and blame panes each render a frame" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // Conflicts, the toolbar saying so.
-    gitDo(&.{ "merge", "--no-edit", "other" });
+    github_actions.gitDo(&.{ "merge", "--no-edit", "other" });
     try std.testing.expectEqual(git.State.merge, history.?.state);
     selectChange("lines.txt", .unstaged);
     try dvui.testing.settle(appFrame);
     try std.testing.expect(rebase_view.isConflictView());
     try std.testing.expectEqual(@as(usize, 1), conflicts.len);
 
-    gitDo(&.{ "merge", "--abort" });
+    github_actions.gitDo(&.{ "merge", "--abort" });
     clearSelection();
 
     // The rebase composer.
     const head = history.?.commits[0];
-    beginRebase(if (head.parents.len > 0) head.parents[0] else null);
+    github_actions.beginRebase(if (head.parents.len > 0) head.parents[0] else null);
     try std.testing.expectEqual(Selection.rebase, std.meta.activeTag(selection));
     try dvui.testing.settle(appFrame);
     try std.testing.expectEqual(@as(usize, 1), rebase_steps.items.len);
@@ -10076,7 +8718,7 @@ test "LFS is offered only where the repository actually uses it" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // No `.gitattributes` at all, which is most repositories.
     try std.testing.expect(!tab_strip.uses_lfs);
@@ -10130,7 +8772,7 @@ fn absPath(buf: []u8, rel: []const u8) ![]const u8 {
 fn pumpJob() !void {
     var waited: usize = 0;
     while (tab_strip.job != null and waited < 1000) : (waited += 1) {
-        collectJob();
+        github_actions.collectJob();
         if (tab_strip.job != null) try std.Io.sleep(app_io, .fromMilliseconds(10), .awake);
     }
     if (tab_strip.job != null) return error.JobNeverFinished;
@@ -10171,7 +8813,7 @@ test "a networked command runs off the UI thread and folds its result in" {
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     repo_io.requestNetwork("Fetching", &.{ "fetch", "origin" });
     try std.testing.expect(repo_io.runAction());
@@ -10218,7 +8860,7 @@ test "the branch knows how far it is from its upstream" {
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // Level with the upstream: both buttons carry no count.
     try std.testing.expectEqual(@as(usize, 0), history.?.tracking.ahead);
@@ -10316,7 +8958,7 @@ test "a command that lands after the repository changed is discarded, not report
     // makes it visible whether the failure gets reported.
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     repo_io.requestNetwork("Fetching", &.{ "fetch", "origin" });
     try std.testing.expect(repo_io.runAction());
@@ -10354,7 +8996,7 @@ test "the tab strip comes back after a restart" {
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var a_buf: [std.fs.max_path_bytes]u8 = undefined;
     const a = try std.fmt.bufPrint(&a_buf, "{s}/a", .{root});
@@ -10413,7 +9055,7 @@ test "the same repository opened from inside itself reuses its tab" {
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var a_buf: [std.fs.max_path_bytes]u8 = undefined;
     const a = try std.fmt.bufPrint(&a_buf, "{s}/a", .{root});
@@ -10448,7 +9090,7 @@ test "closing a tab falls onto its neighbour, and closing the last leaves nothin
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var buf_a: [std.fs.max_path_bytes]u8 = undefined;
     var buf_b: [std.fs.max_path_bytes]u8 = undefined;
@@ -10471,7 +9113,7 @@ test "closing a tab falls onto its neighbour, and closing the last leaves nothin
     tab_strip.openAndRemember(try std.fmt.bufPrint(&buf_none, "{s}/none", .{root}));
     try std.testing.expectEqualStrings("c", repo_name);
     try std.testing.expect(tab_strip.command_error != null);
-    clearCommandError();
+    github_actions.clearCommandError();
 
     // Amend ticked here, or a branch dropped on another, does not follow
     // onto the next tab.
@@ -10513,7 +9155,7 @@ test "a tab dragged onto another takes its place, and the one shown stays shown"
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     tab_strip.loadWorkspace();
     var bufs: [3][std.fs.max_path_bytes]u8 = undefined;
@@ -10572,7 +9214,7 @@ test "workspaces hold their own groups, and switching opens the tab each was on"
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var buf_a: [std.fs.max_path_bytes]u8 = undefined;
     var buf_b: [std.fs.max_path_bytes]u8 = undefined;
@@ -10693,7 +9335,7 @@ test "a group keeps its own tabs, and the last group cannot be closed" {
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var buf_a: [std.fs.max_path_bytes]u8 = undefined;
     var buf_b: [std.fs.max_path_bytes]u8 = undefined;
@@ -10816,9 +9458,9 @@ test "renames, a named stash and a forced delete go through git" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    askNameWith(.rename_branch, "feat", "feat");
+    github_actions.askNameWith(.rename_branch, "feat", "feat");
     // Pre-filled with the old name, so a typo is fixed rather than retyped.
     try std.testing.expectEqualStrings("feat", prompt_text.items);
     try answerPrompt("renamed");
@@ -10827,16 +9469,16 @@ test "renames, a named stash and a forced delete go through git" {
     try std.testing.expect(findRef("feat") == null);
     try std.testing.expectEqual(@as(?Prompt, null), prompt);
 
-    askNameWith(.rename_remote, "origin", "origin");
+    github_actions.askNameWith(.rename_remote, "origin", "origin");
     try answerPrompt("up");
-    askNameWith(.remote_url, "up", "/nowhere");
+    github_actions.askNameWith(.remote_url, "up", "/nowhere");
     try answerPrompt("/elsewhere");
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("up", history.?.remotes[0].name);
     try std.testing.expectEqualStrings("/elsewhere", history.?.remotes[0].url);
 
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed\n" });
-    askName(.stash, "");
+    github_actions.askName(.stash, "");
     try answerPrompt("half a thought");
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -10846,7 +9488,7 @@ test "renames, a named stash and a forced delete go through git" {
     // Its drop asked for, then another stash pushed on top while the bar is
     // up: the one asked about goes, not the new stash@{0}.
     var stash_hex: [41]u8 = undefined;
-    ask(.stash_drop, git.oidHex(history.?.stashes[0].id, &stash_hex));
+    github_actions.ask(.stash_drop, git.oidHex(history.?.stashes[0].id, &stash_hex));
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "changed again\n" });
     try expectGit(dir, &.{ "stash", "push", "-m", "newer" });
     try answerConfirm();
@@ -10880,9 +9522,9 @@ test "renames, a named stash and a forced delete go through git" {
     try expectGit(dir, &.{ "switch", "-q", "main" });
     repo_io.reloadHistory();
 
-    gitDo(&.{ "branch", "-d", "lost" });
+    github_actions.gitDo(&.{ "branch", "-d", "lost" });
     try std.testing.expect(tab_strip.command_error != null);
-    ask(.delete_branch_force, "lost");
+    github_actions.ask(.delete_branch_force, "lost");
     try answerConfirm();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findRef("lost") == null);
@@ -10908,7 +9550,7 @@ test "a hunk is discarded alone, and a file comes back from a commit" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     const r = repo orelse return error.RepoNotOpen;
 
     {
@@ -10931,7 +9573,7 @@ test "a hunk is discarded alone, and a file comes back from a commit" {
 
     var arg_buf: [64]u8 = undefined;
     var sha_buf: [8]u8 = undefined;
-    ask(.restore_file, try std.fmt.bufPrint(&arg_buf, "{s} lines.txt", .{git.oidShort(base.id, &sha_buf)}));
+    github_actions.ask(.restore_file, try std.fmt.bufPrint(&arg_buf, "{s} lines.txt", .{git.oidShort(base.id, &sha_buf)}));
     try answerConfirm();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
 
@@ -10969,7 +9611,7 @@ test "a file's history lists the commits that changed it, and only those" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     graph_view.showFileHistory("a.txt");
     const h = history.?;
@@ -10989,7 +9631,7 @@ test "a file's history lists the commits that changed it, and only those" {
 
     // Re-marked when the history is re-read: the flags are by index.
     try tmp.dir.writeFile(app_io, .{ .sub_path = "a.txt", .data = "again\n" });
-    gitDo(&.{ "commit", "-qam", "a again" });
+    github_actions.gitDo(&.{ "commit", "-qam", "a again" });
     const latest = findCommit("a again") orelse return error.CommitNotFound;
     try std.testing.expect(shownNow(latest, history.?.indexOf(latest.id).?));
 
@@ -11017,7 +9659,7 @@ test "ignoring a file appends it to .gitignore and it drops out of the changes" 
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     try std.testing.expectEqual(@as(usize, 1), work.?.unstaged.len);
 
     commit_view.ignorePath("scratch.txt");
@@ -11069,7 +9711,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // The toolbar's push, on a branch with no upstream yet.
     repo_io.requestNetwork("Pushing", &.{ "-c", "push.autoSetupRemote=true", "push" });
@@ -11082,7 +9724,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     // Rewrite what was pushed, and force it over.
     try expectGit(down, &.{ "commit", "-q", "--amend", "-m", "rewritten" });
     repo_io.reloadHistory();
-    ask(.force_push, "");
+    github_actions.ask(.force_push, "");
     try answerConfirm();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -11091,7 +9733,7 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
     try std.testing.expectEqual(@as(usize, 0), history.?.tracking.ahead);
     try std.testing.expectEqual(@as(usize, 0), history.?.tracking.behind);
 
-    ask(.delete_remote_branch, "origin/feat");
+    github_actions.ask(.delete_remote_branch, "origin/feat");
     try answerConfirm();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -11103,12 +9745,12 @@ test "branches and tags are pushed, force pushed and deleted on the remote" {
 
     try expectGit(down, &.{ "tag", "v1" });
     repo_io.reloadHistory();
-    repo_io.requestNetwork("Pushing", &.{ "push", defaultRemote().?, "v1" });
+    repo_io.requestNetwork("Pushing", &.{ "push", github_actions.defaultRemote().?, "v1" });
     try std.testing.expect(repo_io.runAction());
     try pumpJob();
     try expectGit(up, &.{ "rev-parse", "--verify", "-q", "refs/tags/v1" });
 
-    ask(.delete_remote_tag, "v1");
+    github_actions.ask(.delete_remote_tag, "v1");
     try answerConfirm();
     try pumpJob();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
@@ -11166,7 +9808,7 @@ test "fetch, and each pull the menu offers, through the toolbar" {
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -11238,7 +9880,7 @@ test "a commit's menu leads with check out, and resets from a submenu" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -11293,7 +9935,7 @@ test "cherry-pick and revert from a commit's menu, a merge's too" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -11353,7 +9995,7 @@ test "stash apply keeps the stash, amend starts from the last message, a tag fro
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -11433,7 +10075,7 @@ test "the toolbar's branch menu filters and switches branches" {
 
     openRepo(down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -11477,8 +10119,8 @@ test "the avatar's menu opens the signing card, and asks before signing out" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
-    defer clearConfirm();
+    defer github_actions.clearCommandError();
+    defer github_actions.clearConfirm();
     // Who the menu says is signed in, without asking GitHub.
     window_chrome.me_loaded = true;
     try window_chrome.me_gh.appendSlice(gpa, "tester");
@@ -11623,7 +10265,7 @@ test "the author column filters the list, and the version opens the features" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -11657,8 +10299,8 @@ test "a request's lists, run ids and checks read the way the commands want them"
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("[\"ann\",\"bo\",\"core\"]", jsonList(a, " ann, bo ,core,"));
-    try std.testing.expectEqualStrings("[]", jsonList(a, " , "));
+    try std.testing.expectEqualStrings("[\"ann\",\"bo\",\"core\"]", github_actions.jsonList(a, " ann, bo ,core,"));
+    try std.testing.expectEqualStrings("[]", github_actions.jsonList(a, " , "));
 
     try std.testing.expectEqualStrings("123", runIdOf("https://github.com/o/r/actions/runs/123/job/456").?);
     try std.testing.expectEqualStrings("9", runIdOf("https://github.com/o/r/actions/runs/9").?);
@@ -11816,7 +10458,7 @@ test "the request's sidebar picks its labels from a list, sent at once" {
     try makeTestRepo(&tmp, dir, "a.txt", "a\n");
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     pr.detail = .{
         .number = 42,
         .title = "Login form",
@@ -11953,7 +10595,7 @@ test "changes asked for: threads under their review, a suggestion applied from i
     try makeTestRepo(&tmp, dir, "login.ts", "const f = el();\nif (email) submit();\n");
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     pr.detail = .{
         .number = 16,
@@ -12165,7 +10807,7 @@ test "a clone opens in a tab" {
     defer git.shutdown();
     try makeUpstreamPair(&tmp, root, up, down);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     var root_abs_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -12185,12 +10827,12 @@ test "a clone opens in a tab" {
 
 test "a leading tilde means home, and only a leading one" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = homeDir() orelse return error.SkipZigTest;
-    const got = expandHome(&buf, "~/dev/x");
+    const home = github_actions.homeDir() orelse return error.SkipZigTest;
+    const got = github_actions.expandHome(&buf, "~/dev/x");
     try std.testing.expect(std.mem.startsWith(u8, got, home));
     try std.testing.expect(std.mem.endsWith(u8, got, "/dev/x"));
-    try std.testing.expectEqualStrings("/abs/~/x", expandHome(&buf, "/abs/~/x"));
-    try std.testing.expectEqualStrings("rel", expandHome(&buf, "rel"));
+    try std.testing.expectEqualStrings("/abs/~/x", github_actions.expandHome(&buf, "/abs/~/x"));
+    try std.testing.expectEqualStrings("rel", github_actions.expandHome(&buf, "rel"));
 }
 
 test "undo takes back a commit and a checkout, and undoing an undo redoes" {
@@ -12212,9 +10854,9 @@ test "undo takes back a commit and a checkout, and undoing an undo redoes" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
-    requestUndo();
+    github_actions.requestUndo();
     // The commit by its full sha: seven characters can be ambiguous.
     try std.testing.expectEqual(@as(usize, 40), repo_io.action_argv[2].len);
     try std.testing.expect(repo_io.runAction());
@@ -12223,7 +10865,7 @@ test "undo takes back a commit and a checkout, and undoing an undo redoes" {
     // Nothing lost: what the commit carried is staged again.
     try std.testing.expectEqual(@as(usize, 1), work.?.staged.len);
 
-    requestUndo();
+    github_actions.requestUndo();
     try std.testing.expect(repo_io.runAction());
     try std.testing.expect(findCommit("second") != null);
     try std.testing.expectEqual(@as(usize, 0), work.?.staged.len);
@@ -12233,7 +10875,7 @@ test "undo takes back a commit and a checkout, and undoing an undo redoes" {
     try expectGit(dir, &.{ "switch", "-q", "-c", "elsewhere" });
     repo_io.poll();
     try std.testing.expectEqualStrings("elsewhere", history.?.head.?);
-    requestUndo();
+    github_actions.requestUndo();
     try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqualStrings("main", history.?.head.?);
@@ -12262,35 +10904,35 @@ test "redo takes back the last undo, and only while nothing has moved since" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // Nothing undone yet: nothing to redo.
-    requestRedo();
+    github_actions.requestRedo();
     try std.testing.expect(tab_strip.command_error != null);
-    clearCommandError();
+    github_actions.clearCommandError();
 
-    requestUndo();
+    github_actions.requestUndo();
     try std.testing.expect(repo_io.runAction());
     try std.testing.expect(findCommit("second") == null);
-    requestRedo();
+    github_actions.requestRedo();
     try std.testing.expect(repo_io.runAction());
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expect(findCommit("second") != null);
     // Redone once; a second redo has nothing to take back.
-    requestRedo();
+    github_actions.requestRedo();
     try std.testing.expect(tab_strip.command_error != null);
-    clearCommandError();
+    github_actions.clearCommandError();
 
     // Undone, then something else moves HEAD: the redo is gone with it.
-    requestUndo();
+    github_actions.requestUndo();
     try std.testing.expect(repo_io.runAction());
     try expectGit(dir, &.{ "commit", "-qm", "another" });
     repo_io.poll();
-    try std.testing.expect(!canRedo());
-    requestRedo();
+    try std.testing.expect(!github_actions.canRedo());
+    github_actions.requestRedo();
     try std.testing.expect(tab_strip.command_error != null);
     try std.testing.expect(findCommit("second") == null);
-    clearCommandError();
+    github_actions.clearCommandError();
 
     // From the toolbar: Redo beside Undo, deaf until an undo, then taking
     // it back, and deaf again.
@@ -12302,11 +10944,11 @@ test "redo takes back the last undo, and only while nothing has moved since" {
     try std.testing.expect(findCommit("another") != null);
     try clickAt(try tagCenter("toolbar:Undo"));
     try std.testing.expect(findCommit("another") == null);
-    try std.testing.expect(canRedo());
-    try std.testing.expectEqualStrings("commit: another", redo_what[0..redo_what_len]);
+    try std.testing.expect(github_actions.canRedo());
+    try std.testing.expectEqualStrings("commit: another", github_actions.redo_what[0..github_actions.redo_what_len]);
     try clickAt(try tagCenter("toolbar:Redo"));
     try std.testing.expect(findCommit("another") != null);
-    try std.testing.expect(!canRedo());
+    try std.testing.expect(!github_actions.canRedo());
 }
 
 test "with the integrations off, no pull requests, issues or GitHub account" {
@@ -12659,7 +11301,7 @@ test "a file's history follows it back through a rename" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     graph_view.showFileHistory("new.txt");
     const h = history.?;
@@ -12693,7 +11335,7 @@ test "changes picked together are stashed or staged together, and only they" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     try std.testing.expectEqual(@as(usize, 3), work.?.unstaged.len);
 
     // a and the new c stashed; b stays.
@@ -12745,7 +11387,7 @@ test "picked lines of a new file go into the index alone" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     const r = repo orelse return error.RepoNotOpen;
 
     {
@@ -12785,7 +11427,7 @@ test "picked lines are staged and unstaged alone" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     const r = repo orelse return error.RepoNotOpen;
 
     // A pick outlives the poll's re-read of a file nobody touched, and goes
@@ -12927,7 +11569,7 @@ test "picked lines are staged and unstaged alone" {
         try std.testing.expectEqual(@as(usize, 1), d.files.len);
         try std.testing.expectEqual(git.Status.renamed, d.files[0].status);
     }
-    doDiscard("[g].txt");
+    github_actions.doDiscard("[g].txt");
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     const back = try tmp.dir.readFileAlloc(app_io, "f.txt", gpa, .limited(1 << 16));
     defer gpa.free(back);
@@ -12954,7 +11596,7 @@ test "discarding everything stops at a restore that failed, and needs none for u
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // A tracked edit git cannot write back — its folder read-only — beside an
     // untracked file: the error stays up, and the untracked file stays too.
@@ -12965,17 +11607,17 @@ test "discarding everything stops at a restore that failed, and needs none for u
     try expectRun(&.{ "chmod", "555", ro });
     defer expectRun(&.{ "chmod", "755", ro }) catch {};
     repo_io.reloadWork();
-    doDiscard("");
+    github_actions.doDiscard("");
     try std.testing.expect(tab_strip.command_error != null);
     const kept = try tmp.dir.readFileAlloc(app_io, "u.txt", gpa, .limited(64));
     gpa.free(kept);
-    clearCommandError();
+    github_actions.clearCommandError();
 
     // Untracked files alone: nothing for `restore` to name, and no error for it.
     try expectRun(&.{ "chmod", "755", ro });
     try expectGit(dir, &.{ "checkout", "--", "ro/f.txt" });
     repo_io.reloadWork();
-    doDiscard("");
+    github_actions.doDiscard("");
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(app_io, "u.txt", gpa, .limited(64)));
 }
@@ -13002,19 +11644,19 @@ test "a worktree is added, listed, and removed" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     var line_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
     const wt = try absPath(&abs_buf, try std.fmt.bufPrint(&line_buf, "{s}/side", .{root}));
     var answer_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
-    askName(.add_worktree, "");
+    github_actions.askName(.add_worktree, "");
     try answerPrompt(try std.fmt.bufPrint(&answer_buf, "{s} feature", .{wt}));
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 1), history.?.worktrees.len);
     try std.testing.expect(findRef("feature") != null);
 
-    ask(.remove_worktree, history.?.worktrees[0].path);
+    github_actions.ask(.remove_worktree, history.?.worktrees[0].path);
     try answerConfirm();
     try std.testing.expectEqual(@as(?[]u8, null), tab_strip.command_error);
     try std.testing.expectEqual(@as(usize, 0), history.?.worktrees.len);
@@ -13036,7 +11678,7 @@ test "the new repository dialog makes the folder, the first commit, and a tab" {
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
     tab_strip.loadWorkspace();
 
     try std.testing.expectEqualStrings("zync", dialog_views.nameFromUrl("https://github.com/me/zync.git"));
@@ -13111,7 +11753,7 @@ test "a branch dropped onto another merges into it, or rebases onto it" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     // Merge feat into main, while other is checked out.
     graph_view.setDrop("feat", "main");
@@ -13354,15 +11996,15 @@ test "a frame drawn again allocates nothing, a filter on, a dialog or a toast up
     found[1] = try Idle.allocs(&counting);
     commit_filter.clearRetainingCapacity();
     // A dialog asking for a name.
-    askNameWith(.rename_branch, "feat", "feat");
+    github_actions.askNameWith(.rename_branch, "feat", "feat");
     found[2] = try Idle.allocs(&counting);
-    clearPrompt();
+    github_actions.clearPrompt();
     // A toast asking for a yes. Its first frames are its first draw —
     // dvui setting its window up, 2 allocations — so the next five count.
-    ask(.discard, "a.txt");
+    github_actions.ask(.discard, "a.txt");
     _ = try Idle.allocs(&counting);
     found[3] = try Idle.allocs(&counting);
-    clearConfirm();
+    github_actions.clearConfirm();
 
     if (!std.mem.allEqual(usize, &found, 0)) {
         std.debug.print("heap allocations over 5 idle frames: author filter {d}, search {d}, dialog {d}, toast {d}\n", .{ found[0], found[1], found[2], found[3] });
@@ -13464,12 +12106,12 @@ test "opening and closing everything, again and again, leaks nothing" {
         graph_view.onlyAuthor((graph_view.authorByKey("Zit Test\ntest@zync.invalid") orelse return error.AuthorMissing).key);
         try dvui.testing.settle(frameArrowCursor);
         graph_view.clearAuthors();
-        askNameWith(.rename_branch, "main", "main");
+        github_actions.askNameWith(.rename_branch, "main", "main");
         try dvui.testing.settle(frameArrowCursor);
-        clearPrompt();
-        ask(.discard, "a.txt");
+        github_actions.clearPrompt();
+        github_actions.ask(.discard, "a.txt");
         try dvui.testing.settle(frameArrowCursor);
-        clearConfirm();
+        github_actions.clearConfirm();
         try dvui.testing.settle(frameArrowCursor);
         dialog_views.closeRepo();
         try dvui.testing.settle(frameArrowCursor);
@@ -14402,7 +13044,7 @@ test "the stage and unstage buttons on a file row work when clicked" {
 
     openRepo(dir);
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1320, .h = 840 } });
     defer t.deinit();
@@ -14516,7 +13158,7 @@ test "audit: the main controls do what they say when clicked" {
     try git.init();
     defer git.shutdown();
     defer dialog_views.closeRepo();
-    defer clearCommandError();
+    defer github_actions.clearCommandError();
 
     try tmp.dir.createDirPath(app_io, "a");
     try makeTestRepo(&tmp, a, "a/one.txt", "one\n");

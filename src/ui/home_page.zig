@@ -10,6 +10,7 @@ const window_chrome = @import("window_chrome.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === What Zit does ===
@@ -123,10 +124,10 @@ pub fn featuresDialog() void {
         dvui.label(@src(), "A fast, native Git client for Linux and Windows, written in Zig.", .{}, .{ .font = style.small(), .color_text = .{ .color = style.textMuted() }, .padding = dvui.Rect.all(0), .margin = .{ .y = 2, .h = style.space.md } });
         var links = dvui.box(@src(), .{ .dir = .horizontal }, .{ .background = false });
         defer links.deinit();
-        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.book, "Documentation", true, "about:docs")) app.openUrl(SITE_URL);
-        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.star, "What's new", false, "about:changelog")) app.openUrl(SITE_URL ++ "project/changelog/");
-        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.code, "Source", false, "about:repo")) app.openUrl(REPO_URL);
-        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.bug, "Report a problem", false, "about:issue")) app.openUrl(REPO_URL ++ "/issues/new");
+        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.book, "Documentation", true, "about:docs")) github_actions.openUrl(SITE_URL);
+        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.star, "What's new", false, "about:changelog")) github_actions.openUrl(SITE_URL ++ "project/changelog/");
+        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.code, "Source", false, "about:repo")) github_actions.openUrl(REPO_URL);
+        if (dialog_views.chipButtonTagged(@src(), dvui.entypo.bug, "Report a problem", false, "about:issue")) github_actions.openUrl(REPO_URL ++ "/issues/new");
     }
 
     // What it does: the kinds down the left, the one picked on the right.
@@ -375,7 +376,7 @@ pub fn startScreen() void {
     };
     if (dialog_views.search_entered == field) {
         dialog_views.search_entered = null;
-        if (start_pick < shown.items.len) app.requestOpenKnown(shown.items[start_pick]);
+        if (start_pick < shown.items.len) github_actions.requestOpenKnown(shown.items[start_pick]);
     }
 
     for (shown.items, 0..) |path, i| {
@@ -522,7 +523,7 @@ fn recentRow(src: std.builtin.SourceLocation, id: usize, path: []const u8, open:
             .padding = .{ .x = style.space.xs, .w = style.space.xs },
         });
     }
-    if (bw.clicked()) app.requestOpenKnown(path);
+    if (bw.clicked()) github_actions.requestOpenKnown(path);
     bw.deinit();
 
     if (dialog_views.iconButton(@src(), "forget_repo", "Remove from Zit…", dvui.entypo.cross, if (hover or picked) style.textFaint() else dvui.Color.transparent)) {

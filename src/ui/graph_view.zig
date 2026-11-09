@@ -13,6 +13,7 @@ const commit_view = @import("commit_view.zig");
 const dialog_views = @import("dialog_views.zig");
 const identity_view = @import("identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
+const github_actions = @import("../github/github_actions.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -498,7 +499,7 @@ pub fn dropMenu() void {
         }
         var buf2: [300]u8 = undefined;
         // A remote branch is not rebased itself: the local one tracking it is.
-        const rebase = (if (app.isLocalBranch(d.source))
+        const rebase = (if (github_actions.isLocalBranch(d.source))
             std.fmt.bufPrint(&buf2, "Rebase {s} onto {s}", .{ d.source, d.target })
         else
             std.fmt.bufPrint(&buf2, "Rebase the branch tracking {s} onto {s}", .{ d.source, d.target })) catch "Rebase";
@@ -533,8 +534,8 @@ fn dropMenuClosed(ptr: *anyopaque, reason: dvui.MenuWidget.CloseReason) void {
 
 /// The branch a remote ref would be checked out as, or a local name as is.
 fn localName(name: []const u8) []const u8 {
-    if (app.isLocalBranch(name)) return name;
-    return app.splitRemoteRef(name).branch;
+    if (github_actions.isLocalBranch(name)) return name;
+    return github_actions.splitRemoteRef(name).branch;
 }
 
 /// The local branch whose upstream is `remote_ref` ("origin/feat"), owned.
@@ -543,7 +544,7 @@ fn trackingBranch(remote_ref: []const u8) ?[]u8 {
     defer app.gpa.free(answer.out);
     var lines = std.mem.splitScalar(u8, answer.out, '\n');
     while (lines.next()) |line| {
-        const pair = app.splitPair(std.mem.trim(u8, line, " \r")) orelse continue;
+        const pair = github_actions.splitPair(std.mem.trim(u8, line, " \r")) orelse continue;
         if (std.mem.eql(u8, pair[0], remote_ref)) return app.gpa.dupe(u8, pair[1]) catch null;
     }
     return null;
@@ -570,26 +571,26 @@ pub fn runDrop() void {
     const d = drop orelse return;
     if (app.midOperation()) {
         clearDrop();
-        return app.setCommandError("Finish or abort what is under way first.");
+        return github_actions.setCommandError("Finish or abort what is under way first.");
     }
     var ref_buf: [512]u8 = undefined;
     defer clearDrop();
     switch (drop_action) {
         // Into the target: it has to be checked out to take a merge.
         .merge => {
-            app.gitDo(&.{ "switch", localName(d.target) });
+            github_actions.gitDo(&.{ "switch", localName(d.target) });
             if (tab_strip.command_error != null) return;
-            app.gitDo(&.{ "merge", "--no-edit", refArg(&ref_buf, d.source, if (app.isLocalBranch(d.source)) .local else .remote) });
+            github_actions.gitDo(&.{ "merge", "--no-edit", refArg(&ref_buf, d.source, if (github_actions.isLocalBranch(d.source)) .local else .remote) });
         },
         // `rebase <upstream> <branch>` checks the branch out itself. A
         // remote branch cannot be rebased here, only the local one tracking
         // it — not whichever happens to share its name.
-        .rebase => if (app.isLocalBranch(d.source))
-            app.gitDo(&.{ "rebase", refArg(&ref_buf, d.target, if (app.isLocalBranch(d.target)) .local else .remote), d.source })
+        .rebase => if (github_actions.isLocalBranch(d.source))
+            github_actions.gitDo(&.{ "rebase", refArg(&ref_buf, d.target, if (github_actions.isLocalBranch(d.target)) .local else .remote), d.source })
         else if (trackingBranch(d.source)) |branch| {
             defer app.gpa.free(branch);
-            app.gitDo(&.{ "rebase", refArg(&ref_buf, d.target, if (app.isLocalBranch(d.target)) .local else .remote), branch });
-        } else app.setCommandError("No local branch tracks that one. Check it out first, then rebase."),
+            github_actions.gitDo(&.{ "rebase", refArg(&ref_buf, d.target, if (github_actions.isLocalBranch(d.target)) .local else .remote), branch });
+        } else github_actions.setCommandError("No local branch tracks that one. Check it out first, then rebase."),
     }
 }
 
@@ -633,12 +634,12 @@ pub fn refMenu(
         }
         if (menuIcon(@src(), dvui.entypo.upload, "Force push…", true)) {
             fw.close();
-            app.ask(.force_push, "");
+            github_actions.ask(.force_push, "");
         }
     } else {
         if (ref.kind != .tag and menuIcon(@src(), dvui.entypo.flow_branch, "Check out", false)) {
             fw.close();
-            app.checkout(ref);
+            github_actions.checkout(ref);
         }
         if (app.history) |h| if (h.head_oid) |head_oid| {
             if (menuIcon(@src(), dvui.entypo.swap, "Compare with the current branch", false)) {
@@ -672,20 +673,20 @@ pub fn refMenu(
     if (ref.kind == .local and !ref.head) {
         if (menuIcon(@src(), dvui.entypo.upload, "Push, and track it", false)) {
             fw.close();
-            if (app.defaultRemote()) |remote| {
+            if (github_actions.defaultRemote()) |remote| {
                 repo_io.requestNetwork("Pushing", &.{ "push", "-u", remote, refArg(&ref_buf, ref.name, ref.kind) });
-            } else app.setCommandError("There is no remote to push to. Add one in the sidebar.");
+            } else github_actions.setCommandError("There is no remote to push to. Add one in the sidebar.");
         }
     }
     if (ref.kind == .tag) {
         if (menuIcon(@src(), dvui.entypo.upload, "Push this tag", false)) {
             fw.close();
-            if (app.defaultRemote()) |remote| {
+            if (github_actions.defaultRemote()) |remote| {
                 // The full name, as for a delete: a branch called the same
                 // would make the bare one ambiguous.
                 const full = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{ref.name}) catch ref.name;
                 repo_io.requestNetwork("Pushing", &.{ "push", remote, full });
-            } else app.setCommandError("There is no remote to push to. Add one in the sidebar.");
+            } else github_actions.setCommandError("There is no remote to push to. Add one in the sidebar.");
         }
     }
     if (ref.kind != .tag) {
@@ -703,7 +704,7 @@ pub fn refMenu(
     if (ref.kind == .local) {
         if (menuIcon(@src(), dvui.entypo.pencil, "Rename…", false)) {
             fw.close();
-            app.askNameWith(.rename_branch, ref.name, ref.name);
+            github_actions.askNameWith(.rename_branch, ref.name, ref.name);
         }
     }
     if (menuIcon(@src(), dvui.entypo.copy, "Copy the name", false)) {
@@ -722,13 +723,13 @@ pub fn refMenu(
         }
         if (menuIcon(@src(), dvui.entypo.trash, "Delete, even unmerged…", true)) {
             fw.close();
-            app.ask(.delete_branch_force, ref.name);
+            github_actions.ask(.delete_branch_force, ref.name);
         }
     }
     if (ref.kind == .remote) {
         if (menuIcon(@src(), dvui.entypo.trash, "Delete on the remote…", true)) {
             fw.close();
-            app.ask(.delete_remote_branch, ref.name);
+            github_actions.ask(.delete_remote_branch, ref.name);
         }
     }
     if (ref.kind == .tag) {
@@ -738,7 +739,7 @@ pub fn refMenu(
         }
         if (menuIcon(@src(), dvui.entypo.trash, "Delete on the remote…", true)) {
             fw.close();
-            app.ask(.delete_remote_tag, ref.name);
+            github_actions.ask(.delete_remote_tag, ref.name);
         }
     }
 }
@@ -1686,7 +1687,7 @@ pub fn markFileHistory() void {
     const r = app.repo orelse return;
     const h = app.history orelse return;
     file_history_hits = r.touching(app.gpa, h.commits, file_history.items) catch {
-        app.setCommandError("Could not read that file's history.");
+        github_actions.setCommandError("Could not read that file's history.");
         return clearFileHistory();
     };
 }
