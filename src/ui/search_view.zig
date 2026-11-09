@@ -15,6 +15,7 @@ const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
 const pr_list = @import("pr_list.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === Search through git ===
@@ -975,7 +976,7 @@ fn stashTag(entry: git.Stash, i: usize, room: ?f32) void {
     if (rect.contains(dvui.currentWindow().mouse_pt)) {
         dvui.tooltip(@src(), .{ .active_rect = rect, .position = .vertical, .delay = 500_000 }, "Stash: {s}", .{entry.message}, .{ .font = style.small() });
     }
-    app.stashMenu(entry, 1_000_000 + i, rect, null);
+    pr_create.stashMenu(entry, 1_000_000 + i, rect, null);
 }
 
 /// The "+N" after a commit's names, margin included.

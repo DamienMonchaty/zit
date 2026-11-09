@@ -11,6 +11,7 @@ const identity_view = @import("identity_view.zig");
 const home_page = @import("home_page.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === This repository's settings ===
@@ -312,15 +313,15 @@ pub fn editorChoice() bool {
     };
     var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
     defer cell.deinit();
-    const p = app.picker(EDITOR_PICKER, face, "", "settings:editor");
+    const p = pr_create.picker(EDITOR_PICKER, face, "", "settings:editor");
     defer p.end();
     const m = p.menu orelse return false;
     if (!editors_loaded) dvui.label(@src(), "Looking for the editors on this computer…", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
     var picked: ?[]const u8 = null;
-    if (app.pickRow(0, "System default", "what the system opens the file with", current.len == 0, null)) picked = "";
+    if (pr_create.pickRow(0, "System default", "what the system opens the file with", current.len == 0, null)) picked = "";
     for (known_editors, 0..) |e, i| {
         if (!editors_found[i]) continue;
-        if (app.pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
+        if (pr_create.pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
     }
     const cmd = picked orelse return false;
     m.close();
@@ -340,15 +341,15 @@ pub fn terminalChoice() bool {
     };
     var cell = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.sm } });
     defer cell.deinit();
-    const p = app.picker(TERMINAL_PICKER, face, "", "settings:terminal");
+    const p = pr_create.picker(TERMINAL_PICKER, face, "", "settings:terminal");
     defer p.end();
     const m = p.menu orelse return false;
     if (!editors_loaded) dvui.label(@src(), "Looking for the terminals on this computer…", .{}, .{ .font = style.tiny(), .color_text = .{ .color = style.textFaint() }, .padding = .{ .x = style.space.md, .y = style.space.sm, .w = style.space.md, .h = style.space.sm } });
     var picked: ?[]const u8 = null;
-    if (app.pickRow(0, "Automatic", if (@import("builtin").os.tag == .windows) "Windows Terminal where there is one" else "$TERMINAL, then the first found", current.len == 0, null)) picked = "";
+    if (pr_create.pickRow(0, "Automatic", if (@import("builtin").os.tag == .windows) "Windows Terminal where there is one" else "$TERMINAL, then the first found", current.len == 0, null)) picked = "";
     for (known_terminals, 0..) |e, i| {
         if (!terminals_found[i]) continue;
-        if (app.pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
+        if (pr_create.pickRow(i + 1, e[1], e[0], std.mem.eql(u8, current, e[0]), null)) picked = e[0];
     }
     const cmd = picked orelse return false;
     m.close();

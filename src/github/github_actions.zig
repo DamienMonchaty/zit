@@ -14,6 +14,7 @@ const identity_view = @import("../ui/identity_view.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_connect = @import("github_connect.zig");
 const pr_list = @import("../ui/pr_list.zig");
+const pr_create = @import("../ui/pr_create.zig");
 const app = @import("../main.zig");
 
 // === GitHub, acted on ===
@@ -154,8 +155,8 @@ pub fn collectApi() void {
         clearApiQueue();
         setCommandError(why);
         // The dialog stays, with what went wrong, to try again.
-        app.pr_creating = false;
-        app.pr_created = 0;
+        pr_create.pr_creating = false;
+        pr_create.pr_created = 0;
         return;
     }
     switch (api_then) {
@@ -177,11 +178,11 @@ pub fn collectApi() void {
     if (api_queue.items.len > 0) return startNextApi();
     // A request just made, its reviewers and labels set: open it, in the
     // list read again with it.
-    if (app.pr_created != 0) {
-        const n = app.pr_created;
-        app.pr_created = 0;
-        app.pr_creating = false;
-        app.pr_new_open = false;
+    if (pr_create.pr_created != 0) {
+        const n = pr_create.pr_created;
+        pr_create.pr_created = 0;
+        pr_create.pr_creating = false;
+        pr_create.pr_new_open = false;
         app.new_tab_open = false;
         pr_list.pr_filter = .open;
         app.active_view = .pulls;
@@ -210,7 +211,7 @@ fn askReviewers(body: []const u8) void {
     const made = std.json.parseFromSliceLeaky(struct { number: u32 = 0 }, a.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
     if (made.number == 0) return;
     // Opened once the calls below are done, with what they set on it.
-    app.pr_created = made.number;
+    pr_create.pr_created = made.number;
     if (api_reviewers.items.len + api_assignees.items.len + api_labels.items.len == 0) return;
     var path: [512]u8 = undefined;
     if (api_reviewers.items.len > 0) {

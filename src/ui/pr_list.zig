@@ -12,6 +12,7 @@ const dialog_views = @import("dialog_views.zig");
 const repo_io = @import("../core/repo_io.zig");
 const pr_conversation = @import("pr_conversation.zig");
 const pr_editor = @import("pr_editor.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === Pull requests ===
@@ -285,7 +286,7 @@ fn prFilterMenu() void {
     for (items, 0..) |it, i| {
         var count_buf: [16]u8 = undefined;
         const count = if (it[2]) |n| std.fmt.bufPrint(&count_buf, "{d}", .{n}) catch "" else "";
-        if (app.pickRow(i, it[1], count, pr_filter == it[0], null)) {
+        if (pr_create.pickRow(i, it[1], count, pr_filter == it[0], null)) {
             pr_filter = it[0];
             if (it[0] == .merged or it[0] == .closed) pr.refreshPast(app.repo_path.items, if (it[0] == .merged) .merged else .closed);
             m.close();

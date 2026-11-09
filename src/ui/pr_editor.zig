@@ -20,6 +20,7 @@ const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
 const pr_list = @import("pr_list.zig");
 const pr_conversation = @import("pr_conversation.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === Editing a request ===
@@ -43,9 +44,9 @@ pub fn openPrEdit(d: pr.Detail) void {
     pr_edit_title.appendSlice(app.gpa, d.title) catch {};
     pr_edit_body.appendSlice(app.gpa, d.body) catch {};
     pr_edit_base.appendSlice(app.gpa, d.base) catch {};
-    for (d.reviewers) |r| app.listToggle(&pr_edit_reviewers, r.login);
-    for (d.assignees) |login| app.listToggle(&pr_edit_assignees, login);
-    for (d.labels) |l| app.listToggle(&pr_edit_labels, l.name);
+    for (d.reviewers) |r| pr_create.listToggle(&pr_edit_reviewers, r.login);
+    for (d.assignees) |login| pr_create.listToggle(&pr_edit_assignees, login);
+    for (d.labels) |l| pr_create.listToggle(&pr_edit_labels, l.name);
     pr_edit_draft = d.draft;
     pr.loadMeta(app.repo_path.items);
 }
@@ -73,15 +74,15 @@ pub fn prEditDialog() void {
     var title_buf: [48]u8 = undefined;
     identity_view.dialogHeader(@src(), dvui.entypo.pencil, std.fmt.bufPrint(&title_buf, "Edit #{s}", .{pr_list.requestNumber(&num)}) catch "Edit", "Saved on the host when you press Save", &pr_edit_open);
 
-    var body = identity_view.dialogBody(@src(), @min(app.PR_CREATE_W, win.w - 80));
+    var body = identity_view.dialogBody(@src(), @min(pr_create.PR_CREATE_W, win.w - 80));
 
     // As the create dialog has it: where it goes — where it comes from is
     // fixed once it is made — its words, who and what, its type.
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
         defer line.deinit();
-        app.branchPicker(0, "Into", &pr_edit_base, .remote);
-        app.fixedField(1, "From", if (pr.detail) |d| d.head else "");
+        pr_create.branchPicker(0, "Into", &pr_edit_base, .remote);
+        pr_create.fixedField(1, "From", if (pr.detail) |d| d.head else "");
     }
     var entered = false;
     _ = dialog_views.dialogField(@src(), 0, "Title", &pr_edit_title, "What it does", false, &entered);
@@ -98,20 +99,20 @@ pub fn prEditDialog() void {
     {
         var line = dvui.box(@src(), .{ .dir = .horizontal, .equal_space = true }, .{ .expand = .horizontal, .background = false, .margin = .{ .h = style.space.lg } });
         defer line.deinit();
-        app.peoplePicker(2, "Reviewers", &pr_edit_reviewers, "Ask for reviews", true, "pr_edit:reviewers");
-        app.peoplePicker(3, "Assignees", &pr_edit_assignees, "Assign someone", false, "pr_edit:assignees");
-        app.labelPicker(4, &pr_edit_labels, "pr_edit:labels");
+        pr_create.peoplePicker(2, "Reviewers", &pr_edit_reviewers, "Ask for reviews", true, "pr_edit:reviewers");
+        pr_create.peoplePicker(3, "Assignees", &pr_edit_assignees, "Assign someone", false, "pr_edit:assignees");
+        pr_create.labelPicker(4, &pr_edit_labels, "pr_edit:labels");
     }
     body.deinit();
     {
         var line = identity_view.dialogFooter(@src());
         defer line.deinit();
-        app.typePicker(5, &pr_edit_draft, "pr_edit:type");
+        pr_create.typePicker(5, &pr_edit_draft, "pr_edit:type");
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (dialog_views.dialogButton(@src(), "Cancel", false)) pr_edit_open = false;
         if (dialog_views.dialogButton(@src(), "Save", true)) savePrEdit();
     }
-    if (dialog_views.escapePressed() and app.pick_open == null) pr_edit_open = false;
+    if (dialog_views.escapePressed() and pr_create.pick_open == null) pr_edit_open = false;
 }
 
 fn savePrEdit() void {
@@ -140,7 +141,7 @@ fn savePrEdit() void {
         if (!known) listAppend(a, &added, login);
     }
     for (d.reviewers) |r| {
-        if (std.mem.eql(u8, r.state, "REQUESTED") and !app.listHas(pr_edit_reviewers.items, r.login)) listAppend(a, &removed, r.login);
+        if (std.mem.eql(u8, r.state, "REQUESTED") and !pr_create.listHas(pr_edit_reviewers.items, r.login)) listAppend(a, &removed, r.login);
     }
     if (added.items.len > 0) github_actions.requestApi("Asking for reviews", "POST", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, added.items)}) catch return, .none);
     if (removed.items.len > 0) github_actions.requestApi("Withdrawing reviews", "DELETE", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{number}), std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, removed.items)}) catch return, .none);
@@ -152,7 +153,7 @@ fn savePrEdit() void {
     var label_names: std.ArrayList([]const u8) = .empty;
     for (d.labels) |l| label_names.append(a, l.name) catch {};
     if (!sameNames(pr_edit_labels.items, label_names.items)) {
-        github_actions.requestApi("Labelling", "PUT", github_actions.apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{app.jsonCommaList(a, pr_edit_labels.items)}) catch return, .none);
+        github_actions.requestApi("Labelling", "PUT", github_actions.apiPath(&path, "/issues/{d}/labels", .{number}), std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{pr_create.jsonCommaList(a, pr_edit_labels.items)}) catch return, .none);
     }
 
     // Ready for review, or back to a draft.

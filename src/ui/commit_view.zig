@@ -18,6 +18,7 @@ const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
 const pr_conversation = @import("pr_conversation.zig");
 const pr_editor = @import("pr_editor.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === Commit messages ===
@@ -2415,7 +2416,7 @@ fn recentMessages(src: std.builtin.SourceLocation) void {
     defer p.end();
     const m = p.menu orelse return;
     dialog_views.dropHeading(@src(), 0, "RECENT MESSAGES");
-    var list = app.pickList();
+    var list = pr_create.pickList();
     defer list.deinit();
     var seen: [12][]const u8 = undefined;
     var n: usize = 0;
@@ -2429,7 +2430,7 @@ fn recentMessages(src: std.builtin.SourceLocation) void {
         n += 1;
         // Cut at a width, not the whole message: the menu would span the window.
         var fit: [rebase_view.MAX_SHOWN_LINE]u8 = undefined;
-        if (app.pickRow(n, graph_view.fitText(&fit, c.summary, style.small(), 420), "", false, null)) {
+        if (pr_create.pickRow(n, graph_view.fitText(&fit, c.summary, style.small(), 420), "", false, null)) {
             app.commit_summary.clearRetainingCapacity();
             app.commit_summary.appendSlice(app.gpa, c.summary) catch {};
             m.close();
@@ -2445,7 +2446,7 @@ fn coAuthorMenu(src: std.builtin.SourceLocation) void {
     defer p.end();
     const m = p.menu orelse return;
     dialog_views.dropHeading(@src(), 0, "ADD A CO-AUTHOR");
-    var list = app.pickList();
+    var list = pr_create.pickList();
     defer list.deinit();
     var seen: [30][]const u8 = undefined;
     var n: usize = 0;
@@ -2457,7 +2458,7 @@ fn coAuthorMenu(src: std.builtin.SourceLocation) void {
         if (had) continue;
         seen[n] = c.email;
         n += 1;
-        if (app.pickRow(n, c.author, c.email, false, null)) {
+        if (pr_create.pickRow(n, c.author, c.email, false, null)) {
             addCoAuthor(c.author, c.email);
             m.close();
         }
@@ -2468,7 +2469,7 @@ fn coAuthorMenu(src: std.builtin.SourceLocation) void {
 /// A pill whose menu drops as a select's does: under it, or over it where
 /// the window has no room below — never on top of it. Its list scrolls past
 /// a height.
-fn pillMenu(src: std.builtin.SourceLocation, tag: []const u8, icon: []const u8, margin: dvui.Rect, hint: []const u8) app.Picker {
+fn pillMenu(src: std.builtin.SourceLocation, tag: []const u8, icon: []const u8, margin: dvui.Rect, hint: []const u8) pr_create.Picker {
     var button = window_chrome.DropButton.begin(src, .{
         .tag = tag,
         .min_size_content = .{ .h = 26 },

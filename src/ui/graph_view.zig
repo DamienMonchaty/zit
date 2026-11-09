@@ -16,6 +16,7 @@ const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
 const pr_editor = @import("pr_editor.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === Graph filter ===
@@ -607,7 +608,7 @@ pub fn refMenu(
 ) void {
     const ctx = dvui.context(src, .{ .rect = rect }, .{ .id_extra = id });
     defer ctx.deinit();
-    app.openContextAt(ctx, open_at);
+    pr_create.openContextAt(ctx, open_at);
 
     const cp = ctx.activePoint() orelse return;
 
@@ -1203,7 +1204,7 @@ fn authorHeader() void {
 
     const field = dialog_views.searchField(@src(), &author_filter, "Find an author…", "author_filter", .{ .x = style.space.xs, .y = style.space.xs, .w = style.space.xs, .h = style.space.sm });
     dialog_views.focusOnce(field);
-    if (app.pickRow(9000, "All authors", "", picked == 0, null)) {
+    if (pr_create.pickRow(9000, "All authors", "", picked == 0, null)) {
         clearAuthors();
         m.close();
     }

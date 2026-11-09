@@ -18,6 +18,7 @@ const repo_settings = @import("repo_settings.zig");
 const repo_io = @import("../core/repo_io.zig");
 const github_actions = @import("../github/github_actions.zig");
 const github_connect = @import("../github/github_connect.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === An operation under way ===
@@ -356,7 +357,7 @@ fn sectionRows(section: diff_view.Section, id: usize, h: git.History, si: *const
     // The three sections that list something other than a ref never reach the
     // loop below.
     if (section == .stashes) {
-        for (h.stashes, 0..) |entry, i| app.stashRow(@src(), entry, id * 1000 + i);
+        for (h.stashes, 0..) |entry, i| pr_create.stashRow(@src(), entry, id * 1000 + i);
         return null;
     }
     if (section == .remotes) {
@@ -374,7 +375,7 @@ fn sectionRows(section: diff_view.Section, id: usize, h: git.History, si: *const
         return sideRows(items.items, h, si);
     }
     if (section == .worktrees) {
-        for (h.worktrees, 0..) |entry, i| app.worktreeRow(@src(), entry, id * 1000 + i);
+        for (h.worktrees, 0..) |entry, i| pr_create.worktreeRow(@src(), entry, id * 1000 + i);
         return null;
     }
     if (section == .pulls) {
@@ -384,7 +385,7 @@ fn sectionRows(section: diff_view.Section, id: usize, h: git.History, si: *const
             .ready => if (pr.list.len == 0) sidebarNote(@src(), "None open."),
             .idle => {},
         }
-        for (pr.list, 0..) |entry, i| app.requestRow(@src(), entry, id * 1000 + i);
+        for (pr.list, 0..) |entry, i| pr_create.requestRow(@src(), entry, id * 1000 + i);
         return null;
     }
     if (section == .issues) {
@@ -394,7 +395,7 @@ fn sectionRows(section: diff_view.Section, id: usize, h: git.History, si: *const
             .ready => if (pr.issues.len == 0) sidebarNote(@src(), "None open."),
             .idle => {},
         }
-        for (pr.issues, 0..) |entry, i| app.issueRow(@src(), entry, id * 1000 + i);
+        for (pr.issues, 0..) |entry, i| pr_create.issueRow(@src(), entry, id * 1000 + i);
         return null;
     }
 
@@ -432,7 +433,7 @@ fn sideRows(items: []const SideItem, h: git.History, si: *const dvui.ScrollInfo)
     for (items[first..last], first..) |item, i| switch (item) {
         .remote => |r| remoteRow(@src(), h.remotes[r], i),
         // Its own `@src()`: the section's header uses the caller's.
-        .ref => |r| if (app.refRow(@src(), h.refs[r], i)) {
+        .ref => |r| if (pr_create.refRow(@src(), h.refs[r], i)) {
             chosen = h.refs[r];
         },
     };
@@ -502,7 +503,7 @@ fn sectionMenu(
 ) void {
     const ctx = dvui.context(src, .{ .rect = rect }, .{ .id_extra = id });
     defer ctx.deinit();
-    app.openContextAt(ctx, open_at);
+    pr_create.openContextAt(ctx, open_at);
 
     const cp = ctx.activePoint() orelse return;
 
@@ -719,7 +720,7 @@ pub fn loadingSpinner(src: std.builtin.SourceLocation) void {
 /// The form for a new request, filled from the commits.
 pub fn requestCreateRequest() void {
     if (pr.host == .none) return github_actions.setCommandError("No pull requests here: the repository is on no host Zit knows, or the integrations are off in the settings.");
-    app.openPrCreate();
+    pr_create.openPrCreate();
 }
 
 // === Centre: the interactive rebase composer ===

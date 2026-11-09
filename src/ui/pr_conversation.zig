@@ -12,6 +12,7 @@ const repo_settings = @import("repo_settings.zig");
 const github_actions = @import("../github/github_actions.zig");
 const pr_list = @import("pr_list.zig");
 const pr_editor = @import("pr_editor.zig");
+const pr_create = @import("pr_create.zig");
 const app = @import("../main.zig");
 
 // === A request's conversation ===
@@ -225,19 +226,19 @@ fn sideHeading(kind: SideKind, d: pr.Detail) void {
     const menu = button.open();
     defer button.end(menu);
     const m = menu orelse {
-        if (app.pick_open == id) app.pick_open = null;
+        if (pr_create.pick_open == id) pr_create.pick_open = null;
         return;
     };
     if (!editable) return m.close();
     // Opened: the list as the request has it, and who can be asked read.
-    if (app.pick_open != id) {
-        app.pick_open = id;
-        app.pick_filter.clearRetainingCapacity();
+    if (pr_create.pick_open != id) {
+        pr_create.pick_open = id;
+        pr_create.pick_filter.clearRetainingCapacity();
         side_list.clearRetainingCapacity();
         switch (kind) {
-            .reviewers => for (d.reviewers) |r| app.listToggle(&side_list, r.login),
-            .assignees => for (d.assignees) |login| app.listToggle(&side_list, login),
-            .labels => for (d.labels) |l| app.listToggle(&side_list, l.name),
+            .reviewers => for (d.reviewers) |r| pr_create.listToggle(&side_list, r.login),
+            .assignees => for (d.assignees) |login| pr_create.listToggle(&side_list, login),
+            .labels => for (d.labels) |l| pr_create.listToggle(&side_list, l.name),
         }
         pr.loadMeta(app.repo_path.items);
     }
@@ -245,19 +246,19 @@ fn sideHeading(kind: SideKind, d: pr.Detail) void {
     const a = dvui.currentWindow().arena();
     var path: [512]u8 = undefined;
     switch (kind) {
-        .reviewers => if (app.peopleRows(&side_list, true)) |login| {
+        .reviewers => if (pr_create.peopleRows(&side_list, true)) |login| {
             const body = std.fmt.allocPrint(a, "{{\"reviewers\":{s}}}", .{github_actions.jsonList(a, login)}) catch return;
-            if (app.listHas(side_list.items, login))
+            if (pr_create.listHas(side_list.items, login))
                 github_actions.requestApi("Asking for a review", "POST", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none)
             else
                 github_actions.requestApi("Withdrawing a review", "DELETE", github_actions.apiPath(&path, "/pulls/{d}/requested_reviewers", .{d.number}), body, .none);
         },
-        .assignees => if (app.peopleRows(&side_list, false)) |_| {
+        .assignees => if (pr_create.peopleRows(&side_list, false)) |_| {
             const body = std.fmt.allocPrint(a, "{{\"assignees\":{s}}}", .{github_actions.jsonList(a, side_list.items)}) catch return;
             github_actions.requestApi("Assigning", "PATCH", github_actions.apiPath(&path, "/issues/{d}", .{d.number}), body, .none);
         },
-        .labels => if (app.labelRows(&side_list)) |_| {
-            const body = std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{app.jsonCommaList(a, side_list.items)}) catch return;
+        .labels => if (pr_create.labelRows(&side_list)) |_| {
+            const body = std.fmt.allocPrint(a, "{{\"labels\":{s}}}", .{pr_create.jsonCommaList(a, side_list.items)}) catch return;
             github_actions.requestApi("Labelling", "PUT", github_actions.apiPath(&path, "/issues/{d}/labels", .{d.number}), body, .none);
         },
     }
